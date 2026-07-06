@@ -101,6 +101,65 @@ def test_trailing_adv_sigma_excludes_as_of_day():
     assert sig0.iloc[0] == pytest.approx(sig1.iloc[0])
 
 
+# ------------------------------------------------------ cost ledger + sensitivity
+def test_ledger_off_by_default(model):
+    """No ledger entry unless record=True (optimizer probes must not pollute the tally)."""
+    model.cost_bps(trade_usd=5e6, adv_usd=1e8, sigma_daily=0.05, sleeve="equity",
+                   instrument_ids=["X"])
+    assert model.ledger == []
+
+
+def test_ledger_reconciles_charged_bit_exact(model):
+    """The ledger's per-name charged vector and its notional-weighted total reconcile
+    bit-for-bit with what cost_bps returned (mixed floor / impact / cap / missing-ADV)."""
+    idx = ["A", "B", "C", "D", "E"]
+    trades = pd.Series([0.0, 1.0, 5e6, 2e7, 1e5], index=idx)      # zero / tiny / mid / big / mid
+    adv = pd.Series([1e8, 1e9, 1e8, 1e8, np.nan], index=idx)      # E has missing ADV -> cap
+    sigma = pd.Series([0.05, 0.01, 0.05, 0.05, 0.05], index=idx)
+    returned = model.cost_bps(trades, adv, sigma, "equity", instrument_ids=idx, record=True)
+
+    assert len(model.ledger) == 1
+    e = model.ledger[0]
+    # per-name charged vector is a bit-exact copy of the returned Series
+    assert e["charged"] == returned.to_numpy().tolist()
+    # notional-weighted charged reconciles bit-exact
+    notion = trades.abs().to_numpy()
+    assert e["charged_bps_x_notional"] == float((returned.to_numpy() * notion).sum())
+    assert e["total_notional"] == float(notion.sum())
+
+
+def test_cost_sensitivity_m1_reconciles_to_one(model):
+    """The counterfactual at multiplier 1.0 equals the realized charge exactly."""
+    model.cost_bps(pd.Series([5e6, 2e7], index=["A", "B"]), adv_usd=1e8,
+                   sigma_daily=0.05, sleeve="equity", record=True)
+    model.cost_bps(pd.Series([3e6, 1e7], index=["C", "D"]), adv_usd=8e7,
+                   sigma_daily=0.04, sleeve="commodity_etf", record=True)
+    sens = model.cost_sensitivity()
+    assert sens[1.0] == 1.0
+
+
+def test_cost_sensitivity_floor_bound_invariant(model):
+    """Floor-bound trades (impact ~ 0) are invariant to the impact multiplier."""
+    model.cost_bps(pd.Series([1.0, 2.0, 3.0], index=["A", "B", "C"]),
+                   adv_usd=1e12, sigma_daily=0.01, sleeve="equity", record=True)
+    sens = model.cost_sensitivity(multipliers=(1.0, 10.0 / 3.0, 20.0 / 3.0))
+    for r in sens.values():
+        assert r == pytest.approx(1.0)
+
+
+def test_cost_sensitivity_monotone_nondecreasing(model):
+    """Above the floor, drag is monotone nondecreasing in the impact multiplier, and
+    strictly grows for impact-dominated trades."""
+    model.cost_bps(pd.Series([5e6, 2e7, 8e7], index=["A", "B", "C"]),
+                   adv_usd=1e8, sigma_daily=0.05, sleeve="equity", record=True)
+    ms = (1.0, 2.0, 3.0, 5.0)
+    sens = model.cost_sensitivity(multipliers=ms)
+    vals = [sens[m] for m in ms]
+    assert vals[0] == pytest.approx(1.0)
+    assert np.all(np.diff(vals) >= -1e-12)     # nondecreasing
+    assert vals[-1] > vals[0]                  # impact-dominated -> genuinely grows
+
+
 def test_trailing_adv_sigma_ignores_days_after_as_of():
     """Rows dated after as_of are filtered out entirely and cannot leak in."""
     prices = _toy_prices()

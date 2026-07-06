@@ -28,8 +28,10 @@ variance (documented limitation from Phase 7).
   validation slice); build_factors records it on every gate attempt (pass or fail —
   failed trials count, that is the whole point of multiple-testing control).
 - report.py: when >= 2 recorded trials exist in factors.yaml, var_trials =
-  population variance of recorded val_sharpe values; else fall back to the existing
-  proxy WITH a report caveat naming which path was used.
+  population variance of recorded val_sharpe values **converted to per-observation
+  units (÷ sqrt(252)) to match the DSR algebra's sr_pp** — caught at implementation
+  review: annualized-units variance over-deflates by ~252x; else fall back to the
+  existing proxy WITH a report caveat naming which path was used.
 - deflated_sharpe.py unchanged (it already takes var_trials as an argument).
 
 ## Verification (in-repo)

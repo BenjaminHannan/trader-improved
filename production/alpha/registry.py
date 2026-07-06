@@ -34,6 +34,10 @@ class GateStats:
     decay_halflife_days: float
     net_validation_return: float
     n_dates: int
+    # Annualized net single-factor Sharpe on the validation slice — the per-trial Sharpe the
+    # deflated-Sharpe var_trials is estimated from. Defaulted so old factors.yaml files (which
+    # never recorded it) still load and reconstruct cleanly.
+    val_sharpe: float = float("nan")
 
 
 @dataclass

@@ -26,6 +26,50 @@ from production.backtest.metrics import (ann_return, ann_vol, hit_rate,
 from production.core.config import REPO_ROOT
 
 
+def _recorded_val_sharpes(registry) -> list:
+    """Finite ``gate_stats.val_sharpe`` values recorded in the registry (one per trial).
+
+    Tolerates old ``factors.yaml`` files that never recorded ``val_sharpe`` (key absent)
+    and any non-finite entries — both are simply skipped.
+    """
+    out: list = []
+    try:
+        factors = registry.factors()
+    except Exception:  # noqa: BLE001 - a malformed registry must not sink the report
+        return out
+    for spec in factors.values():
+        gs = spec.get("gate_stats") or {}
+        v = gs.get("val_sharpe")
+        if v is None:
+            continue
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(fv):
+            out.append(fv)
+    return out
+
+
+def _cost_sensitivity_block(result, avg_cost_drag_bps_per_day: float) -> dict | None:
+    """Realized annual cost drag and its counterfactual under each impact-prefactor multiplier."""
+    sens = getattr(result, "_cost_sensitivity", None)
+    if not sens:
+        return None
+    realized_annual = float(avg_cost_drag_bps_per_day) * 252.0
+    levels = [{"multiplier": float(m),
+               "ratio": float(r),
+               "annual_drag_bps": realized_annual * float(r)}
+              for m, r in sorted(sens.items())]
+    return {
+        "realized_annual_drag_bps": realized_annual,
+        "levels": levels,
+        "caveat": ("impact prefactor alpha=0.15 sits BELOW the 0.5-1.0 literature band; "
+                   "drag under x3.3 (alpha~0.5) / x6.7 (alpha~1.0) shows the optimism "
+                   "(research/wiki/questions/research-cost-model-calibration.md)"),
+    }
+
+
 def _sleeve_table(result) -> dict:
     out: dict = {}
     for s in result.sleeve_returns.columns:
@@ -56,14 +100,29 @@ def build_report(result, cfg: dict, registry) -> dict:
     sk = float(skew(net)) if n > 2 else 0.0
     ku = float(kurtosis(net, fisher=False)) if n > 3 else 3.0
 
-    # variance of the trial Sharpes: absent the actual trial cloud, use the (non-normal)
-    # Sharpe-estimator variance as the standard deflation proxy — documented approximation.
+    # variance of the trial Sharpes. Preferred source: the empirical spread of the recorded
+    # single-factor validation Sharpes in the gate ledger (every gated factor is a trial —
+    # Bailey & Lopez de Prado 2014). Absent >= 2 recorded trials, fall back to the (non-normal)
+    # Sharpe-estimator variance proxy. The caveat below names which path was taken.
     radicand = max(1.0 - sk * sr_pp + ((ku - 1.0) / 4.0) * sr_pp * sr_pp, 1e-12)
-    var_trials_sr = radicand / max(n - 1, 1)
+    var_trials_proxy = radicand / max(n - 1, 1)
+    trial_sharpes = _recorded_val_sharpes(registry)
+    if len(trial_sharpes) >= 2:
+        # recorded val_sharpes are ANNUALIZED; the DSR algebra below runs in
+        # per-observation units (sr_pp, daily) — convert before taking the variance
+        # or the deflation is overstated by ~252x.
+        trials_pp = np.asarray(trial_sharpes) / np.sqrt(252.0)
+        var_trials = float(np.var(trials_pp))       # population variance across trials
+        var_trials_source = (f"empirical trial variance from {len(trial_sharpes)} gate "
+                             f"records (recorded validation-slice Sharpes)")
+    else:
+        var_trials = var_trials_proxy
+        var_trials_source = ("Sharpe-estimator variance proxy (fewer than 2 recorded "
+                             "validation-slice Sharpes in the gate ledger)")
 
     n_trials = int(registry.n_trials)
     psr = probabilistic_sharpe(sr_pp, 0.0, n, sk, ku)          # prob true Sharpe > 0
-    dsr = deflated_sharpe(sr_pp, n_trials, var_trials_sr, n, sk, ku)
+    dsr = deflated_sharpe(sr_pp, n_trials, var_trials, n, sk, ku)
     ci_lo, ci_hi = sharpe_ci(net)
 
     attribution = factor_attribution(
@@ -89,6 +148,7 @@ def build_report(result, cfg: dict, registry) -> dict:
         "probabilistic_sharpe": psr,
         "deflated_sharpe": dsr,
         "n_trials": n_trials,
+        "var_trials": var_trials,
         "sharpe_ci95": [ci_lo, ci_hi],
     }
 
@@ -102,10 +162,14 @@ def build_report(result, cfg: dict, registry) -> dict:
         "caveats": {
             "gate_applied": bool(result._gate_applied),
             "borrow_cost_free": True,  # short financing / borrow costs are NOT modeled
+            "var_trials_source": var_trials_source,
             "warnings": list(result._warnings or []),
         },
         "config_echo": _echo_config(cfg),
     }
+    cost_sens = _cost_sensitivity_block(result, headline["avg_cost_drag_bps_per_day"])
+    if cost_sens is not None:
+        report["cost_sensitivity"] = cost_sens
     return report
 
 
@@ -144,9 +208,18 @@ def _human_text(report: dict) -> str:
              f"cost drag     {_fmt(h['avg_cost_drag_bps_per_day'])} bps/day",
              f"PSR (>0)      {_fmt(h['probabilistic_sharpe'])}",
              f"deflated SR   {_fmt(h['deflated_sharpe'])}   (n_trials={h['n_trials']})",
-             f"Sharpe 95% CI [{_fmt(h['sharpe_ci95'][0])}, {_fmt(h['sharpe_ci95'][1])}]",
-             "",
-             "per sleeve:"]
+             f"Sharpe 95% CI [{_fmt(h['sharpe_ci95'][0])}, {_fmt(h['sharpe_ci95'][1])}]"]
+    cs = report.get("cost_sensitivity")
+    if cs:
+        lines.append("")
+        lines.append("cost sensitivity (impact-prefactor counterfactual, alpha=0.15 traded):")
+        lines.append(f"  realized annual drag {_fmt(cs['realized_annual_drag_bps'])} bps of book")
+        for lvl in cs["levels"]:
+            lines.append(f"  x{lvl['multiplier']:.2f}  drag {_fmt(lvl['annual_drag_bps'])} bps"
+                         f"  (x{_fmt(lvl['ratio'])} realized)")
+        lines.append(f"  caveat: {cs['caveat']}")
+    lines.append("")
+    lines.append("per sleeve:")
     for s, m in report["per_sleeve"].items():
         lines.append(f"  {s:<14} Sharpe {_fmt(m['sharpe'])}  ann {_fmt(m['ann_return'])}"
                      f"  vol {_fmt(m['ann_vol'])}  DD {_fmt(m['max_drawdown'])}"
@@ -161,6 +234,8 @@ def _human_text(report: dict) -> str:
     if not cav["gate_applied"]:
         lines.append("WARNING: gate NOT applied — trading candidate factors.")
     lines.append("caveat: borrow / short-financing costs are NOT modeled.")
+    if cav.get("var_trials_source"):
+        lines.append(f"caveat: deflated-SR var_trials = {cav['var_trials_source']}.")
     for w in cav["warnings"]:
         lines.append(f"  - {w}")
     return "\n".join(lines) + "\n"

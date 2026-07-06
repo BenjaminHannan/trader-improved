@@ -74,24 +74,42 @@ def _load_signal_registry() -> dict[str, type]:
     return all_signals()
 
 
+def _annualized_sharpe(net_by_date: pd.Series, horizon: int) -> float:
+    """Annualized Sharpe of a per-rebalance net return stream.
+
+    Each observation is a ``horizon``-day-held net return, so ~``252/horizon`` independent
+    periods fit in a year; that is the annualization factor. Returns NaN when the stream is
+    too short or has no dispersion (nothing to deflate against downstream).
+    """
+    r = pd.Series(net_by_date).astype(float).dropna()
+    if len(r) < 2:
+        return float("nan")
+    sd = float(r.std(ddof=1))
+    if not np.isfinite(sd) or sd == 0.0:
+        return float("nan")
+    periods_per_year = 252.0 / max(int(horizon), 1)
+    return float(r.mean() / sd * np.sqrt(periods_per_year))
+
+
 def _net_validation_return(z_oos: pd.DataFrame, prices: pd.DataFrame,
                            sleeve_map: pd.Series, horizon: int,
-                           costs: dict) -> float:
+                           costs: dict) -> tuple[float, pd.Series]:
     """Approximate net-of-cost return of a top-minus-bottom-quintile long/short book.
 
     Weekly-rebalanced on the OOS z-scores, equal-weight top vs bottom quintile per
     sleeve, held ``horizon`` days forward. Turnover is charged at the per-sleeve floor
-    cost (or the full cost model when available). Returns the summed net return over the
-    OOS slice; only its sign matters to the gate.
+    cost (or the full cost model when available). Returns ``(summed_net, net_by_date)`` —
+    the summed net return over the OOS slice (only its sign matters to the gate) plus the
+    per-rebalance net return series (feeds the validation-slice Sharpe).
     """
     if z_oos.empty:
-        return float("nan")
+        return float("nan"), pd.Series(dtype=float)
     fwd = forward_returns(prices, horizon)
     panel = z_oos.merge(fwd, on=["obs_date", "instrument_id"], how="inner")
     panel["sleeve"] = panel["instrument_id"].map(sleeve_map)
     panel = panel.dropna(subset=["sleeve", "fwd_ret"])
     if panel.empty:
-        return float("nan")
+        return float("nan"), pd.Series(dtype=float)
 
     cost_model = None
     try:  # optional dependency, written in parallel
@@ -105,6 +123,8 @@ def _net_validation_return(z_oos: pd.DataFrame, prices: pd.DataFrame,
 
     prev_w: dict = {}
     net = 0.0
+    net_dates: list = []
+    net_vals: list = []
     for _date, day in panel.groupby("obs_date", sort=True):
         gross = 0.0
         w_today: dict = {}
@@ -132,11 +152,15 @@ def _net_validation_return(z_oos: pd.DataFrame, prices: pd.DataFrame,
             dw = abs(w_today.get(iid, 0.0) - prev_w.get(iid, 0.0))
             floor = floors.get(sleeve_map.get(iid), 0.0)
             cost += dw * floor / 1e4
-        net += gross - cost
+        net_t = gross - cost
+        net += net_t
+        net_dates.append(_date)
+        net_vals.append(net_t)
         prev_w = w_today
 
     _ = cost_model  # reserved for a richer impact estimate; floor path is authoritative
-    return float(net)
+    net_by_date = pd.Series(net_vals, index=pd.DatetimeIndex(net_dates))
+    return float(net), net_by_date
 
 
 def run_ic_report(start, end, lake_root, apply: bool) -> int:
@@ -194,11 +218,13 @@ def run_ic_report(start, end, lake_root, apply: bool) -> int:
         halflife = decay_halflife(decay)
 
         z_oos = z[z["obs_date"] >= cut]
-        net = _net_validation_return(z_oos, prices, sleeve_map, horizon, costs)
+        net, net_by_date = _net_validation_return(z_oos, prices, sleeve_map, horizon, costs)
+        val_sharpe = _annualized_sharpe(net_by_date, horizon)
 
         stats = GateStats(train_ic=train_ic, train_tstat=tstat, oos_ic=oos_ic,
                           decay_halflife_days=float(halflife),
-                          net_validation_return=net, n_dates=int(len(ic_by_date)))
+                          net_validation_return=net, n_dates=int(len(ic_by_date)),
+                          val_sharpe=val_sharpe)
         verdict = registry.gate(name, stats)
         rows.append({"name": name, "sleeves": ",".join(spec.get("sleeves", [])),
                      "stats": stats, "verdict": verdict})

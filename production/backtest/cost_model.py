@@ -27,6 +27,10 @@ class CostModel:
         self.overrides = self.cfg.get("instrument_overrides") or {}
         # Every capped / bad-ADV name lands here; the audit layer surfaces it. Never silent.
         self.cap_warnings: list[dict] = []
+        # Per-charge decomposition ledger — one entry per `cost_bps(..., record=True)` call
+        # (i.e. one rebalance's realized trades). Feeds `cost_sensitivity`; off by default so
+        # the optimizer's representative-trade probes never pollute the realized-cost tally.
+        self.ledger: list[dict] = []
 
     def _floor_hs(self, instrument_id, sleeve: str) -> tuple[float, float]:
         """Resolve (floor_bps, half_spread_bps): per-instrument override wins over sleeve default."""
@@ -37,12 +41,16 @@ class CostModel:
         return float(spec["floor_bps"]), float(spec["half_spread_bps"])
 
     def cost_bps(self, trade_usd, adv_usd, sigma_daily, sleeve,
-                 instrument_ids=None) -> pd.Series:
+                 instrument_ids=None, record: bool = False) -> pd.Series:
         """Cost in bps per name. Accepts scalars or aligned Series; returns a Series.
 
         - zero (or NaN) trade -> 0 cost (not trading is free);
         - missing / non-positive ADV -> cap_bps (unknown liquidity is treated as worst case);
         - otherwise max(floor, half_spread + sqrt-impact), hard-capped at cap_bps.
+
+        When ``record`` is true, the per-name floor / half-spread / impact / notional / charged
+        vectors and their notional-weighted aggregates are appended to ``self.ledger`` (one
+        entry per call). The returned Series is identical whether or not recording is on.
         """
         # Establish the output index from the first Series-like argument, else instrument_ids.
         idx = None
@@ -70,6 +78,12 @@ class CostModel:
             sl = pd.Series([sleeve] * len(idx), index=idx)
 
         out = np.empty(len(idx), dtype=float)
+        # Per-name decomposition, stored so a counterfactual charge max(floor, spread + m*impact)
+        # capped at cap_bps reproduces the realized charge exactly at m=1 (see cost_sensitivity).
+        floors_v = np.zeros(len(idx), dtype=float)
+        spreads_v = np.zeros(len(idx), dtype=float)
+        impacts_v = np.zeros(len(idx), dtype=float)
+        notional_v = np.zeros(len(idx), dtype=float)
         for i, iid in enumerate(idx):
             s = sl.iloc[i]
             floor, hs = self._floor_hs(iid, s)
@@ -77,8 +91,11 @@ class CostModel:
             if not np.isfinite(tr) or tr == 0.0:
                 out[i] = 0.0
                 continue
+            notional_v[i] = tr
             if not np.isfinite(a) or a <= 0.0:
                 out[i] = self.cap_bps
+                # Unknown liquidity: charged at the cap and invariant to the impact prefactor.
+                floors_v[i] = self.cap_bps
                 self.cap_warnings.append(
                     {"instrument_id": iid, "sleeve": s, "reason": "missing_adv",
                      "cost_bps": self.cap_bps})
@@ -91,7 +108,54 @@ class CostModel:
                     {"instrument_id": iid, "sleeve": s, "reason": "cap", "raw_bps": cost})
                 cost = self.cap_bps
             out[i] = cost
+            floors_v[i] = floor
+            spreads_v[i] = hs
+            impacts_v[i] = impact
+        if record:
+            floor_bound = np.maximum(floors_v, spreads_v + impacts_v) <= floors_v
+            self.ledger.append({
+                "sleeve": sleeve if isinstance(sleeve, str) else list(sl),
+                "floor": floors_v.tolist(),
+                "spread": spreads_v.tolist(),
+                "impact": impacts_v.tolist(),
+                "notional": notional_v.tolist(),
+                "charged": out.tolist(),
+                "floor_bound_notional": float((notional_v * floor_bound).sum()),
+                "spread_bps_x_notional": float((spreads_v * notional_v).sum()),
+                "impact_bps_x_notional": float((impacts_v * notional_v).sum()),
+                "floor_bps_x_notional": float((floors_v * notional_v).sum()),
+                "total_notional": float(notional_v.sum()),
+                "charged_bps_x_notional": float((out * notional_v).sum()),
+            })
         return pd.Series(out, index=idx)
+
+    def cost_sensitivity(self, multipliers=(1.0, 10.0 / 3.0, 20.0 / 3.0)) -> dict:
+        """Counterfactual annualized-drag-scaling ratios by impact-prefactor multiplier.
+
+        For each multiplier ``m`` the realized per-name impact is scaled by ``m`` (holding
+        floors and half-spreads fixed) and re-charged as ``min(max(floor, spread + m*impact),
+        cap)``; the notional-weighted total is divided by the realized notional-weighted total.
+        ``m = 1.0`` reproduces the realized charge and therefore reconciles to exactly 1.0;
+        floor-bound trades are invariant to ``m``; the ratio is monotone nondecreasing in ``m``.
+
+        Returns ``{m: counterfactual_total_bps_x_notional / realized_total_bps_x_notional}``.
+        The traded costs (alpha=0.15, a CLAUDE.md hard rule) are never altered — this is a
+        reporting-only sensitivity; alpha=0.15 sits below the 0.5-1.0 literature band
+        (research/wiki/questions/research-cost-model-calibration.md).
+        """
+        realized = sum(e["charged_bps_x_notional"] for e in self.ledger)
+        out: dict = {}
+        for m in multipliers:
+            cf_total = 0.0
+            for e in self.ledger:
+                floors = np.asarray(e["floor"], dtype=float)
+                spreads = np.asarray(e["spread"], dtype=float)
+                impacts = np.asarray(e["impact"], dtype=float)
+                notional = np.asarray(e["notional"], dtype=float)
+                cf = np.minimum(np.maximum(floors, spreads + m * impacts), self.cap_bps)
+                cf_total += float((cf * notional).sum())
+            out[m] = (cf_total / realized) if realized else float("nan")
+        return out
 
 
 def trailing_adv_sigma(prices: pd.DataFrame, as_of, window: int = 20

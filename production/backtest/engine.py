@@ -82,6 +82,7 @@ class BacktestResult:
     _factors_used: list | None = None
     _gate_applied: bool = True
     _warnings: list = field(default_factory=list)
+    _cost_sensitivity: dict | None = None           # {multiplier: annual-drag-scaling ratio}
 
 
 def _prices_wide(prices: pd.DataFrame, ids, value: str = "close") -> pd.DataFrame:
@@ -434,7 +435,7 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
             dw = (w_new - wp).abs()
             trade_usd = dw * _NOMINAL_AUM
             cost_real = cost_model.cost_bps(trade_usd, adv, sigma, sleeve,
-                                            instrument_ids=rm_ids)
+                                            instrument_ids=rm_ids, record=True)
             cost_return = float((dw * cost_real / 1e4).sum())
 
             rebal_weights[t] = w_new
@@ -493,10 +494,13 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     gross_out = np.empty(len(union_idx), dtype=float)
     mult_out = np.empty(len(union_idx), dtype=float)
     eq = 1.0
+    prev_mult: float | None = None   # carried across dates so the vol-target deadband binds
     for k, day in enumerate(union_idx):
         rn = pd.Series(realized_net, index=pd.DatetimeIndex(realized_dates))
         eqs = pd.Series(equity_vals, index=pd.DatetimeIndex(realized_dates))
-        mult = overlay_multiplier(rn, eqs, macro_panel, day, cfg)
+        mult = overlay_multiplier(rn, eqs, macro_panel, day, cfg,
+                                  prev_multiplier=prev_mult)
+        prev_mult = mult
         net = float(total_pre_net.iloc[k] * mult)
         gross = float(total_pre_gross.iloc[k] * mult)
         net_out[k] = net
@@ -520,6 +524,10 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
            for f, d in weights_by_factor.items()}
     ic_rvt = _ic_realized_vs_training(ic_tables, icstar, factor_sleeves, grid[0], end)
 
+    # Counterfactual cost sensitivity from the realized-trade ledger (alpha=0.15 unchanged —
+    # a CLAUDE.md hard rule; this is reporting-only, see research-cost-model-calibration.md).
+    cost_sensitivity = cost_model.cost_sensitivity() if cost_model.ledger else None
+
     result = BacktestResult(
         total_returns=total_returns,
         total_gross_returns=total_gross_returns,
@@ -534,6 +542,7 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
         _factors_used=list(z_panels.keys()),
         _gate_applied=gate_applied,
         _warnings=warn_list,
+        _cost_sensitivity=cost_sensitivity,
     )
     result.report = build_report(result, cfg, registry)
     return result

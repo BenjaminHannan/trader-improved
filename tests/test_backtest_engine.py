@@ -7,12 +7,17 @@ for a second (corrupted) engine run — that is the money test and is worth it.
 """
 from __future__ import annotations
 
+import copy
+import shutil
 import subprocess
 import sys
 
 import numpy as np
 import pandas as pd
 import pytest
+import yaml
+
+from production.alpha.registry import FactorRegistry, GateStats
 
 from production.backtest.attribution import factor_attribution, per_alpha_contribution
 from production.backtest.bootstrap import sharpe_ci, stationary_bootstrap
@@ -166,6 +171,97 @@ def test_write_report_creates_both_files(result, tmp_path):
     with open(path) as f:
         loaded = json.load(f)
     assert "headline" in loaded
+
+
+# ============================================================ cost sensitivity block
+def test_report_cost_sensitivity_block(result):
+    """The report carries the counterfactual cost-sensitivity block with all multipliers,
+    m=1 reconciling to 1.0 and the wiki caveat cited."""
+    cs = result.report["cost_sensitivity"]
+    assert cs["realized_annual_drag_bps"] > 0.0
+    got = sorted(round(l["multiplier"], 4) for l in cs["levels"])
+    want = sorted(round(m, 4) for m in (1.0, 10.0 / 3.0, 20.0 / 3.0))
+    assert got == want
+    r1 = next(l["ratio"] for l in cs["levels"] if abs(l["multiplier"] - 1.0) < 1e-9)
+    assert r1 == pytest.approx(1.0)
+    # higher prefactor -> weakly larger drag
+    ratios = [l["ratio"] for l in sorted(cs["levels"], key=lambda x: x["multiplier"])]
+    assert np.all(np.diff(ratios) >= -1e-9)
+    assert "research-cost-model-calibration" in cs["caveat"]
+
+
+# ============================================================ DSR var_trials path switch
+def test_var_trials_empirical_path(result, tmp_path):
+    """>= 2 recorded gate val_sharpes -> empirical trial variance; caveat names the path."""
+    src = REPO_ROOT / "configs" / "factors.yaml"
+    dst = tmp_path / "factors.yaml"
+    shutil.copy(src, dst)
+    reg = FactorRegistry(dst)
+    names = list(reg.cfg["factors"])[:3]
+    for nm, vs in zip(names, (0.6, 1.1, -0.4)):
+        reg.cfg["factors"][nm]["gate_stats"] = {"val_sharpe": vs}
+    rep = build_report(result, backtest_config(), reg)
+    src_str = rep["caveats"]["var_trials_source"]
+    assert "empirical trial variance from 3 gate records" in src_str
+    # var_trials is the population variance of the recorded (annualized) Sharpes
+    # converted to per-observation units to match the DSR algebra's sr_pp
+    expected = float(np.var(np.array([0.6, 1.1, -0.4]) / np.sqrt(252.0)))
+    assert rep["headline"]["var_trials"] == pytest.approx(expected)
+
+
+def test_var_trials_proxy_path(result):
+    """No recorded val_sharpes (empty gate_stats) -> the estimator-variance proxy path."""
+    reg = FactorRegistry()  # stock factors.yaml: gate_stats all empty
+    rep = build_report(result, backtest_config(), reg)
+    src_str = rep["caveats"]["var_trials_source"]
+    assert "proxy" in src_str
+    assert rep["headline"]["var_trials"] > 0.0
+
+
+def test_gatestats_val_sharpe_roundtrip(tmp_path):
+    """val_sharpe persists through record/save and old yamls (key absent) still load."""
+    src = REPO_ROOT / "configs" / "factors.yaml"
+    dst = tmp_path / "factors.yaml"
+    shutil.copy(src, dst)
+    reg = FactorRegistry(dst)
+    stats = GateStats(train_ic=0.03, train_tstat=3.0, oos_ic=0.02,
+                      decay_halflife_days=10.0, net_validation_return=0.01,
+                      n_dates=300, val_sharpe=0.75)
+    reg.record("mom_12_1", reg.gate("mom_12_1", stats))
+    reg.save()
+    reloaded = yaml.safe_load(open(dst))
+    assert reloaded["factors"]["mom_12_1"]["gate_stats"]["val_sharpe"] == pytest.approx(0.75)
+    # old-yaml tolerance: reconstruct GateStats from a dict lacking val_sharpe -> default NaN
+    gs_dict = {k: v for k, v in reloaded["factors"]["mom_12_1"]["gate_stats"].items()
+               if k != "val_sharpe"}
+    assert np.isnan(GateStats(**gs_dict).val_sharpe)
+
+
+# ============================================================ overlay deadband threading
+_DB_EQ = {f"EQ:DBS{i:02d}:2000-01-03": "equity" for i in range(6)}
+
+
+def _run_with_deadband(deadband: float):
+    cfg = copy.deepcopy(backtest_config())
+    ov = cfg["overlays"]
+    ov["vol_target"]["deadband"] = deadband
+    ov["vol_target"]["target"] = 0.02        # keep the multiplier off the clip bounds & varying
+    ov["vol_target"]["ewma_halflife"] = None  # raw window -> more day-to-day variation
+    ov["drawdown_control"]["threshold"] = 10.0   # never triggers
+    ov["macro_derisk"]["enabled"] = False        # isolate the vol-target overlay
+    data = {"prices": make_gbm_prices(_DB_EQ, start="2016-01-01", end="2019-06-30")}
+    return run_backtest(data, pd.Series(_DB_EQ), cfg=cfg)
+
+
+def test_overlay_deadband_reduces_multiplier_changes():
+    """Threading the previous vol-target multiplier makes the deadband bind during a run:
+    a 50% deadband yields strictly fewer distinct overlay multipliers than no deadband."""
+    r0 = _run_with_deadband(0.0)
+    r5 = _run_with_deadband(0.5)
+    n0 = r0.overlay.round(10).nunique()
+    n5 = r5.overlay.round(10).nunique()
+    assert n0 > 1                # the no-deadband multiplier genuinely varies
+    assert n5 < n0               # hysteresis collapses within-band moves
 
 
 # ============================================================ metrics known answers
