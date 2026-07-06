@@ -10,10 +10,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from production.risk.covariance import ewma_cov
+from production.core.config import risk_config
+from production.risk.covariance import ewma_cov, ledoit_wolf_shrinkage
 from production.risk.exposures import build_exposures
 from production.risk.factor_returns import estimate_factor_returns
-from production.risk.model import RiskModel, validate_against_french
+from production.risk.model import RiskModel, _shrunk_cov, validate_against_french
 from production.risk.specific import specific_vol
 
 AS_OF = pd.Timestamp("2021-12-31")
@@ -216,3 +217,124 @@ def test_validate_against_french_synthetic():
     out = validate_against_french(fr, french)
     assert out["market"] > 0.9
     assert out["momentum"] > 0.9
+
+
+# ------------------------------------------------- Ledoit-Wolf shrinkage
+def _sim_common_factor(n, t, rng):
+    """Returns (DataFrame X, true Sigma) for r = beta*f + eps, common factor."""
+    betas = rng.uniform(0.9, 1.1, n)           # homogeneous block: CC target is apt
+    sig_f = 0.008
+    d = rng.uniform(0.008, 0.012, n) ** 2      # specific daily variances
+    f = rng.normal(0.0, sig_f, t)
+    eps = rng.normal(0.0, 1.0, (t, n)) * np.sqrt(d)
+    X = np.outer(f, betas) + eps
+    sigma_true = sig_f ** 2 * np.outer(betas, betas) + np.diag(d)
+    cols = [f"n{i:02d}" for i in range(n)]
+    return pd.DataFrame(X, columns=cols), sigma_true
+
+
+def test_lw_cc_beats_sample_frobenius_montecarlo():
+    """LW constant-correlation beats the sample covariance in mean Frobenius
+    loss under a common-factor truth; intensity always lands in [0, 1]."""
+    n, t, n_trials = 10, 120, 40
+    rng = np.random.default_rng(2024)
+    lw_losses, sample_losses = [], []
+    for _ in range(n_trials):
+        X, sigma_true = _sim_common_factor(n, t, rng)
+        sigma_lw, delta = ledoit_wolf_shrinkage(X, target="constant_correlation")
+        assert 0.0 <= delta <= 1.0
+        S = np.cov(X.to_numpy(), rowvar=False, bias=True)  # 1/T MLE, matches LW's S
+        lw_losses.append(np.linalg.norm(sigma_lw.to_numpy() - sigma_true))
+        sample_losses.append(np.linalg.norm(S - sigma_true))
+    assert np.mean(lw_losses) < np.mean(sample_losses)
+
+
+def test_lw_delta_decreases_with_sample_size():
+    """More data -> less estimation noise -> lower shrinkage intensity."""
+    d_small, d_large = [], []
+    for seed in range(12):
+        rng = np.random.default_rng(seed)
+        X_s, _ = _sim_common_factor(8, 80, rng)
+        X_l, _ = _sim_common_factor(8, 2000, rng)
+        _, ds = ledoit_wolf_shrinkage(X_s, target="constant_correlation")
+        _, dl = ledoit_wolf_shrinkage(X_l, target="constant_correlation")
+        d_small.append(ds)
+        d_large.append(dl)
+    assert np.mean(d_small) > np.mean(d_large)
+
+
+def test_ewma_reduces_teff_raises_delta():
+    """EWMA weighting shrinks the effective sample size (Kish), so on the same
+    data the LW intensity is strictly larger than the equal-weight intensity."""
+    rng = np.random.default_rng(7)
+    X, _ = _sim_common_factor(8, 500, rng)
+    _, delta_eq = ledoit_wolf_shrinkage(X, target="constant_correlation",
+                                        ewma_halflife=None)
+    _, delta_ew = ledoit_wolf_shrinkage(X, target="constant_correlation",
+                                        ewma_halflife=30.0)
+    assert 0.0 < delta_eq < delta_ew <= 1.0
+
+
+def test_lw_diagonal_offdiagonals_shrunk_toward_zero():
+    """For independent series the diagonal-target estimate has every off-diagonal
+    strictly closer to zero than the sample covariance's."""
+    rng = np.random.default_rng(11)
+    n, t = 6, 200
+    cols = [f"c{i}" for i in range(n)]
+    scales = rng.uniform(0.005, 0.02, n)
+    X = pd.DataFrame(rng.normal(0, 1, (t, n)) * scales, columns=cols)
+    sigma_lw, delta = ledoit_wolf_shrinkage(X, target="diagonal")
+    assert 0.0 < delta <= 1.0
+    S = np.cov(X.to_numpy(), rowvar=False, bias=True)
+    lw = sigma_lw.to_numpy()
+    off = ~np.eye(n, dtype=bool)
+    assert np.all(np.abs(lw[off]) < np.abs(S[off]))
+
+
+def test_lw_variants_psd():
+    """Both LW targets return PSD matrices."""
+    rng = np.random.default_rng(21)
+    X, _ = _sim_common_factor(10, 150, rng)
+    for target in ("diagonal", "constant_correlation"):
+        for hl in (None, 60.0):
+            sigma, _ = ledoit_wolf_shrinkage(X, target=target, ewma_halflife=hl)
+            eig = np.linalg.eigvalsh(sigma.to_numpy())
+            assert eig.min() >= -1e-10
+
+
+def test_riskmodel_build_psd_under_lw_default(price_panel, sleeve_of):
+    """Default config (factor=lw, instrument=lw_cc) keeps both a structural and a
+    small sleeve PSD through the full RiskModel.build path."""
+    cfg = risk_config()
+    assert cfg["factor_covariance"]["method"] == "lw"
+    assert cfg["instrument_covariance"]["method"] == "lw_cc"
+    for sleeve in ("equity", "fx_etf"):
+        ids = _ids(sleeve_of, sleeve)
+        model = RiskModel.build(price_panel, sleeve, AS_OF, ids, cfg)
+        cov = model.covariance().to_numpy()
+        eig = np.linalg.eigvalsh(0.5 * (cov + cov.T))
+        assert eig.min() >= -1e-8
+    # equity has enough history for the structural (LW) factor covariance.
+    eq = RiskModel.build(price_panel, "equity", AS_OF, _ids(sleeve_of, "equity"), cfg)
+    assert eq.factor_form() is not None
+
+
+def test_lw_fixed_method_reproduces_ewma_cov_exactly():
+    """method: fixed is byte-for-byte the legacy ewma_cov+0.3 diagonal shrink."""
+    rng = np.random.default_rng(33)
+    dates = pd.bdate_range("2020-01-01", periods=200)
+    r = pd.DataFrame(rng.normal(0, 0.01, (200, 4)), index=dates,
+                     columns=["a", "b", "c", "d"])
+    cfg = {"method": "fixed", "ewma_halflife_days": 90,
+           "shrinkage_to_diagonal": 0.3}
+    out = _shrunk_cov(r, cfg, min_obs=60)
+    ref = ewma_cov(r, halflife=90, shrink=0.3, min_obs=60)
+    pd.testing.assert_frame_equal(out, ref)
+
+
+def test_lw_respects_min_obs():
+    dates = pd.bdate_range("2020-01-01", periods=20)
+    r = pd.DataFrame(np.random.default_rng(0).normal(0, 0.01, (20, 3)),
+                     index=dates, columns=["a", "b", "c"])
+    with pytest.raises(Exception):
+        ledoit_wolf_shrinkage(r, target="diagonal", min_obs=60)

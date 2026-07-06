@@ -25,9 +25,10 @@ exposures:
     vol_window_days: 63
 
 factor_covariance:
+  method: lw                   # fixed | lw | lw_cc — LW analytic diagonal-target shrinkage
   ewma_halflife_days: 90
   min_obs: 252
-  shrinkage_to_diagonal: 0.3   # fixed intensity, PSD-safe; Ledoit-Wolf later
+  shrinkage_to_diagonal: 0.3   # fallback intensity for method: fixed (also used by backtest engine)
 
 specific_risk:
   ewma_halflife_days: 42
@@ -35,8 +36,9 @@ specific_risk:
   cross_sectional_shrink_weight: 0.25   # toward sleeve median vol — Bayesian shrink for thin histories
 
 instrument_covariance:          # small sleeves
+  method: lw_cc                 # fixed | lw | lw_cc — constant-correlation target for ETF blocks
   ewma_halflife_days: 90
-  shrinkage_to_diagonal: 0.3
+  shrinkage_to_diagonal: 0.3    # fallback intensity for method: fixed
 
 validation:
   # correlate estimated equity factor returns with Ken French monthly series

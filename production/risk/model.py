@@ -20,13 +20,35 @@ import numpy as np
 import pandas as pd
 
 from production.core.config import risk_config
-from production.risk.covariance import ewma_cov
+from production.risk.covariance import RiskError, ewma_cov, ledoit_wolf_shrinkage
 from production.risk.exposures import build_exposures
 from production.risk.factor_returns import estimate_factor_returns
 from production.risk.specific import specific_vol
 
 _STRUCTURAL = ("equity", "crypto")
 _TRADING_DAYS = 252
+
+
+def _shrunk_cov(returns: pd.DataFrame, cfg: dict, min_obs: int) -> pd.DataFrame:
+    """Dispatch a covariance estimate by ``cfg['method']``.
+
+    ``fixed`` (default) — the legacy diagonally-shrunk ``ewma_cov`` path, byte-for-
+    byte unchanged for reproducibility. ``lw`` / ``lw_cc`` — Ledoit-Wolf analytic
+    shrinkage with EWMA-weighted moments toward the diagonal / constant-correlation
+    target respectively. ``min_obs`` is enforced identically across methods.
+    """
+    method = str(cfg.get("method", "fixed")).lower()
+    halflife = float(cfg.get("ewma_halflife_days", 90))
+    if method == "fixed":
+        return ewma_cov(returns, halflife=halflife,
+                        shrink=float(cfg.get("shrinkage_to_diagonal", 0.3)),
+                        min_obs=min_obs)
+    if method in ("lw", "lw_cc"):
+        target = "diagonal" if method == "lw" else "constant_correlation"
+        Sigma, _delta = ledoit_wolf_shrinkage(
+            returns, target=target, ewma_halflife=halflife, min_obs=min_obs)
+        return Sigma
+    raise RiskError(f"_shrunk_cov: unknown covariance method {method!r}")
 
 
 def _instrument_returns(prices: pd.DataFrame, as_of, ids) -> pd.DataFrame:
@@ -76,10 +98,10 @@ class RiskModel:
                 return model
             # fall through to full-cov fallback (too few factor-return obs)
 
-        _cov = ewma_cov(
+        _cov = _shrunk_cov(
             _instrument_returns(prices, as_of, ids),
-            halflife=float(inst_cfg.get("ewma_halflife_days", 90)),
-            shrink=float(inst_cfg.get("shrinkage_to_diagonal", 0.3)),
+            inst_cfg,
+            min_obs=int(inst_cfg.get("min_obs", 60)),
         ).reindex(index=ids, columns=ids)
         resid_vol = pd.Series(np.sqrt(np.diag(_cov.to_numpy())), index=ids,
                               name="resid_vol")
@@ -102,11 +124,8 @@ class RiskModel:
         if len(factor_returns) < min_obs:
             return None
 
-        F = ewma_cov(
-            factor_returns,
-            halflife=float(fac_cfg.get("ewma_halflife_days", 90)),
-            shrink=float(fac_cfg.get("shrinkage_to_diagonal", 0.3)),
-            min_obs=min_obs,
+        F = _shrunk_cov(
+            factor_returns, fac_cfg, min_obs=min_obs,
         ).reindex(index=B.columns, columns=B.columns)
 
         sv = specific_vol(
