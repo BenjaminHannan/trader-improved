@@ -124,6 +124,31 @@ def make_mcap_tvl(crypto_ids: list[str], start="2018-01-02", end="2021-12-31",
     return mcap_df.reset_index(drop=True), tvl_df.reset_index(drop=True)
 
 
+def make_basis(crypto_ids: list[str], start="2018-01-02", end="2021-12-31",
+               seed=23) -> pd.DataFrame:
+    """Daily perp-vs-spot basis panel (ccxt perp/spot close ratio - 1).
+
+    Mildly positive mean (contango is the normal state), AR(1)-ish persistence so a
+    trailing-mean carry signal has something to chew on. available_from = bar close
+    (obs midnight UTC + 24h), same rule as ccxt prices.
+    """
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range(start, end, freq="D")
+    frames = []
+    for iid in sorted(crypto_ids):
+        b = np.empty(len(dates))
+        b[0] = 5e-4
+        eps = rng.normal(0, 4e-4, len(dates))
+        for i in range(1, len(dates)):
+            b[i] = 0.9 * b[i - 1] + 1e-4 + eps[i]
+        frames.append(pd.DataFrame({
+            "obs_date": dates, "instrument_id": iid, "basis": b}))
+    out = pd.concat(frames, ignore_index=True)
+    out = out.assign(**_mandatory(out["obs_date"], pd.Timedelta(hours=24),
+                                  "synthetic:basis"))
+    return out.reset_index(drop=True)
+
+
 def make_cot(etf_ids: list[str], start="2018-01-02", end="2021-12-31",
              seed=17) -> pd.DataFrame:
     """Tuesday obs_date, Friday 20:30 UTC availability — the canonical lag."""
@@ -187,13 +212,19 @@ def mcap_tvl_panels(synthetic_instruments) -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 @pytest.fixture(scope="session")
+def basis_panel(synthetic_instruments) -> pd.DataFrame:
+    ids = [i for i, s in synthetic_instruments.items() if s == "crypto"]
+    return make_basis(ids)
+
+
+@pytest.fixture(scope="session")
 def signal_data(price_panel, funding_panel, macro_panel, cot_panel,
-                mcap_tvl_panels) -> dict[str, pd.DataFrame]:
+                mcap_tvl_panels, basis_panel) -> dict[str, pd.DataFrame]:
     """The full signal input bundle."""
     mcap, tvl = mcap_tvl_panels
     return {"prices": price_panel, "funding": funding_panel,
             "macro": macro_panel, "cot": cot_panel,
-            "mcap": mcap, "tvl": tvl}
+            "mcap": mcap, "tvl": tvl, "basis": basis_panel}
 
 
 @pytest.fixture()
