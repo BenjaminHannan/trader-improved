@@ -39,7 +39,8 @@ from production.signals.base import sleeve_from_id
 
 # Reuse the backtest runner's lake/synthetic loaders verbatim — one bundle-building path,
 # tested once. (Both scripts live under the repo root which is on sys.path.)
-from scripts.run_backtest import _load_lake_bundle, _instrument_map, _synthetic_bundle
+from scripts.run_backtest import (_instrument_map, _load_lake_bundle, _sector_map,
+                                  _synthetic_bundle)
 
 _DEFAULT_EQUITY = 100_000.0
 
@@ -126,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         start = args.start or "2019-01-01"
         end = args.end or "2020-06-30"
         print(f"synthetic run: warmup-synthesized bundle, ~{start} .. {end}")
-        data, instruments = _synthetic_bundle(start, end)
+        data, instruments, sectors = _synthetic_bundle(start, end)
         master = build_instrument_master()
     else:
         lake = Lake(args.lake_root)
@@ -135,13 +136,14 @@ def main(argv: list[str] | None = None) -> int:
             print("FATAL: no curated 'prices' — nothing to trade", file=sys.stderr)
             return 2
         instruments = _instrument_map(lake, data["prices"])
+        sectors = _sector_map(lake, data["prices"])
         try:
             master = lake.read_reference("instruments")
         except LakeError:
             master = build_instrument_master()
 
     # --- latest target book via the validated engine path ---
-    target = latest_target_weights(data, instruments, cfg=cfg)
+    target = latest_target_weights(data, instruments, cfg=cfg, sectors=sectors)
     if target.empty:
         print("no target weights produced — check data coverage / warmup", file=sys.stderr)
         return 1
