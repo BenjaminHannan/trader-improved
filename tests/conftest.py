@@ -149,6 +149,33 @@ def make_basis(crypto_ids: list[str], start="2018-01-02", end="2021-12-31",
     return out.reset_index(drop=True)
 
 
+def make_fundamentals(equity_ids: list[str], start="2018-01-02", end="2021-12-31",
+                      seed=29) -> pd.DataFrame:
+    """Quarterly EPS/revenue panel in EDGAR-shaped curated form.
+
+    obs_date = fiscal period end; available_from = the FILING timestamp (~40 days
+    later, jittered) — the whole point of the EDGAR pipeline is that fundamentals
+    are knowable at filing, never at period end. One row per (period, instrument,
+    field) with field in {eps, revenue, shares}.
+    """
+    rng = np.random.default_rng(seed)
+    quarters = pd.date_range(start, end, freq="QE")
+    rows = []
+    for i, iid in enumerate(sorted(equity_ids)):
+        eps = 1.0 + 0.2 * (i % 5) + np.cumsum(rng.normal(0.02, 0.15, len(quarters)))
+        rev = (50 + 10 * i) * np.exp(np.cumsum(rng.normal(0.01, 0.05, len(quarters))))
+        shares = np.full(len(quarters), 1e8 * (1 + i * 0.3))
+        for q, (d, e, r, s) in enumerate(zip(quarters, eps, rev, shares)):
+            filing = (pd.Timestamp(d).tz_localize(UTC)
+                      + pd.Timedelta(days=int(35 + rng.integers(0, 20)), hours=21))
+            for field, val in (("eps", e), ("revenue", r), ("shares", s)):
+                rows.append((d, iid, field, val, filing, "synthetic:fundamentals",
+                             filing + pd.Timedelta(minutes=5)))
+    return pd.DataFrame(rows, columns=[
+        "obs_date", "instrument_id", "field", "value",
+        "available_from", "source", "ingested_at"])
+
+
 def make_cot(etf_ids: list[str], start="2018-01-02", end="2021-12-31",
              seed=17) -> pd.DataFrame:
     """Tuesday obs_date, Friday 20:30 UTC availability — the canonical lag."""
@@ -218,13 +245,20 @@ def basis_panel(synthetic_instruments) -> pd.DataFrame:
 
 
 @pytest.fixture(scope="session")
+def fundamentals_panel(synthetic_instruments) -> pd.DataFrame:
+    ids = [i for i, s in synthetic_instruments.items() if s == "equity"]
+    return make_fundamentals(ids)
+
+
+@pytest.fixture(scope="session")
 def signal_data(price_panel, funding_panel, macro_panel, cot_panel,
-                mcap_tvl_panels, basis_panel) -> dict[str, pd.DataFrame]:
+                mcap_tvl_panels, basis_panel, fundamentals_panel) -> dict[str, pd.DataFrame]:
     """The full signal input bundle."""
     mcap, tvl = mcap_tvl_panels
     return {"prices": price_panel, "funding": funding_panel,
             "macro": macro_panel, "cot": cot_panel,
-            "mcap": mcap, "tvl": tvl, "basis": basis_panel}
+            "mcap": mcap, "tvl": tvl, "basis": basis_panel,
+            "fundamentals": fundamentals_panel}
 
 
 @pytest.fixture()
