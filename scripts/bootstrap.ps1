@@ -21,11 +21,20 @@ Set-Location (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Pat
 # --- uv ---
 Step "Checking for uv"
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
-    Step "Installing uv (astral.sh official installer)"
-    # PowerShell 5.1 defaults to TLS 1.0, which the download endpoint rejects
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
-    $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+    # Prefer winget: the astral.sh web installer's direct download stalls on some
+    # Windows networks (AV/proxy interference); winget's CDN is far more reliable.
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Step "Installing uv via winget"
+        winget install --id astral-sh.uv -e --accept-source-agreements --accept-package-agreements --disable-interactivity
+    }
+    else {
+        Step "Installing uv (astral.sh official installer - winget not found)"
+        # PowerShell 5.1 defaults to TLS 1.0, which the download endpoint rejects
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-RestMethod https://astral.sh/uv/install.ps1 | Invoke-Expression
+    }
+    # both installers target dirs that only land on PATH in NEW shells - patch this one
+    $env:Path = "$env:USERPROFILE\.local\bin;$env:LOCALAPPDATA\Microsoft\WinGet\Links;$env:Path"
     if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
         Fail "uv was installed but is not on PATH yet. Close this window, open a NEW PowerShell, and re-run this script."
     }
