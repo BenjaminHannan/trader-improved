@@ -19,12 +19,17 @@ from production.core.config import costs_config
 class CostModel:
     """Per-sleeve square-root cost model with floors, cap, and per-instrument overrides."""
 
-    def __init__(self, cfg: dict | None = None) -> None:
+    def __init__(self, cfg: dict | None = None, overrides_table: dict | None = None) -> None:
         self.cfg = cfg if cfg is not None else costs_config()
         self.alpha = float(self.cfg["impact_alpha"])
         self.cap_bps = float(self.cfg["cap_bps"])
         self.sleeves = self.cfg["sleeves"]
-        self.overrides = self.cfg.get("instrument_overrides") or {}
+        # yaml instrument_overrides are the base; lake-calibrated overrides (from TCA
+        # feedback) merge OVER them per instrument key — the calibrated entry wins. When
+        # overrides_table is None behavior is bit-identical to the yaml-only path.
+        self.overrides = dict(self.cfg.get("instrument_overrides") or {})
+        if overrides_table:
+            self.overrides = {**self.overrides, **overrides_table}
         # Every capped / bad-ADV name lands here; the audit layer surfaces it. Never silent.
         self.cap_warnings: list[dict] = []
         # Per-charge decomposition ledger — one entry per `cost_bps(..., record=True)` call
@@ -33,12 +38,22 @@ class CostModel:
         self.ledger: list[dict] = []
 
     def _floor_hs(self, instrument_id, sleeve: str) -> tuple[float, float]:
-        """Resolve (floor_bps, half_spread_bps): per-instrument override wins over sleeve default."""
+        """Resolve (floor_bps, half_spread_bps): per-instrument override wins over sleeve default.
+
+        Overrides may be partial — a TCA-calibrated entry carries only ``half_spread_bps``
+        (floors are floors, never recalibrated), so each field falls back to the sleeve
+        default when the override omits it. Extra metadata keys (n_fills, …) are ignored.
+        """
+        spec = self.sleeves[sleeve]
+        floor = float(spec["floor_bps"])
+        hs = float(spec["half_spread_bps"])
         if instrument_id is not None and instrument_id in self.overrides:
             o = self.overrides[instrument_id]
-            return float(o["floor_bps"]), float(o["half_spread_bps"])
-        spec = self.sleeves[sleeve]
-        return float(spec["floor_bps"]), float(spec["half_spread_bps"])
+            if "floor_bps" in o:
+                floor = float(o["floor_bps"])
+            if "half_spread_bps" in o:
+                hs = float(o["half_spread_bps"])
+        return floor, hs
 
     def cost_bps(self, trade_usd, adv_usd, sigma_daily, sleeve,
                  instrument_ids=None, record: bool = False) -> pd.Series:

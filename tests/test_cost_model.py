@@ -72,6 +72,51 @@ def test_instrument_override_honored():
     assert cost == pytest.approx(20.0)
 
 
+# ----------------------------------------------------- lake-calibrated overrides_table
+_A, _B, _C = "EQ:A:2000-01-03", "EQ:B:2000-01-03", "EQ:C:2000-01-03"
+
+
+def test_overrides_table_merges_over_yaml_and_is_scoped():
+    """overrides_table (TCA-calibrated) merges OVER the yaml overrides and changes
+    cost_bps for exactly the instruments it names — others are untouched."""
+    cfg = dict(costs_config())
+    cfg["instrument_overrides"] = {_B: {"floor_bps": 40.0, "half_spread_bps": 30.0}}
+    table = {_A: {"half_spread_bps": 50.0, "n_fills": 25, "median_abs_shortfall_bps": 40.0}}
+    model = CostModel(cfg, overrides_table=table)
+    base = CostModel(cfg)                       # yaml overrides only, no table
+
+    idx = [_A, _B, _C]
+    # trade 1e6 / adv 1e8 / sigma 0.05 -> impact = 1e4*0.15*0.05*sqrt(0.01) = 7.5 bps
+    kw = dict(trade_usd=pd.Series([1e6] * 3, index=idx), adv_usd=1e8,
+              sigma_daily=0.05, sleeve="equity", instrument_ids=idx)
+    out = model.cost_bps(**kw)
+    out_base = base.cost_bps(**kw)
+
+    # A: calibrated half_spread 50 wins -> max(5, 50+7.5) = 57.5 (changed vs default 10)
+    assert out.loc[_A] == pytest.approx(57.5)
+    assert out.loc[_A] != pytest.approx(out_base.loc[_A])
+    # B: yaml override survives the merge (table doesn't name it) -> max(40, 30+7.5) = 40
+    assert out.loc[_B] == pytest.approx(40.0)
+    assert out.loc[_B] == pytest.approx(out_base.loc[_B])
+    # C: no override anywhere -> equity default max(5, 2.5+7.5) = 10, unchanged by the table
+    assert out.loc[_C] == pytest.approx(10.0)
+    assert out.loc[_C] == pytest.approx(out_base.loc[_C])
+
+
+def test_overrides_table_none_is_bit_identical():
+    """overrides_table=None reproduces the yaml-only path bit-for-bit."""
+    cfg = dict(costs_config())
+    cfg["instrument_overrides"] = {_B: {"floor_bps": 40.0, "half_spread_bps": 30.0}}
+    idx = [_A, _B, _C, "D"]
+    trades = pd.Series([0.0, 1e6, 5e6, 1e5], index=idx)
+    adv = pd.Series([1e8, 1e8, 1e8, np.nan], index=idx)   # D -> missing ADV -> cap
+    sigma = pd.Series([0.05, 0.05, 0.05, 0.05], index=idx)
+    a = CostModel(cfg).cost_bps(trades, adv, sigma, "equity", instrument_ids=idx)
+    b = CostModel(cfg, overrides_table=None).cost_bps(trades, adv, sigma, "equity",
+                                                      instrument_ids=idx)
+    assert a.to_numpy().tolist() == b.to_numpy().tolist()
+
+
 # --------------------------------------------------------- trailing_adv_sigma PIT
 def _toy_prices(n=60, seed=0):
     rng = np.random.default_rng(seed)

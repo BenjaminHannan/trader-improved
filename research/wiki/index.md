@@ -39,4 +39,9 @@ findings here, and (when the evidence survives) lands a verified implementation 
 11. Crypto basis factor: ccxt perp-mark-price loader + registered signal (strongest
     documented cross-sectional crypto predictor — see iteration 10)
 12. GP persistence weighting — revisit once live IC decay curves exist (iteration 6)
-13. Robust-alpha ellipsoid in the QP (named upgrade path; after real-data baseline)
+13. ~~Robust-alpha ellipsoid in the QP~~ (iteration 19, opt-in via robust_kappa)
+14. Wire lake `cost_overrides` consumption into the engine's CostModel construction
+    (TCA calibration writes the table — iteration 20 — but run_backtest doesn't read
+    it yet; thread overrides_table through to the CostModel call)
+15. Accumulate per-run shortfall into the `shortfall_log` reference table from
+    daily_run --live fills (feeds --calibrate-tca)

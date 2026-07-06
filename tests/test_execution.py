@@ -12,8 +12,10 @@ import pytest
 
 from production.execution import alpaca_paper as ap
 from production.execution.alpaca_paper import AlpacaPaperClient, ExecutionError
+from production.core.lake import Lake
 from production.execution.orders import target_weights_to_orders
 from production.execution.shortfall import implementation_shortfall
+from production.execution.tca import calibrate_overrides, read_overrides, write_overrides
 from production.reference.instruments import build_instrument_master
 
 
@@ -230,6 +232,74 @@ def test_shortfall_aggregate_is_notional_weighted():
     )
     # weighted: (100*1000 + 50*3000) / 4000 = 62.5 bps
     assert agg == pytest.approx(62.5)
+
+
+# ------------------------------------------------------------ TCA calibration
+def _shortfall_rows(instrument_id: str, abs_bps: float, n: int) -> pd.DataFrame:
+    """n fills for one instrument with a fixed |shortfall|, alternating sign (median = abs_bps)."""
+    signs = [1.0 if i % 2 == 0 else -1.0 for i in range(n)]
+    return pd.DataFrame({
+        "instrument_id": [instrument_id] * n,
+        "side": ["buy" if s > 0 else "sell" for s in signs],
+        "shortfall_bps": [s * abs_bps for s in signs],
+        "notional_usd": [10_000.0] * n,
+    })
+
+
+def test_calibrate_overrides_known_answer():
+    """20 fills at |shortfall| = 8 bps -> median 8 x safety 1.25 = 10 bps half-spread override."""
+    df = _shortfall_rows("EQ:AAA:2000-01-03", abs_bps=8.0, n=20)
+    ov = calibrate_overrides(df, min_fills=20, safety=1.25)
+    assert set(ov) == {"EQ:AAA:2000-01-03"}
+    entry = ov["EQ:AAA:2000-01-03"]
+    assert entry["half_spread_bps"] == pytest.approx(10.0)
+    assert entry["n_fills"] == 20
+    assert entry["median_abs_shortfall_bps"] == pytest.approx(8.0)
+
+
+def test_calibrate_overrides_never_lowers_cost():
+    """Tiny realized shortfall (candidate below the sleeve default half-spread) -> no override.
+    Floors are floors — calibration only ever raises cost, never lowers it (CLAUDE.md)."""
+    # equity default half_spread = 2.5; 1.0 x 1.25 = 1.25 < 2.5 -> omitted.
+    df = _shortfall_rows("EQ:BBB:2000-01-03", abs_bps=1.0, n=40)
+    ov = calibrate_overrides(df, min_fills=20, safety=1.25)
+    assert "EQ:BBB:2000-01-03" not in ov
+    assert ov == {}
+
+
+def test_calibrate_overrides_min_fills_gate():
+    """An instrument below min_fills is not calibrated even with large realized shortfall."""
+    df = _shortfall_rows("EQ:CCC:2000-01-03", abs_bps=25.0, n=5)
+    assert calibrate_overrides(df, min_fills=20, safety=1.25) == {}
+    # ... but clears once it has enough fills.
+    df_ok = _shortfall_rows("EQ:CCC:2000-01-03", abs_bps=25.0, n=20)
+    ov = calibrate_overrides(df_ok, min_fills=20, safety=1.25)
+    assert ov["EQ:CCC:2000-01-03"]["half_spread_bps"] == pytest.approx(31.25)
+
+
+def test_calibrate_overrides_caps_at_cap_bps():
+    """A monster realized shortfall candidate is capped at the cost model cap (100 bps)."""
+    df = _shortfall_rows("CR:BTC:2017-01-01", abs_bps=500.0, n=30)
+    ov = calibrate_overrides(df, min_fills=20, safety=1.25)
+    assert ov["CR:BTC:2017-01-01"]["half_spread_bps"] == pytest.approx(100.0)
+
+
+def test_overrides_lake_roundtrip(tmp_path):
+    """calibrate -> write -> read reproduces the override dict; calibrated_at is stamped."""
+    lake = Lake(tmp_path)
+    assert read_overrides(lake) == {}                         # absent table -> {}
+    df = _shortfall_rows("EQ:AAA:2000-01-03", abs_bps=8.0, n=20)
+    ov = calibrate_overrides(df, min_fills=20, safety=1.25)
+    write_overrides(ov, lake)
+
+    got = read_overrides(lake)
+    assert got == ov
+
+    # calibrated_at column present, non-null, a real timestamp.
+    table = lake.read_reference("cost_overrides")
+    assert "calibrated_at" in table.columns
+    assert table["calibrated_at"].notna().all()
+    assert pd.api.types.is_datetime64_any_dtype(pd.to_datetime(table["calibrated_at"]))
 
 
 # ------------------------------------------------------------------ daily_run

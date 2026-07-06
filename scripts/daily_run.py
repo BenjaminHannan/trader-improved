@@ -34,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 from production.core.lake import Lake, LakeError
 from production.execution.alpaca_paper import AlpacaPaperClient, ExecutionError
 from production.execution.orders import target_weights_to_orders
+from production.execution.tca import calibrate_overrides, write_overrides
 from production.reference.instruments import build_instrument_master, vendor_symbol
 from production.signals.base import sleeve_from_id
 
@@ -110,6 +111,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         f"else {_DEFAULT_EQUITY:,.0f})")
     p.add_argument("--min-order-usd", type=float, default=25.0,
                    help="drop orders below this notional (default: 25)")
+    p.add_argument("--calibrate-tca", action="store_true",
+                   help="TCA feedback: read accumulated shortfall (lake reference "
+                        "'shortfall_log' or --shortfall-path parquet), calibrate "
+                        "per-instrument cost overrides, write the 'cost_overrides' table, "
+                        "print a summary, and exit (submits nothing)")
+    p.add_argument("--shortfall-path", default=None,
+                   help="parquet of accumulated implementation shortfall for "
+                        "--calibrate-tca (default: lake reference 'shortfall_log')")
+    p.add_argument("--min-fills", type=int, default=20,
+                   help="min fills per instrument before TCA calibrates it (default: 20)")
+    p.add_argument("--tca-safety", type=float, default=1.25,
+                   help="safety multiplier on realized median |shortfall| (default: 1.25)")
     # Mutually exclusive dry-run / live; dry-run is the default.
     g = p.add_mutually_exclusive_group()
     g.add_argument("--dry-run", dest="dry_run", action="store_true", default=True,
@@ -119,8 +132,48 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _calibrate_tca(args) -> int:
+    """TCA feedback loop: realized shortfall -> per-instrument cost overrides -> lake table."""
+    lake = Lake(args.lake_root)
+    if args.shortfall_path is not None:
+        shortfall = pd.read_parquet(args.shortfall_path)
+        src = args.shortfall_path
+    else:
+        try:
+            shortfall = lake.read_reference("shortfall_log")
+            src = "lake reference 'shortfall_log'"
+        except LakeError:
+            print("FATAL: no shortfall to calibrate from — pass --shortfall-path or "
+                  "accumulate a 'shortfall_log' reference table", file=sys.stderr)
+            return 2
+
+    overrides = calibrate_overrides(shortfall, min_fills=args.min_fills,
+                                    safety=args.tca_safety)
+    out = write_overrides(overrides, lake)
+
+    print("\n" + "=" * 60)
+    print("  TCA calibration — cost overrides from realized shortfall")
+    print(f"  source {src}   fills {len(shortfall)}")
+    print("=" * 60)
+    if not overrides:
+        print("  no instruments cleared the fill gate / exceeded the sleeve default.")
+    else:
+        print(f"  {'instrument_id':<28}{'half_spread_bps':>16}{'n_fills':>10}"
+              f"{'median_|sf|_bps':>18}")
+        for iid, o in sorted(overrides.items()):
+            print(f"  {iid:<28}{o['half_spread_bps']:>16.2f}{o['n_fills']:>10}"
+                  f"{o['median_abs_shortfall_bps']:>18.2f}")
+    print("-" * 60)
+    print(f"  wrote {len(overrides)} override(s) -> {out}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+
+    if args.calibrate_tca:
+        return _calibrate_tca(args)
+
     cfg = backtest_config()
 
     if args.synthetic:
