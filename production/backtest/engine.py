@@ -74,6 +74,7 @@ class BacktestResult:
     costs: pd.Series                                # daily cost drag on the total book
     overlay: pd.Series                              # daily overlay multiplier
     report: dict = field(default_factory=dict)
+    risk_models: dict = field(default_factory=dict)  # sleeve -> last built RiskModel (diagnostics)
     # ---- internal carriers for the report layer (not part of the public headline) ----
     _factor_returns: pd.DataFrame | None = None     # risk-model factor returns (attribution basis)
     _weights_by_factor: dict | None = None          # factor -> weights DataFrame (per-alpha attrib)
@@ -102,7 +103,8 @@ def _asof_row(panel: pd.DataFrame, t) -> pd.Series:
     return sub.iloc[-1]
 
 
-def _precompute_structural_returns(sprices: pd.DataFrame, sleeve: str, cfg_risk: dict):
+def _precompute_structural_returns(sprices: pd.DataFrame, sleeve: str, cfg_risk: dict,
+                                   sectors: pd.Series | None = None):
     """Estimate the full-span factor returns / residuals for a structural sleeve, ONCE.
 
     ``RiskModel.build`` internally re-runs ``estimate_factor_returns`` from the sleeve
@@ -116,7 +118,7 @@ def _precompute_structural_returns(sprices: pd.DataFrame, sleeve: str, cfg_risk:
     try:
         start = pd.to_datetime(sprices["obs_date"]).min()
         end = pd.to_datetime(sprices["obs_date"]).max()
-        fr, resid = estimate_factor_returns(sprices, sleeve, start, end, cfg_risk)
+        fr, resid = estimate_factor_returns(sprices, sleeve, start, end, cfg_risk, sectors)
         if fr is None or fr.empty:
             return None, None
         fr.index = pd.DatetimeIndex(fr.index)
@@ -128,7 +130,8 @@ def _precompute_structural_returns(sprices: pd.DataFrame, sleeve: str, cfg_risk:
 
 def _assemble_structural(window_prices: pd.DataFrame, sleeve: str, as_of, ids,
                          cfg_risk: dict, fr_full: pd.DataFrame,
-                         resid_full: pd.DataFrame) -> RiskModel | None:
+                         resid_full: pd.DataFrame,
+                         sectors: pd.Series | None = None) -> RiskModel | None:
     """Assemble a structural RiskModel from precomputed factor returns (mirrors
     ``RiskModel._build_structural`` exactly, but reuses the one-shot factor returns).
 
@@ -143,7 +146,7 @@ def _assemble_structural(window_prices: pd.DataFrame, sleeve: str, as_of, ids,
     if len(fr) < min_obs:
         return None
     ids = list(ids)
-    B = build_exposures(window_prices, sleeve, as_of, ids, cfg_risk)
+    B = build_exposures(window_prices, sleeve, as_of, ids, cfg_risk, sectors)
     F = ewma_cov(
         fr, halflife=float(fac_cfg.get("ewma_halflife_days", 90)),
         shrink=float(fac_cfg.get("shrinkage_to_diagonal", 0.3)),
@@ -232,7 +235,8 @@ def _sufficient_ids(prices: pd.DataFrame, ids, as_of, min_days: int) -> list:
 
 
 def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
-                 factors_cfg=None, lake=None) -> BacktestResult:
+                 factors_cfg=None, lake=None,
+                 sectors: pd.Series | None = None) -> BacktestResult:
     """Run the walk-forward backtest. See module docstring for the full data flow.
 
     Parameters
@@ -242,7 +246,11 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     cfg          : backtest config (defaults to ``backtest_config()``).
     factors_cfg  : a ``FactorRegistry`` or a path to factors.yaml (defaults to the repo file).
     lake         : unused by the engine itself; accepted for signature symmetry with the CLI.
+    sectors      : optional Series mapping instrument_id -> sector label. When given, it is
+                   threaded into the equity sleeve's risk model (sector dummies in ``B``) and
+                   optimizer (the ±sector_band constraint). Non-equity sleeves never see it.
     """
+    sectors = pd.Series(sectors) if sectors is not None else None
     if cfg is None:
         cfg = backtest_config()
     if isinstance(factors_cfg, FactorRegistry):
@@ -319,8 +327,17 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     weights_by_factor: dict = {name: {} for name in z_panels}  # factor -> {date: Series}
     structural_fr: dict = {}    # sleeve -> full-span factor returns (reused for attribution)
 
+    risk_models: dict = {}      # sleeve -> last built RiskModel (diagnostics carrier)
+
     for sleeve in sleeves:
         ids_all = sleeve_ids[sleeve]
+        # Sector labels are an equity-only concept here; restrict to this sleeve's ids so
+        # every downstream reindex (exposures, factor returns, optimizer) sees only names it
+        # actually trades. Non-equity sleeves always get None.
+        sleeve_sectors = None
+        if sectors is not None and sleeve == "equity":
+            ss = sectors.reindex(ids_all).dropna()
+            sleeve_sectors = ss if not ss.empty else None
         sprices = prices[prices["instrument_id"].isin(ids_all)]
         close_wide = _prices_wide(sprices, ids_all)
         if close_wide.empty:
@@ -340,7 +357,8 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
         # One-shot factor-return estimation for structural sleeves (see helper docstring).
         fr_full = resid_full = None
         if sleeve in structural_sleeves:
-            fr_full, resid_full = _precompute_structural_returns(sprices, sleeve, cfg_risk)
+            fr_full, resid_full = _precompute_structural_returns(sprices, sleeve, cfg_risk,
+                                                                 sleeve_sectors)
             if fr_full is not None:
                 structural_fr[sleeve] = fr_full
 
@@ -365,9 +383,11 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
                         built = None
                         if fr_full is not None:
                             built = _assemble_structural(window_prices, sleeve, t, ids_ok,
-                                                         cfg_risk, fr_full, resid_full)
+                                                         cfg_risk, fr_full, resid_full,
+                                                         sleeve_sectors)
                         if built is None:  # non-structural, or too few factor returns yet
-                            built = RiskModel.build(window_prices, sleeve, t, ids_ok)
+                            built = RiskModel.build(window_prices, sleeve, t, ids_ok,
+                                                    sectors=sleeve_sectors)
                         rm = built
                         rm_ids = list(rm.ids)
                     except Exception as exc:  # noqa: BLE001
@@ -428,7 +448,7 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
 
             wp = w_prev.reindex(rm_ids).fillna(0.0)
             res = optimize_sleeve(alpha_series, rm, wp, cost_opt, sleeve, cfg,
-                                  vol_target=sleeve_vol_target)
+                                  vol_target=sleeve_vol_target, sectors=sleeve_sectors)
             w_new = res.w.reindex(rm_ids).fillna(0.0)
 
             # --- realized cost on the actual trade ---
@@ -442,6 +462,8 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
             rebal_costs[t] = cost_return
             w_prev = w_new
 
+        if rm is not None:
+            risk_models[sleeve] = rm  # last-built model for this sleeve (diagnostics)
         if not rebal_weights:
             continue
         Wg = pd.DataFrame(rebal_weights).T.sort_index()
@@ -535,6 +557,7 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
         weights_history=weights_history,
         costs=costs,
         overlay=overlay,
+        risk_models=risk_models,
         _factor_returns=factor_returns,
         _weights_by_factor=wbf,
         _inst_returns=inst_returns,
@@ -549,8 +572,8 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
 
 
 def latest_target_weights(data: dict, instruments: pd.Series, cfg: dict | None = None,
-                          factors_cfg=None, result: "BacktestResult | None" = None
-                          ) -> pd.Series:
+                          factors_cfg=None, result: "BacktestResult | None" = None,
+                          sectors: pd.Series | None = None) -> pd.Series:
     """Book-level target weights on the most recent rebalance grid date.
 
     Thin wrapper over :func:`run_backtest`: it runs the identical walk-forward (so the
@@ -565,7 +588,8 @@ def latest_target_weights(data: dict, instruments: pd.Series, cfg: dict | None =
     if cfg is None:
         cfg = backtest_config()
     if result is None:
-        result = run_backtest(data, instruments, cfg=cfg, factors_cfg=factors_cfg)
+        result = run_backtest(data, instruments, cfg=cfg, factors_cfg=factors_cfg,
+                              sectors=sectors)
 
     weights_history = result.weights_history
     if not weights_history or result.sleeve_returns.empty:

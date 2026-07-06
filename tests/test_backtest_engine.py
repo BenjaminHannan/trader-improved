@@ -54,6 +54,25 @@ def result():
     return run_backtest(data, pd.Series(_INSTRUMENTS))
 
 
+# Deterministic fake sectors for the 8 synthetic equity ids: round-robin over 3 labels.
+_EQ_SECTORS = pd.Series(
+    {iid: f"sector_{'ABC'[k % 3]}" for k, iid in enumerate(sorted(_EQ))})
+
+
+@pytest.fixture(scope="module")
+def sector_result():
+    """One extra equity-only run with sectors threaded (structure assertions only).
+
+    Kept as small as possible: a single sleeve, no funding/macro, and the end pulled in to
+    ~6 weeks past the 3y warmup so only a handful of rebalances run (the full ~3y span still
+    feeds the risk model, so the sector factors are well-estimated). The module ``result``
+    fixture runs WITHOUT sectors and remains the regression guard that the default path is
+    unchanged.
+    """
+    data = {"prices": make_gbm_prices(_EQ, start=_START, end="2020-01-31")}
+    return run_backtest(data, pd.Series(_EQ), sectors=_EQ_SECTORS)
+
+
 # ============================================================ end-to-end integrity
 def test_equity_curve_finite(result):
     for series in (result.total_returns, result.total_gross_returns,
@@ -115,6 +134,34 @@ def test_no_weight_outside_sleeve(result):
 def test_turnover_metric_positive(result):
     for sleeve, W in result.weights_history.items():
         assert turnover(W) > 0.0
+
+
+# ============================================================ sector threading
+def test_sector_dummies_present_in_equity_risk_model(sector_result):
+    """With sectors threaded, the equity risk model's exposure matrix B carries
+    sector_* dummy columns (they were dead code before this wiring)."""
+    rm = sector_result.risk_models.get("equity")
+    assert rm is not None and rm.B is not None, "equity sleeve did not build a structural model"
+    sector_cols = [c for c in rm.B.columns if str(c).startswith("sector_")]
+    assert sector_cols, list(rm.B.columns)
+
+
+def test_sector_band_respected_every_equity_rebalance(sector_result):
+    """Per-sector net exposure of each equity rebalance respects the ±sector_band."""
+    band = backtest_config()["constraints"]["sector_band"]
+    W = sector_result.weights_history["equity"]
+    for _, row in W.iterrows():
+        for label in _EQ_SECTORS.unique():
+            members = [i for i in W.columns if _EQ_SECTORS.get(i) == label]
+            net = float(row.reindex(members).fillna(0.0).sum())
+            assert abs(net) <= band + 1e-6, (label, net)
+
+
+def test_sector_run_is_finite(sector_result):
+    """The whole sector-threaded run stays finite / green."""
+    r = sector_result.total_returns
+    assert len(r) > 0
+    assert np.isfinite(r.to_numpy()).all() and r.isna().sum() == 0
 
 
 # ============================================================ the money test (PIT)

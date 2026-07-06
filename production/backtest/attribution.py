@@ -36,6 +36,12 @@ def factor_attribution(port_returns: pd.Series, factor_returns: pd.DataFrame) ->
     """
     y = pd.Series(port_returns).astype(float)
     X = pd.DataFrame(factor_returns).astype(float)
+    if X.empty or X.shape[1] == 0:
+        # an empty/rank-deficient estimation (e.g. cross-section thinner than the
+        # exposure count every day) must degrade to zeros, not crash the report
+        return {"contributions": {}, "betas": {},
+                "specific": float(y.mean() * 252) if len(y) else 0.0,
+                "r_squared": float("nan")}
     joined = pd.concat([y.rename("_y"), X], axis=1, join="inner").dropna()
     factors = list(X.columns)
     if len(joined) <= len(factors) or not factors:
