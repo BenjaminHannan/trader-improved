@@ -40,6 +40,9 @@ CLASS_PREFIX = {
     "crypto": "CR",
     "fx_etf": "FX",
     "commodity_etf": "CO",
+    "rates_etf": "RT",
+    "intl_etf": "IE",
+    "sector_etf": "SE",
 }
 
 # Default first-listing date for crypto pairs; the two majors predate the rest.
@@ -69,6 +72,17 @@ ETF_INCEPTION = {
     "GLD": "2004-11-18", "SLV": "2006-04-21", "USO": "2006-04-10", "UNG": "2007-04-18",
     "DBA": "2007-01-05", "DBB": "2007-01-05", "CPER": "2011-11-15", "PPLT": "2010-01-08",
     "PALL": "2010-01-08", "CORN": "2010-06-09", "WEAT": "2011-09-19", "SOYB": "2011-09-19",
+    # rates_etf
+    "TLT": "2002-07-26", "IEF": "2002-07-26", "SHY": "2002-07-26", "LQD": "2002-07-26",
+    "HYG": "2007-04-11", "EMB": "2007-12-19", "TIP": "2003-12-05", "BNDX": "2013-06-04",
+    # intl_etf
+    "EWJ": "1996-03-12", "EWG": "1996-03-12", "EWU": "1996-03-12", "EWQ": "1996-03-12",
+    "EWA": "1996-03-12", "EWC": "1996-03-12", "EWZ": "2000-07-10", "INDA": "2012-02-02",
+    "FXI": "2004-10-05", "EWY": "2000-05-09", "EWT": "2000-06-20", "EWW": "1996-03-12",
+    # sector_etf
+    "XLK": "1998-12-16", "XLF": "1998-12-16", "XLE": "1998-12-16", "XLV": "1998-12-16",
+    "XLI": "1998-12-16", "XLP": "1998-12-16", "XLY": "1998-12-16", "XLU": "1998-12-16",
+    "XLB": "1998-12-16", "XLRE": "2015-10-07", "XLC": "2018-06-18",
 }
 
 
@@ -160,6 +174,24 @@ def build_instrument_master(lake=None) -> pd.DataFrame:
                 iid, asset_class, sleeve, symbol, _etf_vendor_symbols(symbol),
                 "USD", inception, None, underlying, None,
                 {"proxy_underlying": underlying},
+            ))
+
+    # ---------------------------- rates / international / sector ETF sleeves
+    # These trade the ETF directly (not as a proxy for an untradable underlying),
+    # so proxy_of is null and symbols are a plain list.
+    for sleeve in ("rates_etf", "intl_etf", "sector_etf"):
+        spec = sleeves.get(sleeve, {})
+        asset_class = spec.get("asset_class", sleeve)
+        prefix = CLASS_PREFIX[sleeve]
+        for symbol in spec.get("symbols", []):
+            if symbol not in ETF_INCEPTION:
+                raise KeyError(
+                    f"no inception date recorded for ETF {symbol!r} in sleeve {sleeve}")
+            inception = ETF_INCEPTION[symbol]
+            iid = f"{prefix}:{symbol}:{inception}"
+            rows.append(_row(
+                iid, asset_class, sleeve, symbol, _etf_vendor_symbols(symbol),
+                "USD", inception, None, None, None, {},
             ))
 
     return pd.DataFrame(rows, columns=INSTRUMENT_COLUMNS)

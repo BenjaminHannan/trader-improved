@@ -174,9 +174,10 @@ def test_master_schema_and_uniqueness():
     m = build_instrument_master()
     assert list(m.columns) == INSTRUMENT_COLUMNS
     assert m["instrument_id"].is_unique
-    # 25 crypto + 8 fx + 12 commodity = 45 static instruments.
-    assert len(m) == 45
-    assert set(m["sleeve"]) == {"crypto", "fx_etf", "commodity_etf"}
+    # 25 crypto + 8 fx + 12 commodity + 8 rates + 12 intl + 11 sector = 76 static.
+    assert len(m) == 76
+    assert set(m["sleeve"]) == {
+        "crypto", "fx_etf", "commodity_etf", "rates_etf", "intl_etf", "sector_etf"}
     # Majors get the earlier listing date.
     assert "CR:BTC:2015-01-01" in set(m["instrument_id"])
     assert "CR:SOL:2017-01-01" in set(m["instrument_id"])

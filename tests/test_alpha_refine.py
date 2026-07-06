@@ -456,7 +456,8 @@ def test_record_and_save_roundtrip(tmp_path):
     # structure preserved (gate block + keys intact)
     assert reloaded["gate"]["train_ic_tstat_min"] == 2.0
     assert set(reloaded["factors"]["mom_12_1"]["sleeves"]) == \
-        {"equity", "crypto", "fx_etf", "commodity_etf"}
+        {"equity", "crypto", "fx_etf", "commodity_etf",
+         "rates_etf", "intl_etf", "sector_etf"}
 
 
 def test_signal_class_dotted_path_matches_yaml(registry):

@@ -14,14 +14,14 @@ gate:
 factors:
   mom_12_1:
     signal: production.signals.momentum.Momentum12m1m
-    sleeves: [equity, crypto, fx_etf, commodity_etf]
+    sleeves: [equity, crypto, fx_etf, commodity_etf, rates_etf, intl_etf, sector_etf]
     horizon_days: 21
     min_history_days: 273
     status: candidate
     gate_stats: {}
   str_reversal_1m:
     signal: production.signals.momentum.ShortTermReversal1m
-    sleeves: [equity, crypto]
+    sleeves: [equity, crypto, intl_etf, sector_etf]
     horizon_days: 5
     min_history_days: 21
     status: candidate
@@ -56,9 +56,16 @@ factors:
     gate_stats: {}
   tsmom:
     signal: production.signals.momentum.TimeSeriesMomentum
-    sleeves: [fx_etf, commodity_etf]
+    sleeves: [fx_etf, commodity_etf, rates_etf, intl_etf]
     horizon_days: 21
     min_history_days: 252
+    status: candidate
+    gate_stats: {}
+  carry_curve:
+    signal: production.signals.carry.CurveCarry
+    sleeves: [rates_etf]
+    horizon_days: 21
+    min_history_days: 21
     status: candidate
     gate_stats: {}
   cot_positioning:

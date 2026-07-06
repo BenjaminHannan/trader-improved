@@ -4,7 +4,7 @@
 # N is tiny, factor structure would be noise; deliberate v1 choice.
 
 structural_sleeves: [equity, crypto]
-covariance_sleeves: [fx_etf, commodity_etf]
+covariance_sleeves: [fx_etf, commodity_etf, rates_etf, intl_etf, sector_etf]
 
 exposures:
   equity:

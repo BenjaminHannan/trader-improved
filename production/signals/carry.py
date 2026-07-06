@@ -24,6 +24,20 @@ FX_RATE_SERIES = {
     "FXF": ("RATE_CH", "DGS3MO_US"),
 }
 
+# rates-ETF symbol -> (long-end Treasury yield series, cash 3m yield series). Each
+# duration ETF is bucketed onto the Treasury tenor closest to its effective duration:
+# SHY -> 2y, IEF/credit -> 10y, TLT -> 20y. The carry is long_yield - cash_yield.
+RATES_CARRY_SERIES = {
+    "TLT": ("DGS20", "DGS3MO_US"),
+    "IEF": ("DGS10", "DGS3MO_US"),
+    "SHY": ("DGS2", "DGS3MO_US"),
+    "LQD": ("DGS10", "DGS3MO_US"),
+    "HYG": ("DGS10", "DGS3MO_US"),
+    "EMB": ("DGS10", "DGS3MO_US"),
+    "TIP": ("DGS10", "DGS3MO_US"),
+    "BNDX": ("DGS10", "DGS3MO_US"),
+}
+
 
 @register
 class FundingCarry(Signal):
@@ -149,6 +163,52 @@ def _asof_by_avail_date(macro: pd.DataFrame, series_id: str) -> pd.DataFrame:
     return s[["avail_date", "value"]].reset_index(drop=True)
 
 
+def _yield_spread_panel(prices: pd.DataFrame, macro: pd.DataFrame,
+                        series_map: dict[str, tuple[str, str]]) -> pd.DataFrame:
+    """Long panel of ``long_leg_yield - short_leg_yield`` per instrument.
+
+    For each instrument whose symbol is in ``series_map`` the two macro series are
+    as-of joined (by availability date) onto the instrument's own price dates, then
+    differenced. Only macro rows knowable by end of day D feed the value at D — the
+    ``_asof_by_avail_date`` step keeps it point-in-time. Shared by
+    :class:`RateDifferentialCarry` (fx rate differential) and :class:`CurveCarry`
+    (rates-ETF curve carry).
+    """
+    if prices.empty:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    # Cache each macro series' availability step-function once.
+    series_cache: dict[str, pd.DataFrame] = {}
+
+    def get_series(sid: str) -> pd.DataFrame:
+        if sid not in series_cache:
+            series_cache[sid] = _asof_by_avail_date(macro, sid)
+        return series_cache[sid]
+
+    frames = []
+    for iid, grp in prices.groupby("instrument_id", sort=False):
+        symbol = iid.split(":")[1]
+        legs = series_map.get(symbol)
+        if legs is None:  # unmapped symbol (e.g. UUP/UDN for fx)
+            continue
+        long_sid, short_sid = legs
+        long_leg = get_series(long_sid)
+        short_leg = get_series(short_sid)
+        if long_leg.empty or short_leg.empty:
+            continue
+        dates = grp[["obs_date"]].sort_values("obs_date", kind="stable").reset_index(drop=True)
+        lo = pd.merge_asof(dates, long_leg, left_on="obs_date", right_on="avail_date",
+                           direction="backward")
+        sh = pd.merge_asof(dates, short_leg, left_on="obs_date", right_on="avail_date",
+                           direction="backward")
+        value = lo["value"] - sh["value"]
+        frames.append(pd.DataFrame({"obs_date": dates["obs_date"], "instrument_id": iid,
+                                    "value": value}))
+    if not frames:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+    return pd.concat(frames, ignore_index=True)
+
+
 @register
 class RateDifferentialCarry(Signal):
     """fx-ETF carry: ``foreign_3m_rate - usd_3m_rate``.
@@ -166,38 +226,29 @@ class RateDifferentialCarry(Signal):
 
     def compute(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
         prices = self._restrict_to_sleeves(data["prices"])
-        macro = data["macro"]
-        if prices.empty:
-            return pd.DataFrame(columns=OUTPUT_COLUMNS)
+        out = _yield_spread_panel(prices, data["macro"], FX_RATE_SERIES)
+        return self._finalize(out, anchor=prices)
 
-        # Cache each macro series' availability step-function once.
-        series_cache: dict[str, pd.DataFrame] = {}
 
-        def get_series(sid: str) -> pd.DataFrame:
-            if sid not in series_cache:
-                series_cache[sid] = _asof_by_avail_date(macro, sid)
-            return series_cache[sid]
+@register
+class CurveCarry(Signal):
+    """Crude duration-bucket curve carry for rates ETFs, v1.
 
-        frames = []
-        for iid, grp in prices.groupby("instrument_id", sort=False):
-            symbol = iid.split(":")[1]
-            legs = FX_RATE_SERIES.get(symbol)
-            if legs is None:  # e.g. UUP/UDN or an unmapped fx ETF
-                continue
-            foreign_sid, usd_sid = legs
-            foreign = get_series(foreign_sid)
-            usd = get_series(usd_sid)
-            if foreign.empty or usd.empty:
-                continue
-            dates = grp[["obs_date"]].sort_values("obs_date", kind="stable").reset_index(drop=True)
-            f = pd.merge_asof(dates, foreign, left_on="obs_date", right_on="avail_date",
-                              direction="backward")
-            u = pd.merge_asof(dates, usd, left_on="obs_date", right_on="avail_date",
-                              direction="backward")
-            value = f["value"] - u["value"]
-            frames.append(pd.DataFrame({"obs_date": dates["obs_date"], "instrument_id": iid,
-                                        "value": value}))
-        if not frames:
-            return pd.DataFrame(columns=OUTPUT_COLUMNS)
-        out = pd.concat(frames, ignore_index=True)
+    For each duration ETF the long-end Treasury yield and the cash (3m) yield are
+    as-of joined (by availability date) onto the ETF's own price dates, then
+    differenced: ``carry = long_yield - cash_yield``. Duration buckets live in
+    ``RATES_CARRY_SERIES`` (SHY->2y, IEF/credit->10y, TLT->20y). Only macro rows
+    knowable by end of day D feed the value at D — the same PIT availability join
+    that keeps :class:`RateDifferentialCarry` honest.
+    """
+
+    name = "carry_curve"
+    sleeves = ["rates_etf"]
+    required_datasets = ["prices", "macro"]
+    min_history_days = 21
+    horizon_days = 21
+
+    def compute(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+        prices = self._restrict_to_sleeves(data["prices"])
+        out = _yield_spread_panel(prices, data["macro"], RATES_CARRY_SERIES)
         return self._finalize(out, anchor=prices)
