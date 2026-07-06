@@ -30,6 +30,10 @@ constraints:
     crypto: 0.05
     fx_etf: 0.10
     commodity_etf: 0.10
+    rates_etf: 0.10
+    intl_etf: 0.10
+    sector_etf: 0.15
+    events: 0.02               # per-market cap inside the event book
   gross_cap: 2.0
   net_band: 0.10
   beta_neutral_band: 0.05
@@ -41,6 +45,10 @@ allocation:
   sleeve_cov_halflife_days: 63
   risk_caps:
     crypto: 0.20               # crypto <= 20% of total risk
+    rates_etf: 0.25            # no new sleeve carries more than 25% of total risk
+    intl_etf: 0.25
+    sector_etf: 0.25
+    events: 0.10               # prediction markets: smallest cap — capacity + binary payoffs
     max_any_sleeve: 0.40
   warmup_days: 126             # until then: inverse-vol weight with 0.5 haircut
 
