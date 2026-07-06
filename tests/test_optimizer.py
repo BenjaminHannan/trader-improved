@@ -251,6 +251,105 @@ def test_macro_causality_future_corruption():
     assert m0 == m1
 
 
+# --------------------------------------------------- vol-target EWMA + deadband
+def test_vol_target_ewma_known_answer():
+    """EWMA-std estimator reproduces target / (ewm-std * sqrt252), within clip."""
+    rng = np.random.default_rng(0)
+    r = pd.Series(rng.normal(0, 0.01, 120),
+                  index=pd.bdate_range("2020-01-01", periods=120))
+    t = r.index[-1] + pd.Timedelta(days=1)
+    h = 33.0
+    ew = r.ewm(halflife=h, min_periods=21).std(bias=False).iloc[-1]
+    expected = 0.10 / (ew * np.sqrt(252.0))  # within clip for ~1% daily vol
+    m = vol_target_multiplier(r, t, target=0.10, lookback=21, ewma_halflife=h)
+    assert m == pytest.approx(expected)
+
+
+def test_vol_target_constant_vol_both_estimators():
+    """Constant-vol series: multiplier -> target/realized under BOTH estimators."""
+    idx = pd.bdate_range("2020-01-01", periods=120)
+    a = 0.01
+    r = pd.Series(np.tile([a, -a], 60), index=idx)  # stationary magnitude
+    t = idx[-1] + pd.Timedelta(days=1)
+    for hl in (None, 33.0):
+        m = vol_target_multiplier(r, t, target=0.10, lookback=21, ewma_halflife=hl)
+        if hl is None:
+            realized = r.iloc[-21:].std(ddof=1) * np.sqrt(252.0)
+        else:
+            realized = r.ewm(halflife=hl, min_periods=21).std(bias=False).iloc[-1] * np.sqrt(252.0)
+        expected = float(np.clip(0.10 / realized, 0.0, 1.5))
+        assert m == pytest.approx(expected)
+
+
+def test_vol_target_deadband_holds_and_releases():
+    """Within band -> returns prev exactly; outside band -> returns the new value."""
+    idx = pd.bdate_range("2020-01-01", periods=60)
+    r = pd.Series(np.random.default_rng(1).normal(0, 0.01, 60), index=idx)
+    t = idx[-1] + pd.Timedelta(days=1)
+    new = vol_target_multiplier(r, t, target=0.10, lookback=21)
+
+    prev_close = new * 1.05          # |new/prev - 1| = 0.0476 <= 0.10 -> hold
+    held = vol_target_multiplier(r, t, target=0.10, lookback=21,
+                                 prev_multiplier=prev_close, deadband=0.10)
+    assert held == prev_close        # exact re-use, not the freshly computed value
+
+    prev_far = new * 2.0             # |new/prev - 1| = 0.5 > 0.10 -> release
+    released = vol_target_multiplier(r, t, target=0.10, lookback=21,
+                                     prev_multiplier=prev_far, deadband=0.10)
+    assert released == pytest.approx(new)
+
+
+def test_vol_target_deadband_zero_bit_identical():
+    """deadband=0 (any prev) reproduces the un-hysteretic value bit-for-bit, both estimators."""
+    idx = pd.bdate_range("2020-01-01", periods=90)
+    r = pd.Series(np.random.default_rng(2).normal(0, 0.01, 90), index=idx)
+    t = idx[-1] + pd.Timedelta(days=1)
+    for hl in (None, 33.0):
+        base = vol_target_multiplier(r, t, target=0.10, lookback=21, ewma_halflife=hl)
+        with_prev = vol_target_multiplier(r, t, target=0.10, lookback=21, ewma_halflife=hl,
+                                          prev_multiplier=0.123456, deadband=0.0)
+        assert with_prev == base     # exact equality
+
+
+def test_vol_target_pit_corruption_both_estimators():
+    """Corrupting returns at/after t leaves the multiplier at t unchanged (both estimators)."""
+    idx = pd.bdate_range("2020-01-01", periods=80)
+    r = pd.Series(np.random.default_rng(3).normal(0, 0.01, 80), index=idx)
+    t = idx[50]  # rows with index >= t are the future and must not enter the answer
+    for hl in (None, 33.0):
+        m0 = vol_target_multiplier(r, t, target=0.10, lookback=21, ewma_halflife=hl)
+        corrupt = r.copy()
+        corrupt[corrupt.index >= t] = 1e6
+        m1 = vol_target_multiplier(corrupt, t, target=0.10, lookback=21, ewma_halflife=hl)
+        assert m0 == m1
+
+
+def test_vol_target_turnover_reduction():
+    """On seeded noisy-vol synthetic returns, sum|m_t - m_{t-1}| is strictly lower with
+    (EWMA smoothing + deadband) than with the raw window and no deadband."""
+    rng = np.random.default_rng(7)
+    n = 400
+    idx = pd.bdate_range("2019-01-01", periods=n)
+    base_vol = 0.008 + 0.006 * np.abs(np.sin(np.linspace(0, 8 * np.pi, n)))
+    vol_noise = np.exp(rng.normal(0, 0.4, n))     # multiplicative whipsaw in realized vol
+    r = pd.Series(rng.normal(0, 1, n) * base_vol * vol_noise, index=idx)
+    ts = idx[60:]                                  # decision dates with enough trailing history
+
+    def path(ewma_halflife, deadband):
+        ms, prev = [], None
+        for t in ts:
+            m = vol_target_multiplier(r, t, target=0.10, lookback=21,
+                                      ewma_halflife=ewma_halflife,
+                                      prev_multiplier=prev, deadband=deadband)
+            ms.append(m)
+            prev = m
+        return np.asarray(ms)
+
+    tv_raw = float(np.abs(np.diff(path(None, 0.0))).sum())
+    tv_smooth = float(np.abs(np.diff(path(33.0, 0.10))).sum())
+    assert tv_smooth < tv_raw
+
+
 # ------------------------------------------------------------------ allocation
 def test_erc_inverse_vol_two_assets():
     cov = pd.DataFrame(np.diag([4.0, 1.0]), index=["a", "b"], columns=["a", "b"])  # vols 2:1

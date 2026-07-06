@@ -13,19 +13,44 @@ import pandas as pd
 
 
 def vol_target_multiplier(daily_returns: pd.Series, t, target: float = 0.10,
-                          lookback: int = 21, clip: tuple = (0.0, 1.5)) -> float:
-    """target / realized_vol over the last `lookback` returns strictly before t.
+                          lookback: int = 21, clip: tuple = (0.0, 1.5),
+                          ewma_halflife: float | None = None,
+                          prev_multiplier: float | None = None,
+                          deadband: float = 0.0) -> float:
+    """target / realized_vol over the trailing returns strictly before t.
 
     Scales up when recent realized vol is below target and down when above, clipped.
+
+    Realized-vol estimator (strictly trailing, rows dated `< t` only):
+      - `ewma_halflife is None`  -> sample std over the last `lookback` returns
+        (the original raw rolling-window behavior);
+      - `ewma_halflife` set      -> EWMA std (exponentially-weighted, `min_periods=lookback`)
+        over ALL trailing returns, centred at the same responsiveness but smoothed.
+        Smoothing reduces multiplier whipsaw (arXiv 2212.07288).
+
+    Hysteresis deadband: when `prev_multiplier` is given and the newly computed
+    multiplier is within `deadband` fractional distance of it (|new/prev - 1| <= deadband),
+    the previous multiplier is returned unchanged — leverage only moves when it matters,
+    which attacks the turnover-cost erosion channel (Barroso & Detzel 2021). `deadband=0.0`
+    (or no `prev_multiplier`) reproduces the un-hysteretic path bit-for-bit.
     """
     r = daily_returns[daily_returns.index < t].dropna()
     if len(r) < lookback:
         return 1.0
-    window = r.iloc[-lookback:]
-    realized = float(window.std(ddof=1)) * np.sqrt(252.0)
+    if ewma_halflife is None:
+        window = r.iloc[-lookback:]
+        realized = float(window.std(ddof=1)) * np.sqrt(252.0)
+    else:
+        ew = r.ewm(halflife=float(ewma_halflife), min_periods=lookback).std(bias=False)
+        realized = float(ew.iloc[-1]) * np.sqrt(252.0)
     if not np.isfinite(realized) or realized <= 0.0:
         return 1.0
-    return float(np.clip(target / realized, clip[0], clip[1]))
+    new = float(np.clip(target / realized, clip[0], clip[1]))
+    if prev_multiplier is not None and deadband > 0.0:
+        p = float(prev_multiplier)
+        if p != 0.0 and abs(new / p - 1.0) <= deadband:
+            return p
+    return new
 
 
 def drawdown_multiplier(equity: pd.Series, t, threshold: float = 0.08,
@@ -81,15 +106,24 @@ def macro_derisk_multiplier(macro_panel: pd.DataFrame, t,
 
 
 def overlay_multiplier(daily_returns: pd.Series, equity: pd.Series,
-                       macro_panel: pd.DataFrame, t, cfg: dict) -> float:
-    """Product of the three overlays, driven by cfg['overlays']."""
+                       macro_panel: pd.DataFrame, t, cfg: dict,
+                       prev_multiplier: float | None = None) -> float:
+    """Product of the three overlays, driven by cfg['overlays'].
+
+    `prev_multiplier` (optional) is the vol-target multiplier from the previous decision
+    date; when supplied together with a positive `overlays.vol_target.deadband` it enables
+    the vol-target hysteresis. Absent, behaviour is unchanged (back-compat).
+    """
     ov = cfg["overlays"]
     vt = ov["vol_target"]
     dc = ov["drawdown_control"]
     md = ov["macro_derisk"]
 
     m_vol = vol_target_multiplier(daily_returns, t, vt["target"],
-                                  vt["lookback_days"], tuple(vt["clip"]))
+                                  vt["lookback_days"], tuple(vt["clip"]),
+                                  ewma_halflife=vt.get("ewma_halflife"),
+                                  prev_multiplier=prev_multiplier,
+                                  deadband=vt.get("deadband", 0.0))
     m_dd = drawdown_multiplier(equity, t, dc["threshold"], dc["scale"])
     m_macro = 1.0
     if md.get("enabled", True):

@@ -42,6 +42,8 @@ overlays:
     target: 0.10
     lookback_days: 21
     clip: [0.0, 1.5]
+    ewma_halflife: 33          # EWMA std halflife (~21d-window responsiveness, smoothed)
+    deadband: 0.10             # hysteresis: hold prev multiplier unless |new/prev-1| > 10%
   drawdown_control:
     threshold: 0.08            # beyond 8% running DD scale gross to 0.5
     scale: 0.5
