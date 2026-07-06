@@ -37,15 +37,15 @@ configs/          universe / factors (registry + gate) / costs / risk / backtest
 production/
   core/           config, calendars, parquet lake (schema-enforced), pit.py
   reference/      instrument master (never-reused ids), PIT universes, ticker hygiene
-  data/           BaseLoader (fetch→transform→stamp→audit→write), Stage-1 loaders
-  signals/        momentum, reversal, low-vol, carry, tsmom, COT positioning
+  data/           BaseLoader (fetch→transform→stamp→audit→write), Stage-1 + Stage-2 loaders
+  signals/        momentum, reversal, low-vol, carry, tsmom, COT positioning, mcap/TVL value
   alpha/          z-scores → rank-IC → α = σ·IC·z → IC-weighted combine; hard gate
   risk/           Σ = BFBᵀ + D (equity/crypto); shrunk EWMA cov (small sleeves)
   portfolio/      cvxpy QP (factor-form), declarative constraints, overlays, ERC
-  backtest/       walk-forward engine, costs, deflated Sharpe, bootstrap, attribution
-  execution/      (later sessions) orders, Alpaca paper, shortfall
-  monitor/        (later sessions) live IC decay alarms
-scripts/          ingest.py, build_factors.py, run_backtest.py
+  backtest/       walk-forward engine, costs, deflated Sharpe, bootstrap, attribution, CPCV+PBO
+  execution/      target weights → orders → Alpaca paper (dry-run default), shortfall
+  monitor/        live rolling IC vs gate-time train IC, decay + sign-flip alarms
+scripts/          ingest.py (--stage 2), build_factors.py, run_backtest.py, daily_run.py
 tests/            the verification gates for every phase
 data/             parquet lake (gitignored): raw / curated / reference / panels / audit
 reports/          one artifact per backtest run (gitignored)
