@@ -516,6 +516,48 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     return result
 
 
+def latest_target_weights(data: dict, instruments: pd.Series, cfg: dict | None = None,
+                          factors_cfg=None, result: "BacktestResult | None" = None
+                          ) -> pd.Series:
+    """Book-level target weights on the most recent rebalance grid date.
+
+    Thin wrapper over :func:`run_backtest`: it runs the identical walk-forward (so the
+    weights come out of exactly the PIT machinery the backtest already validates — no
+    parallel, un-tested decision path lives in the live runner), then blends each
+    sleeve's *final* rebalance weights by the latest monthly sleeve allocation and the
+    latest overlay multiplier into a single fraction-of-book weight per instrument.
+
+    Returns a Series indexed by instrument_id (gross exposure <= 1), non-zero entries
+    only. Pass a precomputed ``result`` to avoid re-running the backtest.
+    """
+    if cfg is None:
+        cfg = backtest_config()
+    if result is None:
+        result = run_backtest(data, instruments, cfg=cfg, factors_cfg=factors_cfg)
+
+    weights_history = result.weights_history
+    if not weights_history or result.sleeve_returns.empty:
+        return pd.Series(dtype=float)
+
+    last_day = result.sleeve_returns.index.max()
+    alloc = sleeve_allocation(result.sleeve_returns, last_day, cfg)
+    overlay_mult = float(result.overlay.iloc[-1]) if len(result.overlay) else 1.0
+
+    parts: list = []
+    for sleeve, Wg in weights_history.items():
+        if Wg is None or Wg.empty:
+            continue
+        w_last = Wg.iloc[-1].dropna()
+        a = float(alloc.get(sleeve, 0.0))
+        if a == 0.0:
+            continue
+        parts.append(w_last * a * overlay_mult)
+    if not parts:
+        return pd.Series(dtype=float)
+    book = pd.concat(parts).groupby(level=0).sum()
+    return book[book != 0.0]
+
+
 def _record_factor_weights(store: dict, t, a_f: pd.DataFrame, rm_ids) -> None:
     """Stash a factor's stand-alone target weights at ``t`` for per-alpha attribution.
 
