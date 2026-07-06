@@ -53,6 +53,26 @@ reports/          one artifact per backtest run (gitignored)
 
 ## Quick start
 
+**Windows (PowerShell)** — one command installs uv, stores your FRED key in the user
+environment, syncs deps, runs the test suite, builds the universe, pulls all Stage-1
+data, and prints the factor gate preview. (PowerShell 5.1 has no `&&` and no
+`export` — use the script, or run commands one per line.)
+
+```powershell
+git clone https://github.com/BenjaminHannan/trader-improved.git
+cd trader-improved
+powershell -ExecutionPolicy Bypass -File scripts\bootstrap.ps1 -FredApiKey YOUR_KEY
+```
+
+**macOS / Linux**:
+
+```bash
+git clone https://github.com/BenjaminHannan/trader-improved.git && cd trader-improved
+FRED_API_KEY=yourkey bash scripts/bootstrap.sh
+```
+
+Or step by step:
+
 ```bash
 uv sync
 
