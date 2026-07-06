@@ -17,6 +17,7 @@ from production.portfolio.optimizer import optimize_sleeve
 from production.portfolio.constraints import build_constraints, check_constraints
 from production.portfolio.overlays import (
     vol_target_multiplier, drawdown_multiplier, macro_derisk_multiplier,
+    overlay_multiplier, overlay_components,
 )
 from production.portfolio.allocation import (
     erc_weights, apply_risk_caps, sleeve_allocation,
@@ -196,6 +197,122 @@ def test_drawdown_multiplier():
     path = np.concatenate([np.linspace(1.0, 1.2, 25), np.linspace(1.2, 1.0, 25)])
     deep = pd.Series(path, index=idx)
     assert drawdown_multiplier(deep, t, threshold=0.08, scale=0.5) == 0.5
+
+
+# ------------------------------------------- drawdown ramp / hysteresis / PIT
+def _equity_with_dd(dd, n=10):
+    """Equity series with peak 1.0 and terminal drawdown `dd`, plus a decision date t
+    that uses all `n` rows as (strictly-prior) history."""
+    idx = pd.bdate_range("2020-01-01", periods=n)
+    vals = np.ones(n)
+    vals[-1] = 1.0 - dd
+    return pd.Series(vals, index=idx), idx[-1] + pd.Timedelta(days=1)
+
+
+def test_drawdown_ramp_known_answers():
+    """Ramp at DD = 0.5x/1x/1.5x/2x/3x threshold -> 1.0, 1.0, 0.75, scale, scale."""
+    thr, scale = 0.08, 0.5
+    cases = {0.5: 1.0, 1.0: 1.0, 1.5: 0.75, 2.0: scale, 3.0: scale}
+    for k, expected in cases.items():
+        e, t = _equity_with_dd(k * thr)
+        m = drawdown_multiplier(e, t, threshold=thr, scale=scale, mode="ramp")
+        assert m == pytest.approx(expected), (k, m)
+
+
+def test_drawdown_step_bit_identical_to_old():
+    """mode='step' (the default) matches the original binary rule on a shared case set."""
+    thr, scale = 0.08, 0.5
+    for k in (0.0, 0.5, 1.0, 1.01, 1.5, 2.0, 3.0):
+        e, t = _equity_with_dd(k * thr)
+        dd = k * thr
+        old = scale if dd > thr else 1.0
+        assert drawdown_multiplier(e, t, threshold=thr, scale=scale) == old
+        assert drawdown_multiplier(e, t, threshold=thr, scale=scale, mode="step") == old
+
+
+def test_drawdown_hysteresis_holds_and_releases():
+    """Once de-risked (prev<1), hold through partial recovery; release below recovery bound."""
+    thr, scale, rec = 0.08, 0.5, 0.75
+    # Partial recovery: DD between recovery bound (0.06) and threshold (0.08) -> stays at prev.
+    e_hold, t_hold = _equity_with_dd(0.07)
+    held = drawdown_multiplier(e_hold, t_hold, threshold=thr, scale=scale, mode="ramp",
+                               recovery_frac=rec, prev_multiplier=0.75)
+    assert held == 0.75
+    # No re-risk at the boundary: DD deeper than threshold but ramp above prev -> hold prev.
+    e_deep, t_deep = _equity_with_dd(0.12)  # ramp value 0.75 > prev 0.6
+    held2 = drawdown_multiplier(e_deep, t_deep, threshold=thr, scale=scale, mode="ramp",
+                                recovery_frac=rec, prev_multiplier=0.6)
+    assert held2 == 0.6
+    # Further de-risking still allowed: ramp below prev -> take the deeper scaling.
+    deeper = drawdown_multiplier(e_deep, t_deep, threshold=thr, scale=scale, mode="ramp",
+                                 recovery_frac=rec, prev_multiplier=0.9)
+    assert deeper == pytest.approx(0.75)
+    # Release: DD below recovery bound 0.75*0.08 = 0.06 -> back to 1.0.
+    e_rel, t_rel = _equity_with_dd(0.05)
+    released = drawdown_multiplier(e_rel, t_rel, threshold=thr, scale=scale, mode="ramp",
+                                   recovery_frac=rec, prev_multiplier=0.75)
+    assert released == 1.0
+
+
+def test_drawdown_pit_corruption_both_modes():
+    """Corrupting equity at/after t leaves the multiplier at t unchanged (step and ramp)."""
+    idx = pd.bdate_range("2020-01-01", periods=40)
+    # Deep drawdown established in the prior history, then junk from t onward.
+    path = np.concatenate([np.linspace(1.0, 1.2, 20), np.linspace(1.2, 1.0, 20)])
+    e = pd.Series(path, index=idx)
+    t = idx[25]
+    for mode in ("step", "ramp"):
+        m0 = drawdown_multiplier(e, t, threshold=0.08, scale=0.5, mode=mode)
+        corrupt = e.copy()
+        corrupt[corrupt.index >= t] = 1e9
+        corrupt2 = e.copy()
+        corrupt2[corrupt2.index >= t] = -1e9
+        assert drawdown_multiplier(corrupt, t, threshold=0.08, scale=0.5, mode=mode) == m0
+        assert drawdown_multiplier(corrupt2, t, threshold=0.08, scale=0.5, mode=mode) == m0
+
+
+def test_drawdown_whipsaw_fewer_changes_ramp_vs_step():
+    """Equity oscillating +-1% around the 8% DD boundary produces strictly fewer multiplier
+    CHANGES under ramp+hysteresis than under step (the whipsaw-cost property)."""
+    thr, scale, rec = 0.08, 0.5, 0.75
+    n = 40
+    idx = pd.bdate_range("2020-01-01", periods=n)
+    vals = np.ones(n)
+    # Peak at index 0; thereafter oscillate equity around 0.92 (DD ~ 0.08) by +-~0.5%.
+    for i in range(1, n):
+        vals[i] = 0.92 + 0.005 * (-1) ** i    # DD alternates 0.075 / 0.085 across the boundary
+    e = pd.Series(vals, index=idx)
+    ts = [idx[i] + pd.Timedelta(hours=12) for i in range(1, n)]
+
+    def changes(mode, hysteresis):
+        ms, prev = [], None
+        for t in ts:
+            m = drawdown_multiplier(e, t, threshold=thr, scale=scale, mode=mode,
+                                    recovery_frac=rec,
+                                    prev_multiplier=prev if hysteresis else None)
+            ms.append(m)
+            prev = m
+        return sum(1 for a, b in zip(ms[:-1], ms[1:]) if a != b)
+
+    step_changes = changes("step", hysteresis=False)
+    ramp_changes = changes("ramp", hysteresis=True)
+    assert ramp_changes < step_changes, (ramp_changes, step_changes)
+
+
+def test_overlay_components_product_equals_scalar():
+    """overlay_components(...)['product'] equals the overlay_multiplier scalar and the
+    product of the individual components."""
+    idx = pd.bdate_range("2020-01-01", periods=60)
+    r = pd.Series(np.random.default_rng(4).normal(0, 0.01, 60), index=idx)
+    eq_path = np.concatenate([np.linspace(1.0, 1.2, 30), np.linspace(1.2, 1.0, 30)])
+    equity = pd.Series(eq_path, index=idx)
+    t = idx[-1] + pd.Timedelta(days=1)
+    cfg = base_cfg()
+    panel = _macro_panel(4.0 + np.zeros(300))  # no matching series_id -> neutral macro
+    comp = overlay_components(r, equity, panel, t, cfg)
+    scalar = overlay_multiplier(r, equity, panel, t, cfg)
+    assert comp["product"] == pytest.approx(scalar)
+    assert comp["product"] == pytest.approx(comp["vol_target"] * comp["drawdown"] * comp["macro"])
 
 
 def _macro_panel(vals, avail_offset_days=1):

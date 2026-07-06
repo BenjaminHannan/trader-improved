@@ -100,6 +100,67 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
 
 DATASETS = ["prices", "funding", "fx", "macro", "french", "cot", "universe", "all"]
 
+# Curated `source` values that identify the two independent price feeds we cross-check.
+_PRIMARY_SOURCES = ("yfinance",)
+_SECONDARY_SOURCES = ("stooq",)
+
+
+def _source_matches(series: "pd.Series", markers: tuple[str, ...]) -> "pd.Series":
+    """Rows whose `source` contains any marker (loaders may stamp 'yfinance:prices')."""
+    src = series.astype(str)
+    hit = pd.Series(False, index=series.index)
+    for m in markers:
+        hit |= src.str.contains(m, case=False, na=False)
+    return hit
+
+
+def _run_cross_check(lake: Lake, sleeve: str) -> int:
+    """Cross-check the two price feeds in the curated lake and write an audit.
+
+    Splits curated 'prices' rows by their `source` provenance (yfinance vs stooq),
+    compares them in return space, prints the summary + quarantine list, and persists
+    the report to the audit zone. Returns 0 on success, non-zero when the data needed to
+    run is absent.
+    """
+    from production.data.cross_check import (
+        cross_vendor_report, quarantine_list, write_cross_check_audit,
+    )
+
+    try:
+        prices = lake.read_curated("prices")
+    except Exception as exc:
+        print(f"[cross-check] no curated prices to check ({exc}).", file=sys.stderr)
+        return 1
+    if prices.empty:
+        print("[cross-check] curated prices are empty — nothing to cross-check.",
+              file=sys.stderr)
+        return 1
+
+    primary = prices[_source_matches(prices["source"], _PRIMARY_SOURCES)]
+    secondary = prices[_source_matches(prices["source"], _SECONDARY_SOURCES)]
+    if primary.empty or secondary.empty:
+        have = sorted(prices["source"].astype(str).unique())
+        print("[cross-check] need both feeds; a vendor's rows are absent "
+              f"(sources present: {have}). Ingest both yfinance and stooq first.",
+              file=sys.stderr)
+        return 1
+
+    report = cross_vendor_report(primary, secondary)
+    out = write_cross_check_audit(report, lake)
+    s = report["summary"]
+    print(f"[cross-check] checked={s['instruments_checked']} "
+          f"flagged={s['instruments_flagged']} worst={s['worst_offender']} "
+          f"-> {out}")
+    if report["insufficient_overlap"]:
+        print(f"[cross-check] insufficient overlap (skipped): "
+              f"{sorted(report['insufficient_overlap'])}")
+    quarantine = quarantine_list(report)
+    if quarantine:
+        print(f"[cross-check] QUARANTINE ({len(quarantine)}): {quarantine}")
+    else:
+        print("[cross-check] quarantine list: none")
+    return 0
+
 
 def _make_stage2_loaders(lake: Lake, instruments):
     """Construct every Stage-2 macro/sentiment loader against the default lake.
@@ -154,6 +215,9 @@ def main(argv=None) -> int:
     p.add_argument("--end", default=str(pd.Timestamp.now().date()), help="ISO end date")
     p.add_argument("--full", action="store_true",
                    help="full (non-incremental) re-pull, ignoring the watermark")
+    p.add_argument("--cross-check", action="store_true",
+                   help="cross-check the two curated price feeds (yfinance vs stooq) in "
+                        "return space, write an audit, and print any quarantine list")
     p.add_argument("--lake-root", default=None, help="override lake root directory")
     args = p.parse_args(argv)
 
@@ -165,7 +229,9 @@ def main(argv=None) -> int:
         return _run_stage2(lake, instruments, args.start, args.end, incremental)
 
     if args.dataset is None:
-        p.error("--dataset is required unless --stage 2 is given")
+        if args.cross_check:  # cross-check can run standalone against the curated lake
+            return _run_cross_check(lake, args.sleeve)
+        p.error("--dataset is required unless --stage 2 or --cross-check is given")
 
     if args.dataset == "universe":
         _build_universe(lake)
@@ -189,6 +255,9 @@ def main(argv=None) -> int:
         except Exception as exc:  # keep going across datasets in an 'all' run
             print(f"[{ds}] FAILED: {exc}", file=sys.stderr)
             rc = 1
+
+    if args.cross_check and "prices" in todo:  # cross-check the feeds just ingested
+        rc |= _run_cross_check(lake, args.sleeve)
     return rc
 
 

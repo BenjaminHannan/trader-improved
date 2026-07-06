@@ -1,9 +1,14 @@
 """Fallback daily prices from Stooq.
 
 Used when Yahoo is unavailable or a symbol is missing there. Same canonical schema
-and the same 21:30 UTC availability stamp as the yfinance loader — Stooq's daily bar
-for session D is likewise a post-close figure. Fetch tries pandas_datareader's stooq
-reader first, then falls back to the direct CSV endpoint per symbol.
+as the yfinance loader, stamped 21:15 UTC — deliberately EARLIER than yfinance's
+21:30. Both are honest post-close times, and the 15-minute gap encodes feed
+priority in the availability algebra itself: the curated lake dedups on
+(obs_date, instrument_id, available_from), so both vendors' rows coexist (enabling
+production/data/cross_check.py), while asof_panel's latest-visible-vintage rule
+makes yfinance win whenever both are present and stooq fill the gaps — exactly
+fallback semantics, with no special-case code. Fetch tries pandas_datareader's
+stooq reader first, then falls back to the direct CSV endpoint per symbol.
 """
 from __future__ import annotations
 
@@ -20,7 +25,7 @@ class StooqPricesLoader(BaseLoader):
     source = "stooq:prices"
     asset_classes = ["equity", "fx", "commodity"]
     availability_rule = AvailabilityRule("obs_offset",
-                                         {"offset": pd.Timedelta(hours=21, minutes=30)})
+                                         {"offset": pd.Timedelta(hours=21, minutes=15)})
     expectations = {
         "columns": ["close", "volume", "dollar_volume"],
         "ranges": {"close": (0, None), "volume": (0, None)},

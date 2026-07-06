@@ -54,8 +54,30 @@ def vol_target_multiplier(daily_returns: pd.Series, t, target: float = 0.10,
 
 
 def drawdown_multiplier(equity: pd.Series, t, threshold: float = 0.08,
-                        scale: float = 0.5) -> float:
-    """Scale gross by `scale` once running drawdown (using equity strictly before t) exceeds threshold."""
+                        scale: float = 0.5, mode: str = "step",
+                        recovery_frac: float = 0.75,
+                        prev_multiplier: float | None = None) -> float:
+    """Scale gross exposure as running drawdown (equity strictly before t) deepens.
+
+    Drawdown `dd = 1 - cur/peak` is measured on equity dated strictly `< t` (PIT:
+    corruption of equity at/after `t` cannot move the answer).
+
+    `mode="step"` (default, back-compat): binary rule — return `scale` when `dd > threshold`,
+    else 1.0. Bit-identical to the original overlay.
+
+    `mode="ramp"`: graduated de-risking (risk-control-index style, less whipsaw):
+      - `dd < threshold`            -> 1.0;
+      - `threshold <= dd <= 2*threshold` -> linear interpolation from 1.0 at `threshold`
+        down to `scale` at `2*threshold`;
+      - `dd > 2*threshold`          -> `scale`.
+
+    Hysteresis (ramp mode only, when `prev_multiplier` is not None and `prev_multiplier < 1.0`,
+    i.e. we were already de-risked): hold `min(prev_multiplier, ramp_value)` — never re-risk
+    at the same boundary, but still allow further de-risking if the drawdown deepens — until
+    the drawdown recovers below `threshold * recovery_frac`, at which point release to 1.0.
+    This re-entry asymmetry attacks the whipsaw-cost channel when equity oscillates around
+    the trigger. Absent `prev_multiplier` (or `>= 1.0`) reproduces the memoryless ramp.
+    """
     e = equity[equity.index < t].dropna()
     if len(e) < 1:
         return 1.0
@@ -64,7 +86,22 @@ def drawdown_multiplier(equity: pd.Series, t, threshold: float = 0.08,
     if peak <= 0.0:
         return 1.0
     dd = 1.0 - cur / peak
-    return float(scale) if dd > threshold else 1.0
+    if mode == "step":
+        return float(scale) if dd > threshold else 1.0
+
+    # ramp
+    if dd <= threshold:
+        ramp = 1.0
+    elif dd >= 2.0 * threshold:
+        ramp = float(scale)
+    else:
+        ramp = 1.0 + (float(scale) - 1.0) * (dd - threshold) / threshold
+
+    if prev_multiplier is not None and float(prev_multiplier) < 1.0:
+        if dd < threshold * recovery_frac:
+            return 1.0
+        return float(min(float(prev_multiplier), ramp))
+    return float(ramp)
 
 
 def macro_derisk_multiplier(macro_panel: pd.DataFrame, t,
@@ -105,28 +142,72 @@ def macro_derisk_multiplier(macro_panel: pd.DataFrame, t,
     return float(scale) if float(np.mean(zs)) > z_trigger else 1.0
 
 
-def overlay_multiplier(daily_returns: pd.Series, equity: pd.Series,
+def overlay_components(daily_returns: pd.Series, equity: pd.Series,
                        macro_panel: pd.DataFrame, t, cfg: dict,
-                       prev_multiplier: float | None = None) -> float:
-    """Product of the three overlays, driven by cfg['overlays'].
+                       prev_multiplier: float | None = None,
+                       prev_components: dict | None = None) -> dict:
+    """Compute the three overlays and their product, driven by cfg['overlays'].
 
-    `prev_multiplier` (optional) is the vol-target multiplier from the previous decision
-    date; when supplied together with a positive `overlays.vol_target.deadband` it enables
-    the vol-target hysteresis. Absent, behaviour is unchanged (back-compat).
+    Returns `{"vol_target": m1, "drawdown": m2, "macro": m3, "product": m1*m2*m3}` so a
+    caller can carry the per-overlay previous state (needed to run both the vol-target
+    deadband and the drawdown hysteresis independently — a single scalar product cannot be
+    decomposed back into its factors).
+
+    Previous-state resolution:
+      - `prev_components` (preferred): dict with optional keys `"vol_target"` and
+        `"drawdown"`, each the corresponding multiplier from the previous decision date;
+      - `prev_multiplier` (deprecated back-compat): a single scalar honored ONLY as the
+        previous *vol-target* multiplier, and ONLY when `prev_components` is None. This
+        matches the engine's legacy call, which passed the previous overlay product as the
+        vol-target hysteresis seed. In that legacy path the drawdown overlay gets no prev
+        state (memoryless ramp / step).
+
+    `overlays.drawdown_control.mode` (absent -> "step", back-compat) and `recovery_frac`
+    (absent -> 0.75) drive the drawdown overlay shape.
     """
     ov = cfg["overlays"]
     vt = ov["vol_target"]
     dc = ov["drawdown_control"]
     md = ov["macro_derisk"]
 
+    prev_vt: float | None = None
+    prev_dd: float | None = None
+    if prev_components is not None:
+        prev_vt = prev_components.get("vol_target")
+        prev_dd = prev_components.get("drawdown")
+    elif prev_multiplier is not None:
+        prev_vt = prev_multiplier  # legacy: scalar seed is the vol-target prev only
+
     m_vol = vol_target_multiplier(daily_returns, t, vt["target"],
                                   vt["lookback_days"], tuple(vt["clip"]),
                                   ewma_halflife=vt.get("ewma_halflife"),
-                                  prev_multiplier=prev_multiplier,
+                                  prev_multiplier=prev_vt,
                                   deadband=vt.get("deadband", 0.0))
-    m_dd = drawdown_multiplier(equity, t, dc["threshold"], dc["scale"])
+    m_dd = drawdown_multiplier(equity, t, dc["threshold"], dc["scale"],
+                               mode=dc.get("mode", "step"),
+                               recovery_frac=dc.get("recovery_frac", 0.75),
+                               prev_multiplier=prev_dd)
     m_macro = 1.0
     if md.get("enabled", True):
         m_macro = macro_derisk_multiplier(macro_panel, t, tuple(md["series"]),
                                           md["z_window_days"], md["z_trigger"], md["scale"])
-    return float(m_vol * m_dd * m_macro)
+    product = float(m_vol * m_dd * m_macro)
+    return {"vol_target": float(m_vol), "drawdown": float(m_dd),
+            "macro": float(m_macro), "product": product}
+
+
+def overlay_multiplier(daily_returns: pd.Series, equity: pd.Series,
+                       macro_panel: pd.DataFrame, t, cfg: dict,
+                       prev_multiplier: float | None = None,
+                       prev_components: dict | None = None) -> float:
+    """Product of the three overlays, driven by cfg['overlays'].
+
+    Thin scalar wrapper over `overlay_components` (see there for the full contract). The
+    signature is call-compatible with the engine's existing usage: `prev_multiplier`
+    (optional) is honored as the previous vol-target multiplier for the deadband hysteresis
+    when `prev_components` is absent. Pass `prev_components` to additionally thread the
+    drawdown hysteresis state.
+    """
+    return overlay_components(daily_returns, equity, macro_panel, t, cfg,
+                              prev_multiplier=prev_multiplier,
+                              prev_components=prev_components)["product"]
