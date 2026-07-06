@@ -15,7 +15,11 @@ import pytest
 
 from production.data.audit import audit
 from production.data.base import AvailabilityRule, IngestError, stamp_availability
+from production.data.loaders.ccxt_funding import (DEFAULT_EXCHANGE_CHAIN,
+                                                  CcxtFundingLoader)
+from production.data.loaders.cftc_cot import CftcCotLoader
 from production.data.loaders.fred_alfred import FredAlfredLoader
+from production.data.loaders.ken_french import KenFrenchLoader, parse_french_csv
 from production.data.loaders.yfinance_prices import YFinancePricesLoader
 
 UTC = "UTC"
@@ -341,3 +345,302 @@ def test_stage3_stubs_raise_not_implemented():
         assert loader.availability_rule is not None
         with pytest.raises(NotImplementedError):
             loader.fetch("2020-01-01", "2020-12-31")
+
+
+# ============================================ (8) yfinance payload-shape hardening
+def _flat_payload(dates, base=10.0, adj_close=False, lower=False):
+    """A single-ticker FLAT-column frame the way yfinance returns for one symbol."""
+    cols = {
+        "Open": base + np.arange(len(dates)),
+        "High": base + np.arange(len(dates)) + 1,
+        "Low": base + np.arange(len(dates)) - 1,
+        "Close": base + np.arange(len(dates)),
+        "Volume": 100.0 * (np.arange(len(dates)) + 1),
+    }
+    if adj_close:  # auto_adjust=False keeps a separate 'Adj Close'
+        cols["Adj Close"] = cols["Close"]
+    df = pd.DataFrame(cols, index=dates)
+    if lower:
+        df.columns = [c.lower() for c in df.columns]
+    return df
+
+
+def test_yfinance_field_ticker_multiindex_order():
+    # yfinance's other layout: columns are (field, ticker), not (ticker, field).
+    dates = pd.date_range("2020-01-02", periods=3, freq="B")
+    payload = _yf_payload(dates, ["AAA", "BBB"]).swaplevel(0, 1, axis=1)
+    loader = YFinancePricesLoader(instruments=_instruments(), symbols=["AAA", "BBB"])
+    long = loader.transform(payload)
+    assert set(long["instrument_id"]) == {"EQ:AAA:2000-01-03", "EQ:BBB:2000-01-03"}
+    assert len(long) == 6
+
+
+def test_yfinance_flat_single_ticker():
+    dates = pd.date_range("2020-01-02", periods=4, freq="B")
+    loader = YFinancePricesLoader(instruments=_instruments(), symbols=["AAA"])
+    long = loader.transform(_flat_payload(dates))
+    assert set(long["instrument_id"]) == {"EQ:AAA:2000-01-03"}
+    assert len(long) == 4
+    np.testing.assert_allclose(long["dollar_volume"], long["close"] * long["volume"])
+
+
+def test_yfinance_flat_lowercase_and_adjclose():
+    # Lower-cased field names AND an extra 'Adj Close' column both parse fine.
+    dates = pd.date_range("2020-01-02", periods=3, freq="B")
+    loader = YFinancePricesLoader(instruments=_instruments(), symbols=["AAA"])
+    long = loader.transform(_flat_payload(dates, adj_close=True, lower=True))
+    assert len(long) == 3
+    assert (long["close"] > 0).all()
+
+
+def test_yfinance_named_column_levels_parse():
+    # yfinance 1.x stamps names on the levels ('Price','Ticker') + index name 'Date'.
+    dates = pd.date_range("2020-01-02", periods=3, freq="B")
+    payload = _yf_payload(dates, ["AAA", "BBB"])
+    payload.columns = payload.columns.set_names(["Ticker", "Price"])
+    payload.index = payload.index.set_names("Date")
+    loader = YFinancePricesLoader(instruments=_instruments(), symbols=["AAA", "BBB"])
+    long = loader.transform(payload)
+    assert len(long) == 6
+
+
+def test_yfinance_partial_empty_symbol_degrades_with_warning():
+    # BBB comes back all-NaN (geo/rate-limited in the batch): warn + skip, don't raise.
+    dates = pd.date_range("2020-01-02", periods=3, freq="B")
+    payload = _yf_payload(dates, ["AAA", "BBB"])
+    payload[("BBB", "Close")] = np.nan
+    loader = YFinancePricesLoader(instruments=_instruments(), symbols=["AAA", "BBB"])
+    long = loader.transform(payload)
+    assert set(long["instrument_id"]) == {"EQ:AAA:2000-01-03"}
+    assert any("BBB" in w and "no usable close" in w for w in loader.warnings)
+
+
+def test_yfinance_unrecognized_shape_reports_columns():
+    # Genuinely unparseable (non-OHLCV flat frame, ambiguous multi-symbol request):
+    # the error must name the columns for one-glance diagnosis.
+    bad = pd.DataFrame({"foo": [1, 2], "bar": [3, 4]})
+    loader = YFinancePricesLoader(instruments=_instruments(), symbols=["AAA", "BBB"])
+    with pytest.raises(IngestError) as ei:
+        loader.transform(bad)
+    msg = str(ei.value)
+    assert "unrecognized OHLCV payload shape" in msg
+    assert "foo" in msg and "bar" in msg
+
+
+# ================================================= (9) ccxt funding exchange chain
+def _crypto_instruments() -> pd.DataFrame:
+    def row(iid, ccxt_sym):
+        return dict(
+            instrument_id=iid, asset_class="crypto", sleeve="crypto",
+            symbol=ccxt_sym.split("/")[0],
+            vendor_symbols=json.dumps({"ccxt": ccxt_sym}),
+            currency="USD", valid_from="1990-01-01", valid_to="2099-01-01",
+            proxy_of=None, sector=None, meta="{}",
+        )
+    return pd.DataFrame([
+        row("CR:BTC:2013-09-01", "BTC/USDT:USDT"),
+        row("CR:ETH:2015-08-07", "ETH/USDT:USDT"),
+    ])
+
+
+class _FakeExchange:
+    def __init__(self, handler):
+        self.handler = handler
+
+    def fetch_funding_rate_history(self, sym, since=None):
+        return self.handler(sym)  # returns a list, or raises
+
+
+def _install_fake_ccxt(monkeypatch, handlers: dict):
+    """Register a fake ``ccxt`` module whose exchanges use the given per-symbol handlers."""
+    import sys
+    import types
+
+    mod = types.ModuleType("ccxt")
+    for name, handler in handlers.items():
+        mod.__dict__[name] = (lambda h: (lambda: _FakeExchange(h)))(handler)
+    monkeypatch.setitem(sys.modules, "ccxt", mod)
+
+
+def _funding_hist(rate):
+    day = pd.Timestamp("2021-01-01", tz="UTC")
+    return [{"timestamp": int((day + pd.Timedelta(hours=8 * k)).timestamp() * 1000),
+             "fundingRate": rate} for k in range(3)]
+
+
+def test_funding_default_chain_is_reachable_venues():
+    loader = CcxtFundingLoader(symbols=["BTC/USDT:USDT"])
+    assert loader.exchanges == DEFAULT_EXCHANGE_CHAIN == ["bybit", "okx", "kraken"]
+    # An explicit exchange still pins the venue (overrides the chain).
+    assert CcxtFundingLoader(symbols=[], exchange="binanceusdm").exchanges == ["binanceusdm"]
+
+
+def test_funding_chain_falls_through_to_next_exchange(monkeypatch):
+    # bybit serves BTC but not ETH; okx serves ETH -> both resolved across the chain.
+    def bybit(sym):
+        if sym == "BTC/USDT:USDT":
+            return _funding_hist(0.0001)
+        raise RuntimeError("not listed")
+
+    def okx(sym):
+        if sym == "ETH/USDT:USDT":
+            return _funding_hist(0.0002)
+        raise RuntimeError("not listed")
+
+    _install_fake_ccxt(monkeypatch, {"bybit": bybit, "okx": okx,
+                                     "kraken": lambda s: (_ for _ in ()).throw(RuntimeError())})
+    loader = CcxtFundingLoader(instruments=_crypto_instruments(),
+                              symbols=["BTC/USDT:USDT", "ETH/USDT:USDT"])
+    raw = loader.fetch("2021-01-01", "2021-01-02")
+    assert set(raw) == {"BTC/USDT:USDT", "ETH/USDT:USDT"}
+    long = loader.transform(raw)
+    assert set(long["instrument_id"]) == {"CR:BTC:2013-09-01", "CR:ETH:2015-08-07"}
+    assert "funding_rate" in long.columns and "available_from" in long.columns
+
+
+def test_funding_all_symbols_fail_raises_geoblock_message(monkeypatch):
+    def geoblocked(sym):
+        raise RuntimeError("451 geo-blocked")
+
+    _install_fake_ccxt(monkeypatch, {"bybit": geoblocked, "okx": geoblocked,
+                                     "kraken": geoblocked})
+    loader = CcxtFundingLoader(instruments=_crypto_instruments(),
+                              symbols=["BTC/USDT:USDT", "ETH/USDT:USDT"])
+    with pytest.raises(IngestError) as ei:
+        loader.fetch("2021-01-01", "2021-01-02")
+    msg = str(ei.value).lower()
+    assert "geo-block" in msg and "--help" in msg
+
+
+# =================================================== (10) ken french direct zips
+_FF_FACTORS_CSV = """This file was created by CMPT_ME_BEME_RETS using the 202001 CRSP database.
+
+,Mkt-RF,SMB,HML,RF
+20200102, 0.85,-0.19, 0.34, 0.006
+20200103,-0.71, 0.12,-0.09, 0.006
+20200106, 0.40, 0.05, 0.11, 0.006
+
+  Copyright 2020 Kenneth R. French
+"""
+
+_FF_MOM_CSV = """This file was created using momentum returns.
+
+,Mom
+20200102, 0.10
+20200103,-0.22
+20200106, 0.33
+
+  Copyright 2020 Kenneth R. French
+"""
+
+
+def test_parse_french_csv_skips_preamble_and_footer():
+    df = parse_french_csv(_FF_FACTORS_CSV)
+    assert list(df.columns) == ["Mkt-RF", "SMB", "HML", "RF"]
+    assert len(df) == 3  # footer/copyright line excluded
+    assert df.index[0] == pd.Timestamp("2020-01-02")
+    np.testing.assert_allclose(df.loc["2020-01-02", "Mkt-RF"], 0.85)
+
+
+def test_ken_french_transform_maps_and_scales():
+    raw = {"factors": parse_french_csv(_FF_FACTORS_CSV),
+           "momentum": parse_french_csv(_FF_MOM_CSV)}
+    loader = KenFrenchLoader()
+    long = loader.transform(raw)
+    assert set(long["series_id"]) == {"FF_MKT_RF", "FF_SMB", "FF_HML", "FF_RF", "FF_MOM"}
+    # percent -> decimal: 0.85% -> 0.0085
+    mkt = long[(long["series_id"] == "FF_MKT_RF") & (long["obs_date"] == "2020-01-02")]
+    np.testing.assert_allclose(mkt["value"].iloc[0], 0.0085)
+    assert (long["value"].abs() < 1.0).all()
+
+
+def test_ken_french_fetch_parses_zip_without_network(monkeypatch):
+    # Drive fetch end-to-end against an in-memory zip (no network): confirms the
+    # requests->zipfile->parse path and the date-window clip.
+    import io
+    import zipfile
+
+    class _Resp:
+        def __init__(self, content):
+            self.content = content
+
+        def raise_for_status(self):
+            pass
+
+    def _zip_bytes(name, text):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr(name, text)
+        return buf.getvalue()
+
+    payloads = {
+        "F-F_Research_Data_Factors_daily.CSV": _FF_FACTORS_CSV,
+        "F-F_Momentum_Factor_daily.CSV": _FF_MOM_CSV,
+    }
+
+    def fake_get(url, timeout=None):
+        name, text = ("F-F_Research_Data_Factors_daily.CSV", _FF_FACTORS_CSV) \
+            if "Momentum" not in url else ("F-F_Momentum_Factor_daily.CSV", _FF_MOM_CSV)
+        return _Resp(_zip_bytes(name, text))
+
+    import requests
+    monkeypatch.setattr(requests, "get", fake_get)
+    loader = KenFrenchLoader()
+    raw = loader.fetch("2020-01-01", "2020-01-03")  # clip drops the 2020-01-06 row
+    assert set(raw) == {"factors", "momentum"}
+    assert len(raw["factors"]) == 2 and len(raw["momentum"]) == 2
+
+
+# ====================================================== (11) cftc COT dedup on OI
+def _cot_instruments() -> pd.DataFrame:
+    def row(iid, sym):
+        return dict(
+            instrument_id=iid, asset_class="commodity", sleeve="commodity_etf",
+            symbol=sym, vendor_symbols=json.dumps({"cftc": sym}),
+            currency="USD", valid_from="1990-01-01", valid_to="2099-01-01",
+            proxy_of=None, sector=None, meta="{}",
+        )
+    return pd.DataFrame([row("CO:GLD:2004-11-18", "GLD"),
+                         row("CO:USO:2006-04-10", "USO")])
+
+
+def _cot_rec(market, oi, nc_long, nc_short, date="2021-06-08"):
+    return {"market_and_exchange_names": market,
+            "report_date_as_yyyy_mm_dd": date,
+            "noncomm_positions_long_all": nc_long,
+            "noncomm_positions_short_all": nc_short,
+            "open_interest_all": oi}
+
+
+def test_cot_dedup_keeps_largest_open_interest():
+    # Same Tuesday + GOLD mapped to GLD via three planted variants (report-type +
+    # contract listings). Only the deepest (largest OI) survives per (date, proxy).
+    raw = [
+        _cot_rec("GOLD - COMMODITY EXCHANGE INC.", oi=100.0, nc_long=40, nc_short=10),
+        _cot_rec("GOLD - COMMODITY EXCHANGE INC. (COMBINED)", oi=500.0, nc_long=90, nc_short=20),
+        _cot_rec("GOLD - COMMODITY EXCHANGE INC. (MICRO)", oi=25.0, nc_long=5, nc_short=1),
+        _cot_rec("CRUDE OIL, LIGHT SWEET - NEW YORK MERC", oi=300.0, nc_long=70, nc_short=30),
+    ]
+    loader = CftcCotLoader(instruments=_cot_instruments())
+    out = loader.transform(raw)
+    gold = out[out["instrument_id"] == "CO:GLD:2004-11-18"]
+    assert len(gold) == 1
+    assert gold["open_interest"].iloc[0] == 500.0     # deepest listing kept
+    assert gold["noncomm_net"].iloc[0] == 70.0        # 90 - 20 from that same row
+    # Distinct proxies coexist; the key is unique per (obs_date, instrument_id).
+    assert set(out["instrument_id"]) == {"CO:GLD:2004-11-18", "CO:USO:2006-04-10"}
+    assert not out.duplicated(subset=["obs_date", "instrument_id"]).any()
+
+
+def test_cot_dedup_survives_audit_no_duplicates():
+    raw = [
+        _cot_rec("GOLD - COMMODITY EXCHANGE INC.", oi=100.0, nc_long=40, nc_short=10),
+        _cot_rec("GOLD - COMMODITY EXCHANGE INC. (COMBINED)", oi=500.0, nc_long=90, nc_short=20),
+    ]
+    loader = CftcCotLoader(instruments=_cot_instruments())
+    out = loader.transform(raw)
+    stamped = stamp_availability(
+        out.assign(source="test", ingested_at=pd.Timestamp.now(tz=UTC)),
+        loader.availability_rule)
+    rep = audit(stamped, loader.expectations)
+    assert rep.checks["duplicates"]["ok"] is True

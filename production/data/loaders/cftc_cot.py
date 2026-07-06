@@ -123,4 +123,15 @@ class CftcCotLoader(BaseLoader):
         if not rows:
             return pd.DataFrame(columns=["obs_date", "instrument_id", "noncomm_net",
                                          "open_interest", "asset_class"])
-        return pd.DataFrame(rows)
+        df = pd.DataFrame(rows)
+        # Collapse duplicates per (obs_date, instrument_id). Real Socrata output emits
+        # several rows for one Tuesday+proxy: legacy report-type variants (futures-only
+        # vs futures-and-options combined) AND multiple distinct contract markets that
+        # our MARKET_MAP funnels onto a single ETF proxy (e.g. two crude listings ->
+        # USO). Left un-deduped these trip the audit's fatal duplicate-key check. We
+        # keep the row with the LARGEST open_interest: the deepest, most-liquid contract
+        # is the canonical positioning read, and open interest is exactly its depth.
+        df = (df.sort_values("open_interest", ascending=False, na_position="last")
+                .drop_duplicates(subset=["obs_date", "instrument_id"], keep="first")
+                .reset_index(drop=True))
+        return df
