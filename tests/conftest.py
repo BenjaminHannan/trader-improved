@@ -169,7 +169,7 @@ def funding_panel(synthetic_instruments) -> pd.DataFrame:
 def macro_panel() -> pd.DataFrame:
     return make_macro({
         "DGS3MO_US": 2.0, "RATE_EU": 0.5, "RATE_JP": -0.1, "RATE_GB": 1.0,
-        "BAMLH0A0HYM2": 4.0, "VIXCLS": 18.0,
+        "BAMLH0A0HYM2": 4.0, "VIXCLS": 18.0, "VXVCLS": 20.0,
     })
 
 
