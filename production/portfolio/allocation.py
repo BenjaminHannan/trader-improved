@@ -62,9 +62,21 @@ def erc_weights(cov: pd.DataFrame, tol: float = 1e-8, max_iter: int = 200) -> pd
     return pd.Series(x, index=idx)
 
 
-def apply_risk_caps(w, cov, crypto_cap: float = 0.20, max_sleeve: float = 0.40,
+def apply_risk_caps(w, cov, crypto_cap: float | None = None,
+                    max_sleeve: float | None = None, *,
+                    caps: dict[str, float] | None = None,
                     max_iter: int = 500, tol: float = 1e-9) -> pd.Series:
     """Cap each sleeve's *risk-contribution* share, then renormalize weights to sum 1.
+
+    Per-sleeve caps are supplied as a ``caps`` dict mapping sleeve -> maximum risk-contribution
+    share, with a reserved key ``"max_any_sleeve"`` giving the *generic* bound applied to every
+    sleeve that has no explicit key. A sleeve absent from the dict and with no ``max_any_sleeve``
+    present is left uncapped (``+inf``). This is exactly the ``cfg["allocation"]["risk_caps"]``
+    dict the config already carries.
+
+    Back-compat: the legacy ``crypto_cap`` / ``max_sleeve`` args are honored when ``caps`` is not
+    given — they map to ``{"crypto": crypto_cap, "max_any_sleeve": max_sleeve}`` with the historical
+    defaults (0.20 / 0.40), reproducing the original two-tier behavior bit-for-bit.
 
     Convergence: each pass finds the single worst violator j and shrinks w_j by the
     damped factor sqrt(cap_j / share_j) (< 1), which strictly lowers share_j; renormalizing
@@ -74,7 +86,13 @@ def apply_risk_caps(w, cov, crypto_cap: float = 0.20, max_sleeve: float = 0.40,
     w = pd.Series(w, dtype=float).copy()
     idx = w.index
     Sigma = pd.DataFrame(cov).reindex(index=idx, columns=idx).to_numpy(dtype=float)
-    caps = np.array([crypto_cap if s == "crypto" else max_sleeve for s in idx], dtype=float)
+
+    if caps is None:
+        cc = 0.20 if crypto_cap is None else float(crypto_cap)
+        ms = 0.40 if max_sleeve is None else float(max_sleeve)
+        caps = {"crypto": cc, "max_any_sleeve": ms}
+    generic = float(caps.get("max_any_sleeve", np.inf))
+    cap_vec = np.array([float(caps.get(s, generic)) for s in idx], dtype=float)
 
     wv = np.clip(w.to_numpy(dtype=float), 0.0, None)
     if wv.sum() <= 0:
@@ -83,11 +101,11 @@ def apply_risk_caps(w, cov, crypto_cap: float = 0.20, max_sleeve: float = 0.40,
 
     for _ in range(max_iter):
         shares = _risk_contrib_shares(wv, Sigma)
-        viol = shares - caps
+        viol = shares - cap_vec
         if np.all(viol <= tol):
             break
         j = int(np.argmax(viol))
-        wv[j] *= np.sqrt(caps[j] / max(shares[j], 1e-12))
+        wv[j] *= np.sqrt(cap_vec[j] / max(shares[j], 1e-12))
         wv = wv / wv.sum()
 
     return pd.Series(wv, index=idx)
@@ -104,6 +122,7 @@ def sleeve_allocation(sleeve_returns: pd.DataFrame, t, cfg: dict) -> pd.Series:
     alloc = cfg["allocation"]
     halflife = float(alloc["sleeve_cov_halflife_days"])
     warmup = int(alloc["warmup_days"])
+    risk_caps = alloc.get("risk_caps") or None
 
     r = sleeve_returns[sleeve_returns.index < t]
     cols = list(sleeve_returns.columns)
@@ -128,9 +147,15 @@ def sleeve_allocation(sleeve_returns: pd.DataFrame, t, cfg: dict) -> pd.Series:
     for s in cold:
         raw[s] = 0.5 * inv_frac[s]
 
-    # Warm sleeves: ERC (single warm sleeve trivially gets full weight within its block).
+    # Warm sleeves: ERC (single warm sleeve trivially gets full weight within its block),
+    # then per-sleeve risk-contribution caps bind within the warm block (crypto/events/... from
+    # cfg["allocation"]["risk_caps"]). Caps are scoped to the warm ERC block because a single
+    # warm sleeve or a cold-only mix has no meaningful multi-sleeve risk decomposition to clip.
     if len(warm) >= 2:
-        w_erc = erc_weights(cov.reindex(index=warm, columns=warm))
+        warm_cov = cov.reindex(index=warm, columns=warm)
+        w_erc = erc_weights(warm_cov)
+        if risk_caps:
+            w_erc = apply_risk_caps(w_erc, warm_cov, caps=risk_caps)
         for s in warm:
             raw[s] = w_erc[s]
     elif len(warm) == 1:

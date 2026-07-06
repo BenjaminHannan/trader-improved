@@ -543,6 +543,186 @@ def test_default_config_ships_tranching_and_crypto_cadence_on():
     assert wf["rebalance"].get("crypto") == "twice_weekly"
 
 
+# ============================================================ events sleeve integration
+from production.events.backtest import event_sleeve_returns
+from production.events.sizing import FEE_BPS, size_event_book
+from production.events.markets import dedupe_related, liquid_universe
+from production.events.backtest import _combined_signals
+from production.portfolio.allocation import _ewma_cov, _risk_contrib_shares, sleeve_allocation
+from production.core.calendar import rebalance_grid
+
+
+def _event_row_cols():
+    return ["obs_date", "instrument_id", "yes_price", "volume", "open_interest",
+            "close_time", "status", "event_key"]
+
+
+def _finish_event_frame(rows) -> pd.DataFrame:
+    df = pd.DataFrame(rows, columns=_event_row_cols())
+    df["obs_date"] = pd.to_datetime(df["obs_date"])
+    df["close_time"] = pd.to_datetime(df["close_time"], utc=True)
+    df["available_from"] = df["obs_date"].dt.tz_localize("UTC") + pd.Timedelta(hours=1)
+    df["question"] = df["instrument_id"]
+    df["venue"] = "kalshi"
+    df["source"] = "test"
+    df["ingested_at"] = df["available_from"]
+    return df.sort_values(["obs_date", "instrument_id"]).reset_index(drop=True)
+
+
+def _favorite_known_answer_frame(start="2020-01-01"):
+    """Two markets: a favorite drifting 0.90 -> 0.98 (settles to 1.0), and a flat 0.50 market
+    that never signals but extends the grid so the favorite resolves in-sample. Only one
+    rebalance (day 0) is used, so the favorite's whole life is a single held position."""
+    d0 = pd.Timestamp(start)
+    # favorite: 8 daily obs 0.90..0.98, closes shortly after its last obs.
+    fav_prices = [0.90, 0.91, 0.92, 0.94, 0.95, 0.96, 0.97, 0.98]
+    fav_dates = pd.date_range(d0, periods=len(fav_prices), freq="D")
+    fav_close = fav_dates[-1] + pd.Timedelta(days=2)
+    rows = [(d, "EV:kalshi:FAV", p, 5000.0, 1000.0, fav_close, "active", "EVT-FAV")
+            for d, p in zip(fav_dates, fav_prices)]
+    # flat market lives longer (extends the grid past the favorite's last obs -> it settles).
+    flat_dates = pd.date_range(d0, periods=len(fav_prices) + 5, freq="D")
+    flat_close = flat_dates[-1] + pd.Timedelta(days=40)
+    rows += [(d, "EV:kalshi:FLAT", 0.50, 5000.0, 1000.0, flat_close, "active", "EVT-FLAT")
+             for d in flat_dates]
+    # rebalance one day after the first obs so that first obs (avail = obs+1h) is knowable and
+    # the entered price is exactly 0.90 (day-0 print), the only row available at t0.
+    return _finish_event_frame(rows), fav_dates[0] + pd.Timedelta(days=1)
+
+
+def test_event_sleeve_known_answer_long_favorite_resolves():
+    """A long-YES favorite entered at 0.90 and settling at 1.0 contributes
+    weight*(1/0.9 - 1) of P&L minus the 200bp entry fee; the flat market adds nothing."""
+    frame, t0 = _favorite_known_answer_frame()
+    out = event_sleeve_returns(frame, [t0])
+    # reconstruct the sized weight the sleeve would enter at t0 (PIT book).
+    avail = frame[pd.to_datetime(frame["available_from"], utc=True)
+                  <= pd.Timestamp(t0).tz_localize("UTC")]
+    universe = liquid_universe(avail)
+    book = size_event_book(_combined_signals(avail), avail, capital_frac=0.10,
+                           groups=dedupe_related(universe))
+    assert list(book["instrument_id"]) == ["EV:kalshi:FAV"]
+    assert book.iloc[0]["side"] == "YES"
+    w = float(book.iloc[0]["weight"])
+    expected = w * (1.0 / 0.90 - 1.0) - w * FEE_BPS / 1e4
+    assert out.sum() == pytest.approx(expected, rel=1e-9, abs=1e-12)
+
+
+# --- richer 8-market frame for PIT + engine integration ---
+def _event_markets_frame(start="2019-11-01", end="2020-06-30"):
+    """8 markets in 2 dedupe groups (EVT-A/EVT-B), staggered ~60-day lives, prices drifting
+    toward 0 or 1 (so late-life longshot/convergence signals fire and resolutions realize)."""
+    day0 = pd.Timestamp(start)
+    end_ts = pd.Timestamp(end)
+    rng = np.random.default_rng(0)
+    rows = []
+    for k in range(8):
+        life_start = day0 + pd.Timedelta(days=k * 22)
+        mdates = pd.date_range(life_start, periods=60, freq="D")
+        mdates = mdates[mdates <= end_ts]
+        if len(mdates) < 8:
+            continue
+        target = 0.975 if k % 2 == 0 else 0.025
+        n = len(mdates)
+        drift = np.linspace(0.5, target, n)
+        prices = np.clip(drift + rng.normal(0, 0.01, n), 0.02, 0.98)
+        close = mdates[-1] + pd.Timedelta(days=1)
+        iid = f"EV:kalshi:M{k}"
+        ekey = "EVT-A" if k < 4 else "EVT-B"
+        rows += [(d, iid, float(p), 5000.0, 1000.0, close, "active", ekey)
+                 for d, p in zip(mdates, prices)]
+    return _finish_event_frame(rows)
+
+
+def test_event_sleeve_pit_future_corruption_leaves_history():
+    """Corrupting every event price dated after a pivot leaves the sleeve's daily returns up
+    to the pivot bit-for-bit unchanged (PIT money test for the event sleeve)."""
+    frame = _event_markets_frame()
+    grid = rebalance_grid(frame["obs_date"].min(), frame["obs_date"].max(), "weekly")
+    base = event_sleeve_returns(frame, grid, per_group_cap=0.02)
+    pivot = base.index[int(len(base) * 0.6)]
+
+    corrupt = frame.copy()
+    future = corrupt["obs_date"] > pivot
+    corrupt.loc[future, "yes_price"] = 0.99   # slam the future tail
+    after = event_sleeve_returns(corrupt, grid, per_group_cap=0.02)
+
+    a = base[base.index <= pivot]
+    b = after[after.index <= pivot]
+    assert a.index.equals(b.index)
+    assert np.allclose(a.to_numpy(), b.to_numpy(), atol=1e-12, rtol=0.0)
+    assert np.abs(base[base.index > pivot].to_numpy()).sum() > 0   # non-vacuous
+
+
+def _events_bundle():
+    b = _bundle()
+    b["event_markets"] = _event_markets_frame()
+    return b
+
+
+@pytest.fixture(scope="module")
+def events_result():
+    return run_backtest(_events_bundle(), pd.Series(_INSTRUMENTS))
+
+
+def test_events_sleeve_present_and_allocated(events_result):
+    """With an event_markets panel the engine adds an 'events' return-stream sleeve that draws
+    positive allocation, and the 0.10 events risk cap BINDS in the allocation path: at the
+    monthly points where events is warm its capped risk-contribution share is pulled well below
+    the uncapped (equal-ERC) share and is the smallest of any sleeve — the per-sleeve key bites.
+
+    (With only equity/crypto/events present the three caps sum to 0.70 < 1, so risk shares —
+    which must sum to 1 — cannot all sit under their caps simultaneously; the strict <=0.10 is
+    a many-sleeve property. The apply_risk_caps unit test pins the exact-cap case directly.)"""
+    sr = events_result.sleeve_returns
+    assert "events" in sr.columns
+    assert np.isfinite(sr["events"].to_numpy()).all()
+
+    cfg = backtest_config()
+    cfg_nocap = copy.deepcopy(cfg)
+    cfg_nocap["allocation"].pop("risk_caps", None)
+    hl = float(cfg["allocation"]["sleeve_cov_halflife_days"])
+    warmup = int(cfg["allocation"]["warmup_days"])
+    months = pd.DatetimeIndex(sorted({pd.Timestamp(t.year, t.month, 1) for t in sr.index}))
+    saw_positive = False
+    checked_cap = False
+    for t in months:
+        w = sleeve_allocation(sr, t, cfg)
+        if w.get("events", 0.0) > 0.0:
+            saw_positive = True
+        r = sr[sr.index < t]
+        counts = r.notna().sum()
+        warm = [s for s in sr.columns if counts.get(s, 0) >= warmup]
+        if "events" not in warm or len(warm) < 2:
+            continue
+        cov = _ewma_cov(r[warm], hl).to_numpy()
+        sh = _risk_contrib_shares(w.reindex(warm).fillna(0.0).to_numpy(), cov)
+        wn = sleeve_allocation(sr, t, cfg_nocap)
+        shn = _risk_contrib_shares(wn.reindex(warm).fillna(0.0).to_numpy(), cov)
+        ei = warm.index("events")
+        if shn[ei] > 0.10:                       # uncapped events would exceed its cap
+            checked_cap = True
+            assert sh[ei] < shn[ei] - 1e-3, (t, sh[ei], shn[ei])   # the cap strictly reduces it
+            assert sh[ei] == pytest.approx(min(sh), abs=1e-9), (t, sh)  # events is the smallest
+    assert saw_positive
+    assert checked_cap
+
+
+def test_events_absent_key_bit_identical(events_result):
+    """Absent the event_markets key the run is bit-identical to a twin no-events run, and the
+    events run genuinely differs (the extra sleeve moves the book)."""
+    inst = pd.Series(_INSTRUMENTS)
+    r_base_a = run_backtest(_bundle(), inst)
+    r_base_b = run_backtest(_bundle(), inst)
+    assert r_base_a.total_returns.index.equals(r_base_b.total_returns.index)
+    assert np.array_equal(r_base_a.total_returns.to_numpy(),
+                          r_base_b.total_returns.to_numpy())
+    assert "events" not in r_base_a.sleeve_returns.columns
+    # the events run shares the index but the total book is not identical (events sleeve bites).
+    ev = events_result.total_returns.reindex(r_base_a.total_returns.index)
+    assert not np.allclose(ev.to_numpy(), r_base_a.total_returns.to_numpy(), atol=1e-12)
+
+
 # ============================================================ CLI smoke (subprocess)
 def test_run_backtest_synthetic_smoke(tmp_path):
     env = {"PYTHONPATH": str(REPO_ROOT)}

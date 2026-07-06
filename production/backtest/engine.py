@@ -44,6 +44,7 @@ from production.backtest.report import build_report
 from production.core.calendar import (month_starts, offset_grid, rebalance_grid,
                                        twice_weekly_grid)
 from production.core.config import backtest_config, costs_config, risk_config
+from production.events.backtest import event_sleeve_returns
 from production.portfolio.optimizer import optimize_sleeve
 from production.portfolio.overlays import overlay_multiplier
 from production.portfolio.allocation import sleeve_allocation
@@ -699,6 +700,27 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
 
     if not sleeve_net:
         raise ValueError("no sleeve produced any weights — check data coverage / warmup")
+
+    # ---- optional events sleeve -------------------------------------------------------
+    # When the bundle carries an ``event_markets`` panel (and the allocation risk_caps declare an
+    # ``events`` key), fold the prediction-market book in as one more sleeve RETURN STREAM. It has
+    # no optimizer / risk-model path: its P&L comes from event_sleeve_returns (PIT, weekly grid)
+    # and its risk enters the book only through the EWMA sleeve covariance + the ``events`` risk
+    # cap in sleeve_allocation. Absent the key this branch is skipped -> results bit-identical.
+    event_panel = data.get("event_markets")
+    risk_caps_cfg = cfg["allocation"].get("risk_caps") or {}
+    if (event_panel is not None and not event_panel.empty
+            and "events" in risk_caps_cfg):
+        price_union = pd.DatetimeIndex(
+            sorted(set().union(*[s.index for s in sleeve_net.values()])))
+        try:
+            per_group = cfg["constraints"]["position_cap"].get("events", 0.02)
+            ev = event_sleeve_returns(event_panel, base_grid, per_group_cap=per_group)
+            ev = ev.reindex(price_union).fillna(0.0).astype(float)
+            sleeve_net["events"] = ev
+            sleeve_gross["events"] = ev   # the fee is embedded in the net stream (no cost split)
+        except Exception as exc:  # noqa: BLE001 - a bad event panel must not sink the run
+            warn_list.append(f"events sleeve failed ({exc}) — skipped")
 
     # ---- blend sleeves into the total book --------------------------------------------
     union_idx = sorted(set().union(*[s.index for s in sleeve_net.values()]))

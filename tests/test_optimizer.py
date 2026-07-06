@@ -787,6 +787,38 @@ def test_apply_risk_caps_crypto():
     assert w.sum() == pytest.approx(1.0)
 
 
+def test_apply_risk_caps_dict_form_binds_and_renormalizes():
+    """Dict form: a sleeve that would take ~60% of risk is clipped to its 0.25 cap; the
+    other (uncapped, no max_any_sleeve) sleeves absorb the freed risk; weights sum to 1."""
+    idx = ["a", "b", "c"]
+    # diagonal cov with variances 0.6/0.2/0.2 -> equal weights give risk shares 0.6/0.2/0.2.
+    cov = pd.DataFrame(np.diag([0.6, 0.2, 0.2]), index=idx, columns=idx)
+    w0 = pd.Series([1 / 3, 1 / 3, 1 / 3], index=idx)
+    # sanity: pre-cap "a" really carries ~60% of the risk.
+    m0 = cov.to_numpy() @ w0.to_numpy()
+    s0 = (w0.to_numpy() * m0)
+    assert s0[0] / s0.sum() == pytest.approx(0.6, rel=1e-6)
+
+    w = apply_risk_caps(w0, cov, caps={"a": 0.25})   # only "a" capped; b,c uncapped (no generic)
+    m = cov.to_numpy() @ w.to_numpy()
+    shares = (w.to_numpy() * m) / (w.to_numpy() * m).sum()
+    assert shares[idx.index("a")] <= 0.25 + 1e-6
+    assert w.sum() == pytest.approx(1.0)
+
+
+def test_apply_risk_caps_old_signature_still_works():
+    """The legacy crypto_cap/max_sleeve signature reproduces the pre-dict crypto=0.20 case."""
+    idx = ["equity", "crypto", "commodity_etf"]
+    cov = pd.DataFrame(np.diag([0.01, 0.09, 0.01]), index=idx, columns=idx)
+    w0 = pd.Series([1 / 3, 1 / 3, 1 / 3], index=idx)
+    w = apply_risk_caps(w0, cov, crypto_cap=0.20, max_sleeve=0.40)
+    m = cov.to_numpy() @ w.to_numpy()
+    shares = (w.to_numpy() * m) / (w.to_numpy() * m).sum()
+    assert shares[idx.index("crypto")] <= 0.20 + 1e-6
+    assert np.all(shares <= 0.40 + 1e-6)
+    assert w.sum() == pytest.approx(1.0)
+
+
 def test_sleeve_allocation_warmup_haircut():
     idx = pd.bdate_range("2019-01-01", periods=200)
     rng = np.random.default_rng(0)
