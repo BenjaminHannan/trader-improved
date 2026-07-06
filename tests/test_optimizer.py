@@ -483,6 +483,102 @@ def test_macro_ratio_pairs_absent_back_compat():
                                    scale=0.6, ratio_pairs=[]) == old
 
 
+# ------------------------------------------- macro multi-vintage (PIT dedup at the call site)
+def _macro_revision(obs_date, value, series_id="X", avail_offset_days=30):
+    """A single revised vintage of `obs_date`, published `avail_offset_days` after obs."""
+    avail = pd.Timestamp(obs_date).tz_localize("UTC") + pd.Timedelta(days=avail_offset_days)
+    return pd.DataFrame({
+        "obs_date": [pd.Timestamp(obs_date)], "series_id": [series_id], "value": [value],
+        "available_from": [avail], "source": ["syn"],
+        "ingested_at": [avail + pd.Timedelta(minutes=5)],
+    })
+
+
+def _multivintage_case():
+    """Original single-vintage frame + one revised obs.
+
+    The LAST obs is a stress spike that fires the overlay (m=0.6 on the originals). The
+    revised obs is the second-to-last one; its revised value is wild enough that, once
+    knowable, it explodes the trailing baseline std and the spike no longer clears the
+    trigger (m flips to 1.0). Original published obs+1d; revision published obs+30d.
+    Returns (orig_frame, revised_single_vintage_frame, multivintage_frame, revised_obs,
+    zwin, trigger_kwargs).
+    """
+    rng = np.random.default_rng(0)
+    zwin = 30
+    vals = 4.0 + rng.normal(0, 0.05, zwin + 5)
+    # Last obs: a ~5-sigma spike vs its trailing window -> fires on the originals.
+    vals[-1] = vals[-(zwin + 1):-1].mean() + 5.0 * vals[-(zwin + 1):-1].std(ddof=1)
+    orig = _macro_panel(vals)                                  # single vintage, series "X"
+
+    revised_obs = orig["obs_date"].iloc[-2]
+    revised_value = 1.0e6                                      # wild revision of obs[-2]
+
+    # Single-vintage frame carrying the revised value in place of the original obs[-2].
+    revised_single = orig.copy()
+    revised_single.loc[revised_single["obs_date"] == revised_obs, "value"] = revised_value
+
+    # Multi-vintage: originals + the later revision row for obs[-2].
+    rev_row = _macro_revision(revised_obs, revised_value, avail_offset_days=30)
+    multi = pd.concat([orig, rev_row], ignore_index=True)
+
+    kw = dict(series=("X",), z_window=zwin, z_trigger=1.5, scale=0.6)
+    return orig, revised_single, multi, revised_obs, kw
+
+
+def test_macro_multivintage_between_publications_bit_identical():
+    """At t after every original release but before the revision's availability, the
+    multi-vintage frame reduces (via asof_panel dedup) to exactly the original vintage:
+    the multiplier is bit-identical to the single-vintage original frame — and non-trivial
+    (the last-obs spike fires, so m=0.6, not a vacuous 1.0)."""
+    orig, _revised_single, multi, revised_obs, kw = _multivintage_case()
+    max_obs = orig["obs_date"].max()
+    t_between = max_obs + pd.Timedelta(days=5)                 # < revised_obs + 30d
+    assert t_between < pd.Timestamp(revised_obs) + pd.Timedelta(days=30)
+
+    m_orig = macro_derisk_multiplier(orig, t_between, **kw)
+    m_multi = macro_derisk_multiplier(multi, t_between, **kw)
+    assert m_orig == pytest.approx(0.6)                        # non-trivial: spike fired
+    assert m_multi == m_orig                                   # bit-identical
+
+
+def test_macro_multivintage_after_revision_uses_revised_value():
+    """Once the revision is knowable (t >= revised_obs + 30d) the latest visible vintage
+    is the revised value: the multiplier matches the single-vintage frame built with that
+    revised value, and differs from the between-publications answer."""
+    orig, revised_single, multi, revised_obs, kw = _multivintage_case()
+    max_obs = orig["obs_date"].max()
+    t_after = max_obs + pd.Timedelta(days=40)                  # >= revised_obs + 30d
+    assert t_after >= pd.Timestamp(revised_obs) + pd.Timedelta(days=30)
+
+    m_after = macro_derisk_multiplier(multi, t_after, **kw)
+    m_revised_single = macro_derisk_multiplier(revised_single, t_after, **kw)
+    assert m_after == m_revised_single                         # revised vintage in effect
+    assert m_after == pytest.approx(1.0)                       # wild revision kills the z
+    # And it genuinely changed the decision vs the between-publications window.
+    t_between = max_obs + pd.Timedelta(days=5)
+    assert macro_derisk_multiplier(multi, t_between, **kw) == pytest.approx(0.6)
+
+
+def test_macro_multivintage_future_revision_corruption():
+    """Vintage corruption: a revision published strictly after t cannot move the
+    multiplier at t, whatever value it carries (it is not yet knowable)."""
+    orig, _revised_single, multi, revised_obs, kw = _multivintage_case()
+    max_obs = orig["obs_date"].max()
+    t_between = max_obs + pd.Timedelta(days=5)                 # revision not yet visible
+    m0 = macro_derisk_multiplier(multi, t_between, **kw)
+
+    corrupt = multi.copy()
+    is_rev = (corrupt["obs_date"] == revised_obs) & (
+        pd.to_datetime(corrupt["available_from"], utc=True)
+        > pd.Timestamp(t_between).tz_localize("UTC"))
+    corrupt.loc[is_rev, "value"] = -9.9e12                     # arbitrary future junk
+    m1 = macro_derisk_multiplier(corrupt, t_between, **kw)
+    assert m0 == m1
+    # Sanity: the corrupted row IS a future (post-t) vintage.
+    assert bool(is_rev.any())
+
+
 # --------------------------------------------------- vol-target EWMA + deadband
 def test_vol_target_ewma_known_answer():
     """EWMA-std estimator reproduces target / (ewm-std * sqrt252), within clip."""

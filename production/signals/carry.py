@@ -58,13 +58,35 @@ def _asof_by_avail_date(macro: pd.DataFrame, series_id: str) -> pd.DataFrame:
     at any decision date D with ``available_from <= end of day D``, i.e. once D reaches
     that availability date. Ties on the same availability date keep the latest-arriving
     vintage. Returns ``[avail_date, value]`` sorted by avail_date (merge_asof-ready).
+
+    Vintage semantics (multi-vintage ALFRED series). A macro series may legitimately
+    carry several vintages of the same ``obs_date`` — an original release plus later
+    revisions — each stamped with its *own* ``available_from``. Every vintage is kept
+    and placed at its own availability date, so the ``merge_asof`` consumer sees a step
+    function in which a revision becomes effective **only on/after ITS available_from**:
+    before that date the prior vintage is still the visible value, and a revision that is
+    not yet knowable at decision date D can never move the value at D. Later vintages thus
+    override earlier ones from their availability onward, which is exactly PIT-correct.
+    The only dedup applied is for *same-availability duplicates of one obs_date* (a
+    re-ingestion of the identical (obs_date, available_from)): those collapse to the
+    latest-arriving row (by ``ingested_at`` when present) so a single obs_date cannot
+    double-count at one availability. On single-vintage data this is a no-op.
     """
-    s = macro.loc[macro["series_id"] == series_id, ["available_from", "value"]].copy()
+    cols = ["obs_date", "available_from", "value"]
+    if "ingested_at" in macro.columns:
+        cols.append("ingested_at")
+    s = macro.loc[macro["series_id"] == series_id, cols].copy()
     if s.empty:
         return pd.DataFrame(columns=["avail_date", "value"])
     avail = pd.to_datetime(s["available_from"], utc=True)
     s["avail_date"] = avail.dt.normalize().dt.tz_localize(None)
     s["_af"] = avail
+    # Same-availability duplicates of one obs_date -> keep the latest-arriving vintage.
+    dedup_sort = ["_af"] + (["ingested_at"] if "ingested_at" in s.columns else [])
+    s = (s.sort_values(dedup_sort, kind="stable")
+         .drop_duplicates(["obs_date", "_af"], keep="last"))
+    # Step function keyed by availability date; on a shared availability the most recently
+    # available vintage is effective.
     s = (s.sort_values(["avail_date", "_af"], kind="stable")
          .drop_duplicates("avail_date", keep="last"))
     return s[["avail_date", "value"]].reset_index(drop=True)

@@ -187,3 +187,46 @@ def test_cot_positioning_release_lag(price_panel, cot_panel):
     assert trunc_s.loc[wednesday] == full_s.loc[wednesday]
     # Friday: the release lands, so removing the Tuesday obs changes the value.
     assert trunc_s.loc[friday] != full_s.loc[friday]
+
+
+# ----------------------------------------------- macro vintage corruption (carry_rate_diff)
+def test_carry_rate_diff_vintage_corruption(price_panel, macro_panel):
+    """A macro revision knowable only after the pivot cannot touch pre-pivot signal values.
+
+    Append fake REVISED rows for every macro obs (same obs_dates, values * 100) whose
+    availability is shifted +60d — then keep only those whose availability lands strictly
+    after the pivot (covering both obs after the pivot, naturally future, and obs on/before
+    it whose shifted availability is post-pivot). Revisions knowable only post-pivot must
+    leave every value at obs_date <= pivot bit-identical to the unrevised run.
+    """
+    sig = all_signals()["carry_rate_diff"]()
+    baseline = sig.compute({"prices": price_panel, "macro": macro_panel})
+
+    macro_dates = np.sort(pd.to_datetime(macro_panel["obs_date"]).unique())
+    pivot = pd.Timestamp(macro_dates[int(len(macro_dates) * 0.70)])
+
+    rev = macro_panel.copy()
+    rev["value"] = rev["value"] * 100.0
+    rev_avail = pd.to_datetime(rev["available_from"], utc=True) + pd.Timedelta(days=60)
+    rev["available_from"] = rev_avail
+    if "ingested_at" in rev.columns:
+        rev["ingested_at"] = pd.to_datetime(rev["ingested_at"], utc=True) + pd.Timedelta(days=60)
+    rev["source"] = "synthetic:macro:revision"
+    # Keep only revisions knowable strictly after the pivot (post-pivot availability date).
+    keep = rev_avail.dt.normalize().dt.tz_localize(None) > pivot
+    rev = rev.loc[keep]
+    assert not rev.empty                                   # the corruption is real
+    corrupted_macro = pd.concat([macro_panel, rev], ignore_index=True)
+
+    recomputed = sig.compute({"prices": price_panel, "macro": corrupted_macro})
+
+    def _upto_pivot(df):
+        return (df[pd.to_datetime(df["obs_date"]) <= pivot]
+                .sort_values(["obs_date", "instrument_id"], kind="stable")
+                .reset_index(drop=True))
+
+    pd.testing.assert_frame_equal(_upto_pivot(baseline), _upto_pivot(recomputed),
+                                  check_dtype=False,
+                                  obj="carry_rate_diff under post-pivot macro revisions")
+    # Non-vacuous: the revisions DO bite once knowable (post-pivot values move).
+    assert not baseline.equals(recomputed)

@@ -11,6 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from production.core.pit import asof_panel
+
 
 def vol_target_multiplier(daily_returns: pd.Series, t, target: float = 0.10,
                           lookback: int = 21, clip: tuple = (0.0, 1.5),
@@ -129,9 +131,17 @@ def macro_derisk_multiplier(macro_panel: pd.DataFrame, t,
                             ratio_pairs: list[list[str]] | None = None) -> float:
     """De-risk when a macro-stress z-score breaches its trigger.
 
-    Causality: only rows with `available_from <= t` are visible (future vintages, even if
-    their obs_date <= t, are excluded and corruption of them cannot move the answer). The
-    z-score of the latest value is measured against a rolling mean/std ENDING at the
+    Causality: the visible frame is reduced through the sanctioned PIT join
+    `core.pit.asof_panel(macro_panel, t)`, which does two things at once: (1) keeps only
+    rows with `available_from <= t` (future vintages, even if their obs_date <= t, are
+    excluded and corruption of them cannot move the answer), and (2) collapses each
+    `(obs_date, series_id)` to its latest *visible* vintage. Step (2) matters for
+    multi-vintage ALFRED macro series (an original release plus later revisions of the
+    same obs_date): without it, superseded vintages would appear as duplicate obs_dates
+    and distort the causal-z window. On single-vintage data the dedup is a no-op, so the
+    result is bit-identical to the plain `available_from <= t` filter.
+
+    The z-score of the latest value is measured against a rolling mean/std ENDING at the
     previous observation (`shift(1)`), so the latest value never inflates its own baseline.
     If the mean z across the requested series exceeds `z_trigger`, return `scale`.
 
@@ -144,13 +154,9 @@ def macro_derisk_multiplier(macro_panel: pd.DataFrame, t,
     as an insufficient level series is. Absent `ratio_pairs` -> level-only behavior,
     bit-for-bit unchanged.
     """
-    tt = pd.Timestamp(t)
-    if tt.tzinfo is None:
-        tt = tt.tz_localize("UTC")
-    af = pd.to_datetime(macro_panel["available_from"])
-    if af.dt.tz is None:
-        af = af.dt.tz_localize("UTC")
-    visible = macro_panel[af.to_numpy() <= tt]
+    # Sanctioned PIT join: visibility filter (available_from <= t) AND latest-visible-
+    # vintage dedup per (obs_date, series_id) in one call.
+    visible = asof_panel(macro_panel, t)
 
     zs: list[float] = []
     for sid in series:
