@@ -75,6 +75,20 @@ factors:
     min_history_days: 30
     status: candidate
     gate_stats: {}
+  earnings_yield:
+    signal: production.signals.value.EarningsYield
+    sleeves: [equity]
+    horizon_days: 21
+    min_history_days: 63
+    status: candidate
+    gate_stats: {}
+  pead:
+    signal: production.signals.value.PostEarningsDrift
+    sleeves: [equity]
+    horizon_days: 21
+    min_history_days: 63
+    status: candidate
+    gate_stats: {}
 
 # Multiple-testing ledger: incremented every time a factor is put through the gate,
 # never decremented. Feeds n_trials of the deflated Sharpe ratio.

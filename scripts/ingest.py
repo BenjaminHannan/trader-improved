@@ -99,10 +99,16 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
         from production.data.loaders.cftc_cot import CftcCotLoader
 
         return CftcCotLoader(lake, instruments)
+    if dataset == "fundamentals":
+        from production.data.loaders.edgar import EdgarFundamentalsLoader
+
+        return EdgarFundamentalsLoader(lake, instruments,
+                                       symbols=_sleeve_symbols("equity"))
     raise ValueError(f"no loader for dataset {dataset!r}")
 
 
-DATASETS = ["prices", "funding", "basis", "fx", "macro", "french", "cot", "universe", "all"]
+DATASETS = ["prices", "funding", "basis", "fx", "macro", "french", "cot",
+            "fundamentals", "universe", "all"]
 
 # Curated `source` values that identify the two independent price feeds we cross-check.
 _PRIMARY_SOURCES = ("yfinance",)
