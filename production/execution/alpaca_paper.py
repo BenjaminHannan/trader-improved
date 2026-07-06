@@ -102,10 +102,23 @@ class AlpacaPaperClient:
 
     # ------------------------------------------------------------- order write
     def submit_order(self, symbol: str, qty: float, side: str, type_: str = "market",
-                     tif: str = "day") -> dict:
-        """POST a single order (always issues a request — callers gate with dry_run)."""
+                     tif: str = "day", limit_price: float | None = None) -> dict:
+        """POST a single order (always issues a request — callers gate with dry_run).
+
+        For ``type_="limit"`` a ``limit_price`` is REQUIRED (raises :class:`ExecutionError`
+        otherwise) and the payload carries it. ``tif`` defaults to ``"day"``: an unfilled
+        day limit expires at the close rather than resting indefinitely. That is the
+        deliberate opportunity-cost tradeoff of passive execution — we sacrifice fill
+        certainty to capture spread instead of paying it; whether the limit fills or lapses,
+        :mod:`production.execution.shortfall` measures the realized outcome either way.
+        """
+        if type_ == "limit" and limit_price is None:
+            raise ExecutionError(
+                f"limit order for {symbol} requires a limit_price (got None)")
         payload = {"symbol": symbol, "qty": str(qty), "side": side,
                    "type": type_, "time_in_force": tif}
+        if type_ == "limit":
+            payload["limit_price"] = str(limit_price)
         return self._request("POST", "/v2/orders", json=payload)
 
     def submit_orders(self, orders: pd.DataFrame, master: pd.DataFrame,
@@ -120,24 +133,27 @@ class AlpacaPaperClient:
         never submitted.
         """
         cols = ["instrument_id", "alpaca_symbol", "side", "qty", "order_type",
-                "status", "broker_order_id"]
+                "limit_price", "status", "broker_order_id"]
         if orders is None or orders.empty:
             return pd.DataFrame(columns=cols)
 
+        has_limit = "limit_price" in orders.columns
         rows: list[dict] = []
         for o in orders.itertuples(index=False):
             iid = o.instrument_id
             symbol = vendor_symbol(master, iid, "alpaca")
+            lp = float(getattr(o, "limit_price")) if has_limit else None
             base = {"instrument_id": iid, "alpaca_symbol": symbol, "side": o.side,
                     "qty": float(o.qty), "order_type": o.order_type,
-                    "broker_order_id": None}
+                    "limit_price": lp, "broker_order_id": None}
             if symbol is None:
                 rows.append({**base, "status": "no_alpaca_symbol"})
                 continue
             if dry_run:
                 rows.append({**base, "status": "dry_run"})
                 continue
-            resp = self.submit_order(symbol, o.qty, o.side, type_=o.order_type)
+            resp = self.submit_order(symbol, o.qty, o.side, type_=o.order_type,
+                                     limit_price=lp)
             rows.append({**base, "status": (resp or {}).get("status", "submitted"),
                          "broker_order_id": (resp or {}).get("id")})
         return pd.DataFrame(rows, columns=cols)

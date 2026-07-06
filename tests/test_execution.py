@@ -10,10 +10,12 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import pandas.testing as pdt
+
 from production.execution import alpaca_paper as ap
 from production.execution.alpaca_paper import AlpacaPaperClient, ExecutionError
 from production.core.lake import Lake
-from production.execution.orders import target_weights_to_orders
+from production.execution.orders import ORDER_COLUMNS, target_weights_to_orders
 from production.execution.shortfall import implementation_shortfall
 from production.execution.tca import calibrate_overrides, read_overrides, write_overrides
 from production.reference.instruments import build_instrument_master
@@ -102,6 +104,69 @@ def test_orders_side_signs_buy_and_sell():
     assert by_id["EQ:BBB:2000-01-03"] == "buy"
 
 
+# --------------------------------------------------------------- limit orders
+def test_orders_limit_price_buy_below_sell_above_known_answer():
+    # equity @ $100, 5bp offset: buy limit = 100*(1-0.0005) = 99.95; sell = 100.05.
+    orders = target_weights_to_orders(
+        pd.Series({"EQ:AAA:2000-01-03": 0.10, "EQ:BBB:2000-01-03": 0.02}),
+        pd.Series({"EQ:AAA:2000-01-03": 0.02, "EQ:BBB:2000-01-03": 0.10}),
+        equity_usd=100_000.0,
+        prices=pd.Series({"EQ:AAA:2000-01-03": 100.0, "EQ:BBB:2000-01-03": 100.0}),
+        order_type="limit",
+        limit_offset_bps=5.0,
+    )
+    by_id = orders.set_index("instrument_id")
+    assert by_id.loc["EQ:AAA:2000-01-03", "side"] == "buy"
+    assert by_id.loc["EQ:AAA:2000-01-03", "limit_price"] == pytest.approx(99.95)
+    assert by_id.loc["EQ:BBB:2000-01-03", "side"] == "sell"
+    assert by_id.loc["EQ:BBB:2000-01-03", "limit_price"] == pytest.approx(100.05)
+    assert set(orders["order_type"]) == {"limit"}
+
+
+def test_orders_limit_price_equity_rounds_to_two_dp():
+    # 123.456 * (1 - 0.0005) = 123.394272 -> 2dp -> 123.39.
+    orders = target_weights_to_orders(
+        pd.Series({"EQ:AAA:2000-01-03": 0.10}),
+        pd.Series(dtype=float),
+        equity_usd=100_000.0,
+        prices=pd.Series({"EQ:AAA:2000-01-03": 123.456}),
+        order_type="limit",
+        limit_offset_bps=5.0,
+    )
+    lp = orders.iloc[0]["limit_price"]
+    assert lp == pytest.approx(123.39)
+    assert round(lp, 2) == lp        # no sub-cent precision
+
+
+def test_orders_limit_price_crypto_rounds_to_six_sigfigs():
+    # 43210.99 * (1 - 0.0005) = 43189.384505 -> 6 significant figures -> 43189.4.
+    orders = target_weights_to_orders(
+        pd.Series({"CR:BTC:2017-01-01": 0.10}),
+        pd.Series(dtype=float),
+        equity_usd=100_000.0,
+        prices=pd.Series({"CR:BTC:2017-01-01": 43210.99}),
+        order_type="limit",
+        limit_offset_bps=5.0,
+    )
+    assert orders.iloc[0]["limit_price"] == pytest.approx(43189.4)
+
+
+def test_orders_market_path_bit_identical_when_order_type_omitted():
+    # Default (omitted) must equal an explicit market call, with NO limit_price column.
+    args = (
+        pd.Series({"EQ:AAA:2000-01-03": 0.10, "CR:BTC:2017-01-01": 0.05}),
+        pd.Series(dtype=float),
+    )
+    kwargs = dict(equity_usd=100_000.0,
+                  prices=pd.Series({"EQ:AAA:2000-01-03": 100.0,
+                                    "CR:BTC:2017-01-01": 30_000.0}))
+    default = target_weights_to_orders(*args, **kwargs)
+    explicit = target_weights_to_orders(*args, order_type="market", **kwargs)
+    assert list(default.columns) == ORDER_COLUMNS
+    assert "limit_price" not in default.columns
+    pdt.assert_frame_equal(default, explicit)
+
+
 # --------------------------------------------------------- symbol mapping / submit
 def test_symbol_mapping_from_master_json():
     master = build_instrument_master()
@@ -133,6 +198,51 @@ def test_dry_run_submits_nothing(monkeypatch):
     plan = client.submit_orders(orders, master, dry_run=True)   # must not raise
     assert list(plan["status"]) == ["dry_run"]
     assert plan.iloc[0]["broker_order_id"] is None
+
+
+def test_submit_order_limit_payload_has_limit_price_and_tif_day(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, **kw):
+        captured["json"] = kw.get("json")
+        return _FakeResponse(200, payload={"id": "lim1", "status": "accepted"})
+
+    monkeypatch.setattr(ap.requests, "request", fake_request)
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    resp = client.submit_order("GLD", 3, "buy", type_="limit", limit_price=99.95)
+    assert resp["id"] == "lim1"
+    body = captured["json"]
+    assert body["type"] == "limit"
+    assert body["time_in_force"] == "day"
+    assert body["limit_price"] == "99.95"
+
+
+def test_submit_order_limit_missing_price_raises(monkeypatch):
+    monkeypatch.setattr(ap.requests, "request", _no_http)   # must fail before any HTTP
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    with pytest.raises(ExecutionError):
+        client.submit_order("GLD", 3, "buy", type_="limit")
+
+
+def test_submit_orders_threads_limit_price_from_frame(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, **kw):
+        captured["json"] = kw.get("json")
+        return _FakeResponse(200, payload={"id": "z", "status": "accepted"})
+
+    monkeypatch.setattr(ap.requests, "request", fake_request)
+    master = build_instrument_master()
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    gld = next(i for i in master["instrument_id"] if i.startswith("CO:GLD:"))
+    orders = pd.DataFrame({
+        "instrument_id": [gld], "side": ["buy"], "qty": [3.0],
+        "notional_usd": [300.0], "order_type": ["limit"], "limit_price": [123.39],
+    })
+    plan = client.submit_orders(orders, master, dry_run=False)
+    assert captured["json"]["type"] == "limit"
+    assert captured["json"]["limit_price"] == "123.39"
+    assert plan.iloc[0]["limit_price"] == pytest.approx(123.39)
 
 
 def test_retry_on_429_then_success(monkeypatch):
@@ -312,3 +422,16 @@ def test_daily_run_dry_run_smoke(monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "DRY-RUN" in out
+
+
+def test_daily_run_dry_run_limit_prints_limit_column(monkeypatch, capsys):
+    # --order-type limit dry-run: prints the limit_price column, still zero HTTP.
+    monkeypatch.setattr(ap.requests, "request", _no_http)
+    from scripts.daily_run import main
+
+    rc = main(["--synthetic", "--dry-run", "--order-type", "limit",
+               "--limit-offset-bps", "5", "--start", "2019-01-01", "--end", "2019-09-30"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "DRY-RUN" in out
+    assert "limit_price" in out

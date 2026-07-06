@@ -88,9 +88,17 @@ def _print_orders(orders: pd.DataFrame, target: pd.Series, equity_usd: float,
     if orders.empty:
         print("  no orders (book already at target within min-notional).")
         return
-    print(f"  {'instrument_id':<28}{'side':<6}{'qty':>14}{'notional_usd':>16}")
+    has_limit = "limit_price" in orders.columns
+    header = f"  {'instrument_id':<28}{'side':<6}{'qty':>14}{'notional_usd':>16}"
+    if has_limit:
+        header += f"{'limit_price':>16}"
+    print(header)
     for o in orders.itertuples(index=False):
-        print(f"  {o.instrument_id:<28}{o.side:<6}{o.qty:>14.6f}{o.notional_usd:>16,.2f}")
+        line = (f"  {o.instrument_id:<28}{o.side:<6}{o.qty:>14.6f}"
+                f"{o.notional_usd:>16,.2f}")
+        if has_limit:
+            line += f"{o.limit_price:>16,.6f}"
+        print(line)
     print("-" * 60)
     print(f"  {len(orders)} orders   gross notional "
           f"{orders['notional_usd'].sum():,.2f}")
@@ -111,6 +119,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         f"else {_DEFAULT_EQUITY:,.0f})")
     p.add_argument("--min-order-usd", type=float, default=25.0,
                    help="drop orders below this notional (default: 25)")
+    p.add_argument("--order-type", choices=["market", "limit"], default="limit",
+                   help="order type (default: limit — passive placement captures spread "
+                        "instead of paying it; unfilled day limits expire)")
+    p.add_argument("--limit-offset-bps", type=float, default=5.0,
+                   help="passive limit half-spread offset in bps (default: 5); "
+                        "buys priced below / sells above the decision mark")
     p.add_argument("--calibrate-tca", action="store_true",
                    help="TCA feedback: read accumulated shortfall (lake reference "
                         "'shortfall_log' or --shortfall-path parquet), calibrate "
@@ -217,7 +231,9 @@ def main(argv: list[str] | None = None) -> int:
     w_current = _current_weights(client, master, target.index, equity_usd)
     prices = _latest_prices(data["prices"], target.index)
     orders = target_weights_to_orders(target, w_current, equity_usd, prices,
-                                      min_order_usd=args.min_order_usd)
+                                      min_order_usd=args.min_order_usd,
+                                      order_type=args.order_type,
+                                      limit_offset_bps=args.limit_offset_bps)
     _print_orders(orders, target, equity_usd, args.dry_run)
 
     if not args.dry_run and client is not None and not orders.empty:
