@@ -1,0 +1,55 @@
+# Walk-forward backtest configuration.
+walk_forward:
+  train_years: 3               # rolling training window for IC estimation + gate stats
+  step_months: 1               # re-estimate IC / lambda / sleeve allocation monthly
+  rebalance: weekly            # shared weekly grid across sleeves (crypto: daily bars, weekly trades)
+  purge_days: 21               # max factor horizon between train end and test start
+  start: "2016-01-01"
+  end: null                    # null = latest available
+
+optimizer:
+  risk_aversion_init: 10.0
+  lambda_bisect_iters: 5       # calibrate lambda so unconstrained sol hits sleeve vol target
+  tcost_weight: 1.0
+  solver: CLARABEL
+  solver_fallback: OSQP
+
+sleeve_vol_target: 0.10        # each sleeve standalone annualized vol target
+total_vol_target: 0.10
+
+constraints:
+  position_cap:
+    equity: 0.02
+    crypto: 0.05
+    fx_etf: 0.10
+    commodity_etf: 0.10
+  gross_cap: 2.0
+  net_band: 0.10
+  beta_neutral_band: 0.05
+  sector_band: 0.05
+  turnover_cap: 0.30           # per rebalance, sum |dw|
+
+allocation:
+  method: erc                  # equal risk contribution on sleeve-return EWMA cov
+  sleeve_cov_halflife_days: 63
+  risk_caps:
+    crypto: 0.20               # crypto <= 20% of total risk
+    max_any_sleeve: 0.40
+  warmup_days: 126             # until then: inverse-vol weight with 0.5 haircut
+
+overlays:
+  vol_target:
+    target: 0.10
+    lookback_days: 21
+    clip: [0.0, 1.5]
+  drawdown_control:
+    threshold: 0.08            # beyond 8% running DD scale gross to 0.5
+    scale: 0.5
+  macro_derisk:
+    enabled: true
+    series: [BAMLH0A0HYM2, VIXCLS]   # HY OAS + VIX level, trailing causal z
+    z_window_days: 252
+    z_trigger: 1.5
+    scale: 0.6
+
+report_dir: reports/

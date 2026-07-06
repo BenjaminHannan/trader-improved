@@ -1,0 +1,67 @@
+# Factor registry — every factor ever tested lives here forever.
+# status: candidate | accepted | rejected. Gate stats are recorded when the gate runs.
+# n_trials for the deflated Sharpe = count of factors ever moved past candidate
+# (i.e. everything in this file with a recorded gate attempt) — the multiple-testing
+# count is part of the config, not a guess.
+
+gate:
+  train_ic_tstat_min: 2.0
+  oos_ic_abs_min: 0.005
+  oos_fraction: 0.20          # last 20% of training span is the validation slice
+  min_decay_halflife_days: 5  # >= weekly rebalance interval
+  require_net_positive_validation: true
+
+factors:
+  mom_12_1:
+    signal: production.signals.momentum.Momentum12m1m
+    sleeves: [equity, crypto, fx_etf, commodity_etf]
+    horizon_days: 21
+    min_history_days: 273
+    status: candidate
+    gate_stats: {}
+  str_reversal_1m:
+    signal: production.signals.momentum.ShortTermReversal1m
+    sleeves: [equity, crypto]
+    horizon_days: 5
+    min_history_days: 21
+    status: candidate
+    gate_stats: {}
+  low_vol:
+    signal: production.signals.vol.LowVolatility
+    sleeves: [equity, crypto]
+    horizon_days: 21
+    min_history_days: 63
+    status: candidate
+    gate_stats: {}
+  carry_funding:
+    signal: production.signals.carry.FundingCarry
+    sleeves: [crypto]
+    horizon_days: 5
+    min_history_days: 7
+    status: candidate
+    gate_stats: {}
+  carry_rate_diff:
+    signal: production.signals.carry.RateDifferentialCarry
+    sleeves: [fx_etf]
+    horizon_days: 21
+    min_history_days: 21
+    status: candidate
+    gate_stats: {}
+  tsmom:
+    signal: production.signals.momentum.TimeSeriesMomentum
+    sleeves: [fx_etf, commodity_etf]
+    horizon_days: 21
+    min_history_days: 252
+    status: candidate
+    gate_stats: {}
+  cot_positioning:
+    signal: production.signals.positioning.CotPositioning
+    sleeves: [fx_etf, commodity_etf]
+    horizon_days: 21
+    min_history_days: 156
+    status: candidate
+    gate_stats: {}
+
+# Multiple-testing ledger: incremented every time a factor is put through the gate,
+# never decremented. Feeds n_trials of the deflated Sharpe ratio.
+n_trials: 7

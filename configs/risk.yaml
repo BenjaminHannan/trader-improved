@@ -1,0 +1,43 @@
+# Risk model v1 — per-sleeve structure.
+# Structural sleeves (equity, crypto): Sigma = B F B' + D
+# Small sleeves (fx_etf, commodity_etf): shrunk EWMA full instrument covariance —
+# N is tiny, factor structure would be noise; deliberate v1 choice.
+
+structural_sleeves: [equity, crypto]
+covariance_sleeves: [fx_etf, commodity_etf]
+
+exposures:
+  equity:
+    # market beta vs ADV-weighted sleeve index (252d OLS, shift(1));
+    # size = log trailing 63d dollar ADV (documented proxy — no free PIT market cap);
+    # momentum = 12-1 z; vol = 63d realized z; sector dummies (current GICS — NOT PIT, caveat documented)
+    factors: [market, size, momentum, vol]
+    sector_dummies: true
+    beta_window_days: 252
+    size_adv_window_days: 63
+    vol_window_days: 63
+  crypto:
+    # BTC beta, size = log CoinGecko mcap (fallback: log dollar ADV), momentum, vol
+    factors: [market, size, momentum, vol]
+    sector_dummies: false
+    beta_window_days: 252
+    size_adv_window_days: 63
+    vol_window_days: 63
+
+factor_covariance:
+  ewma_halflife_days: 90
+  min_obs: 252
+  shrinkage_to_diagonal: 0.3   # fixed intensity, PSD-safe; Ledoit-Wolf later
+
+specific_risk:
+  ewma_halflife_days: 42
+  min_obs: 63
+  cross_sectional_shrink_weight: 0.25   # toward sleeve median vol — Bayesian shrink for thin histories
+
+instrument_covariance:          # small sleeves
+  ewma_halflife_days: 90
+  shrinkage_to_diagonal: 0.3
+
+validation:
+  # correlate estimated equity factor returns with Ken French monthly series
+  french_min_abs_corr: 0.6      # for market and momentum

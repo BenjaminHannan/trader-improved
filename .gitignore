@@ -1,0 +1,17 @@
+# data lake — never committed
+data/
+reports/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.cache/
+dist/
+build/
+
+# env / secrets
+.env
+*.key

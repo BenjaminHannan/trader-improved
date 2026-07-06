@@ -1,0 +1,62 @@
+# Universe definition — 4 sleeves.
+# FX and commodity sleeves trade ETF *proxies* because the execution venue (Alpaca)
+# cannot trade spot FX or futures; the proxy_of field on the instrument master
+# documents the underlying each ETF stands in for.
+
+sleeves:
+  equity:
+    asset_class: equity
+    universe: sp500            # PIT membership from Wikipedia change-history walk-back
+    calendar: nyse
+    liquidity:
+      min_price: 0.10          # sub-$0.10 hygiene backstop
+      min_adv_usd: 1.0e6       # trailing 20d dollar ADV floor
+    max_names: 500
+
+  crypto:
+    asset_class: crypto
+    calendar: crypto           # 7-day week, midnight-UTC daily bars
+    liquidity:
+      min_adv_usd: 5.0e6
+    membership: listing_volume # listed >= 90d AND trailing-30d volume rank (shifted)
+    top_n_by_volume: 25
+    symbols:                   # Alpaca-tradable pairs, quoted vs USD
+      [BTC, ETH, SOL, ADA, DOGE, LTC, BCH, LINK, UNI, AAVE,
+       AVAX, DOT, MATIC, SHIB, XRP, ATOM, ALGO, XLM, ETC, FIL,
+       NEAR, GRT, CRV, MKR, SUSHI]
+
+  fx_etf:
+    asset_class: fx
+    calendar: nyse
+    membership: static         # static list with inception dates (see instruments)
+    liquidity:
+      min_adv_usd: 0.5e6
+    symbols:
+      FXE: EURUSD
+      FXY: JPYUSD
+      FXB: GBPUSD
+      FXA: AUDUSD
+      FXC: CADUSD
+      FXF: CHFUSD
+      UUP: DXY_LONG
+      UDN: DXY_SHORT
+
+  commodity_etf:
+    asset_class: commodity
+    calendar: nyse
+    membership: static
+    liquidity:
+      min_adv_usd: 0.5e6
+    symbols:
+      GLD: GOLD_SPOT
+      SLV: SILVER_SPOT
+      USO: WTI_CRUDE
+      UNG: NATGAS
+      DBA: AGS_BASKET
+      DBB: BASE_METALS
+      CPER: COPPER
+      PPLT: PLATINUM
+      PALL: PALLADIUM
+      CORN: CORN
+      WEAT: WHEAT
+      SOYB: SOYBEANS

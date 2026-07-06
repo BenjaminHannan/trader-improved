@@ -1,0 +1,27 @@
+# Transaction cost model — Almgren-Chriss square-root impact with per-sleeve floors.
+# cost_bps = max(floor_bps, half_spread_bps + 1e4 * impact_alpha * sigma_daily * sqrt(trade_$ / ADV_$))
+# ADV and sigma are trailing 20d, shift(1) — never same-day.
+# Costs are NEVER zero; the floor binds when the model output falls below it.
+
+impact_alpha: 0.15
+adv_window_days: 20
+cap_bps: 100.0            # hard cap; hitting it emits an audit warning, never silence
+
+sleeves:
+  equity:
+    floor_bps: 5.0
+    half_spread_bps: 2.5
+  crypto:
+    floor_bps: 30.0
+    half_spread_bps: 10.0
+  fx_etf:
+    floor_bps: 5.0
+    half_spread_bps: 2.0
+  commodity_etf:
+    floor_bps: 10.0
+    half_spread_bps: 4.0
+
+# Per-instrument overrides (spread-based), e.g.:
+# instrument_overrides:
+#   "EQ:PALL:2010-01-08": { floor_bps: 20.0, half_spread_bps: 10.0 }
+instrument_overrides: {}
