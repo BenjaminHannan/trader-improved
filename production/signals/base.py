@@ -28,6 +28,10 @@ _PREFIX_TO_SLEEVE = {
     "CR": "crypto",
     "FX": "fx_etf",
     "CO": "commodity_etf",
+    "RT": "rates_etf",
+    "IE": "intl_etf",
+    "SE": "sector_etf",
+    "EV": "events",
 }
 
 

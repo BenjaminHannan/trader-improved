@@ -14,7 +14,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "configs"
 
-SLEEVES = ("equity", "crypto", "fx_etf", "commodity_etf")
+SLEEVES = ("equity", "crypto", "fx_etf", "commodity_etf",
+           "rates_etf", "intl_etf", "sector_etf", "events")
 
 
 class ConfigError(Exception):

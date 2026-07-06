@@ -203,7 +203,10 @@ def synthetic_instruments() -> dict[str, str]:
     cr = {f"CR:{s}:2017-01-01": "crypto" for s in ["BTC", "ETH", "SOL", "LTC", "ADA"]}
     fx = {f"FX:{s}:2007-01-03": "fx_etf" for s in ["FXE", "FXY", "FXB"]}
     co = {f"CO:{s}:2006-01-03": "commodity_etf" for s in ["GLD", "USO", "SLV"]}
-    return {**eq, **cr, **fx, **co}
+    rt = {f"RT:{s}:2002-07-26": "rates_etf" for s in ["TLT", "IEF", "LQD"]}
+    ie = {f"IE:{s}:1996-03-12": "intl_etf" for s in ["EWJ", "EWG", "EWU"]}
+    se = {f"SE:{s}:1998-12-16": "sector_etf" for s in ["XLK", "XLF", "XLE"]}
+    return {**eq, **cr, **fx, **co, **rt, **ie, **se}
 
 
 @pytest.fixture(scope="session")
