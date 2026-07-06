@@ -17,6 +17,7 @@ import io
 import pandas as pd
 
 from production.data.base import AvailabilityRule, BaseLoader, prices_to_long
+from production.reference.hygiene import apply_hygiene
 
 
 class StooqPricesLoader(BaseLoader):
@@ -66,4 +67,25 @@ class StooqPricesLoader(BaseLoader):
             return None
 
     def transform(self, raw) -> pd.DataFrame:
-        return prices_to_long(raw, lambda s: self.resolve(s, "stooq"))
+        long = prices_to_long(raw, lambda s: self.resolve(s, "stooq"))
+        return self._apply_price_hygiene(long)
+
+    def _apply_price_hygiene(self, long: pd.DataFrame) -> pd.DataFrame:
+        """Enforce the sub-$0.10 backstop + reused-ticker blocklist on the canonical
+        long frame before it is returned for stamping/audit. The vendor symbol is
+        recovered from the synthetic instrument_id (``class:symbol:first-listing``);
+        drop counts are stashed on ``self.hygiene_drops`` and, when non-zero, appended
+        to ``self.warnings`` so they land in the ingest audit record — never silent."""
+        if long is not None and not long.empty and "symbol" not in long.columns \
+                and "instrument_id" in long.columns:
+            long = long.copy()
+            long["symbol"] = long["instrument_id"].map(
+                lambda i: str(i).split(":")[1] if pd.notna(i) and ":" in str(i) else i)
+        clean, drops = apply_hygiene(long, symbol_col="symbol")
+        clean = clean.drop(columns=["symbol"], errors="ignore")
+        self.hygiene_drops = drops
+        if drops["backstop_dropped"] or drops["blocklist_dropped"]:
+            self.warnings.append(
+                f"hygiene: dropped {drops['backstop_dropped']} sub-floor price row(s) "
+                f"and {drops['blocklist_dropped']} blocklisted-ticker row(s)")
+        return clean

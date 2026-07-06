@@ -36,6 +36,19 @@ def _instruments() -> pd.DataFrame:
     ])
 
 
+def _instruments_with_fb() -> pd.DataFrame:
+    """Instrument master extended with FB, whose bare ticker is blocklisted from the
+    2022-06-09 Meta rename onward (see reference.hygiene.REUSED_TICKER_BLOCKLIST)."""
+    base = _instruments()
+    fb = dict(
+        instrument_id="EQ:FB:2012-05-18", asset_class="equity", sleeve="equity",
+        symbol="FB", vendor_symbols=json.dumps({"yfinance": "FB", "stooq": "fb.us"}),
+        currency="USD", valid_from="1990-01-01", valid_to="2099-01-01",
+        proxy_of=None, sector="tech", meta="{}",
+    )
+    return pd.concat([base, pd.DataFrame([fb])], ignore_index=True)
+
+
 def _yf_payload(dates, syms) -> pd.DataFrame:
     """yfinance-style DataFrame with MultiIndex (ticker, field) columns."""
     frames = {}
@@ -119,6 +132,49 @@ def test_yfinance_multiindex_to_long_and_dollar_volume():
                                  "dollar_volume", "asset_class"}
     assert len(long) == 6  # 2 symbols x 3 days
     np.testing.assert_allclose(long["dollar_volume"], long["close"] * long["volume"])
+
+
+# ================================================ (4b) hygiene wired into loader
+def test_transform_applies_hygiene_backstop_and_blocklist():
+    # Dates straddle the FB blocklist boundary (2022-06-09, inclusive): 06-07, 06-08
+    # are legit Facebook rows; 06-09, 06-10 are blocked (recycled ticker era).
+    dates = pd.date_range("2022-06-07", periods=4, freq="B")  # Tue..Fri
+    payload = _yf_payload(dates, ["AAA", "BBB", "FB"])
+    # A single sub-$0.10 close on AAA's first day -> price backstop must drop it.
+    payload[("AAA", "Close")] = [0.05, 11.0, 12.0, 13.0]
+
+    loader = YFinancePricesLoader(instruments=_instruments_with_fb(),
+                                  symbols=["AAA", "BBB", "FB"])
+    long = loader.transform(payload)
+
+    def days(iid):
+        sub = long[long["instrument_id"] == iid]
+        return set(pd.to_datetime(sub["obs_date"]).dt.strftime("%Y-%m-%d"))
+
+    # AAA: the $0.05 row (2022-06-07) is gone; the three real rows remain.
+    assert days("EQ:AAA:2000-01-03") == {"2022-06-08", "2022-06-09", "2022-06-10"}
+    # FB: rows on/after the 2022-06-09 boundary dropped; earlier rows survive.
+    assert days("EQ:FB:2012-05-18") == {"2022-06-07", "2022-06-08"}
+    # BBB is untouched by either backstop.
+    assert days("EQ:BBB:2000-01-03") == {"2022-06-07", "2022-06-08", "2022-06-09", "2022-06-10"}
+    # No sub-floor close survives anywhere.
+    assert (long["close"] >= 0.10).all()
+    # Drop counts recorded (1 penny row, 2 blocklisted FB rows) and surfaced as a warning.
+    assert loader.hygiene_drops == {"backstop_dropped": 1, "blocklist_dropped": 2}
+    assert any("hygiene" in w for w in loader.warnings)
+
+
+def test_hygiene_drop_counts_land_in_audit_record(tmp_lake, monkeypatch):
+    dates = pd.date_range("2022-06-07", periods=4, freq="B")
+    payload = _yf_payload(dates, ["AAA", "FB"])
+    payload[("AAA", "Close")] = [0.05, 11.0, 12.0, 13.0]
+    loader = YFinancePricesLoader(tmp_lake, _instruments_with_fb(), symbols=["AAA", "FB"])
+    monkeypatch.setattr(loader, "fetch", lambda start, end: payload)
+
+    res = loader.run("2022-06-01", "2022-06-30", incremental=False)
+    # 3 AAA rows kept + 2 FB rows kept (06-07, 06-08) = 5.
+    assert res.rows == 5
+    assert any("hygiene" in w for w in res.audit["warnings"])
 
 
 # ==================================================== (2) run end-to-end on lake
@@ -263,10 +319,12 @@ def test_double_run_row_count_stable(tmp_lake, monkeypatch):
 
 # ================================================================== extras
 def test_fatal_audit_raises_ingest_error(tmp_lake, monkeypatch):
-    # A negative close must abort the curated write with IngestError.
+    # A negative volume must abort the curated write with IngestError. (A negative
+    # *close* would be cleaned upstream by the sub-floor hygiene backstop before the
+    # audit ever sees it, so we trip a fatal range that hygiene does not touch.)
     dates = pd.date_range("2020-01-02", periods=3, freq="B")
     payload = _yf_payload(dates, ["AAA"])
-    payload[("AAA", "Close")] = [-1.0, 5.0, 6.0]
+    payload[("AAA", "Volume")] = [-1.0, 5.0, 6.0]
     loader = YFinancePricesLoader(tmp_lake, _instruments(), symbols=["AAA"])
     monkeypatch.setattr(loader, "fetch", lambda start, end: payload)
     with pytest.raises(IngestError):

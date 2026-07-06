@@ -58,3 +58,34 @@ def apply_price_backstop(prices: pd.DataFrame, min_price: float = 0.10) -> pd.Da
         return prices.copy()
     keep = prices["close"] >= min_price
     return prices.loc[keep].reset_index(drop=True)
+
+
+def apply_hygiene(df: pd.DataFrame, symbol_col: str = "symbol",
+                  min_price: float = 0.10) -> tuple[pd.DataFrame, dict]:
+    """Apply both hygiene backstops in one pass and report what was dropped.
+
+    Runs the sub-``min_price`` price backstop, then the reused-ticker blocklist
+    (dropping rows where ``is_blocked(symbol, obs_date)`` is true for the value in
+    ``symbol_col``). Returns ``(clean_df, {"backstop_dropped": n1,
+    "blocklist_dropped": n2})``. The counts are how the caller keeps the drops
+    auditable rather than silent.
+
+    If ``symbol_col`` is absent (or there is no ``obs_date`` to date the block
+    window) the blocklist step is skipped and counted as zero — the price backstop
+    still runs. This is the single implementation the price loaders (and any future
+    price vendor) share, so hygiene is wired once and enforced everywhere.
+    """
+    counts = {"backstop_dropped": 0, "blocklist_dropped": 0}
+    if df is None or len(df) == 0:
+        return (df.copy() if df is not None else df), counts
+
+    before = len(df)
+    out = apply_price_backstop(df, min_price=min_price)
+    counts["backstop_dropped"] = before - len(out)
+
+    if symbol_col in out.columns and "obs_date" in out.columns and len(out):
+        blocked = out.apply(lambda r: is_blocked(r[symbol_col], r["obs_date"]), axis=1)
+        counts["blocklist_dropped"] = int(blocked.sum())
+        if counts["blocklist_dropped"]:
+            out = out.loc[~blocked].reset_index(drop=True)
+    return out, counts

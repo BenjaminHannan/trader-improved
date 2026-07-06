@@ -288,3 +288,62 @@ def test_price_backstop_empty_and_missing_close():
     assert hygiene.apply_price_backstop(pd.DataFrame()).empty
     noclose = pd.DataFrame({"obs_date": [pd.Timestamp("2020-01-01")], "x": [1]})
     pd.testing.assert_frame_equal(hygiene.apply_price_backstop(noclose), noclose)
+
+
+def test_apply_hygiene_drops_penny_and_blocklisted_rows():
+    df = pd.DataFrame({
+        "obs_date": pd.to_datetime([
+            "2020-01-02",  # AAPL, kept
+            "2020-01-03",  # penny -> backstop drop
+            "2022-07-01",  # FB after Meta rename -> blocklist drop
+            "2021-01-04",  # FB legit Facebook era -> kept
+        ]),
+        "symbol": ["AAPL", "AAPL", "FB", "FB"],
+        "close": [150.0, 0.05, 200.0, 250.0],
+    })
+    clean, counts = hygiene.apply_hygiene(df, symbol_col="symbol")
+    assert counts == {"backstop_dropped": 1, "blocklist_dropped": 1}
+    # Exactly the two legitimate rows survive, in order.
+    assert list(clean["close"]) == [150.0, 250.0]
+    assert list(clean["symbol"]) == ["AAPL", "FB"]
+
+
+def test_apply_hygiene_counts_are_independent():
+    # Only a penny row, no blocklisted symbol -> blocklist counter stays 0.
+    df = pd.DataFrame({
+        "obs_date": pd.to_datetime(["2020-01-02", "2020-01-03"]),
+        "symbol": ["AAPL", "AAPL"],
+        "close": [10.0, 0.01],
+    })
+    clean, counts = hygiene.apply_hygiene(df, symbol_col="symbol")
+    assert counts == {"backstop_dropped": 1, "blocklist_dropped": 0}
+    assert list(clean["close"]) == [10.0]
+
+    # Only a blocklisted row, no penny -> backstop counter stays 0.
+    df2 = pd.DataFrame({
+        "obs_date": pd.to_datetime(["2021-01-04", "2022-07-01"]),
+        "symbol": ["FB", "FB"],
+        "close": [250.0, 200.0],
+    })
+    clean2, counts2 = hygiene.apply_hygiene(df2, symbol_col="symbol")
+    assert counts2 == {"backstop_dropped": 0, "blocklist_dropped": 1}
+    assert list(clean2["close"]) == [250.0]
+
+
+def test_apply_hygiene_symbol_col_absent_skips_blocklist():
+    # No symbol column: blocklist step is skipped (counted 0); backstop still runs.
+    df = pd.DataFrame({
+        "obs_date": pd.to_datetime(["2022-07-01", "2020-01-03"]),
+        "instrument_id": ["EQ:FB:2012-05-18", "EQ:X:2000-01-03"],
+        "close": [200.0, 0.05],
+    })
+    clean, counts = hygiene.apply_hygiene(df, symbol_col="symbol")
+    assert counts == {"backstop_dropped": 1, "blocklist_dropped": 0}
+    # The blocklisted FB row survives because there was no symbol column to date it.
+    assert list(clean["close"]) == [200.0]
+
+
+def test_apply_hygiene_empty_frame():
+    clean, counts = hygiene.apply_hygiene(pd.DataFrame(), symbol_col="symbol")
+    assert clean.empty
+    assert counts == {"backstop_dropped": 0, "blocklist_dropped": 0}
