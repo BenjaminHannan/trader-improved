@@ -137,7 +137,9 @@ def _summary(df: pd.DataFrame, entity: str | None) -> dict:
         summary["distinct_entities"] = int(df[entity].nunique())
     cols = {}
     for c in df.columns:
-        if c in _STRUCTURAL or not np.issubdtype(df[c].dtype, np.number):
+        # is_numeric_dtype, not np.issubdtype: extension dtypes (StringDtype,
+        # tz-aware datetimes) make issubdtype RAISE rather than return False
+        if c in _STRUCTURAL or not pd.api.types.is_numeric_dtype(df[c]):
             continue
         s = pd.to_numeric(df[c], errors="coerce")
         cols[c] = {
