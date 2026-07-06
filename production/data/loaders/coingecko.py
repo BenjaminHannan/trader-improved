@@ -6,6 +6,8 @@ for crypto market-cap weighting and a value-style mcap signal; kept minimal here
 """
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 
 from production.data.base import AvailabilityRule, BaseLoader
@@ -20,18 +22,24 @@ class CoinGeckoLoader(BaseLoader):
     availability_rule = AvailabilityRule("ingest_time")
     expectations = {"columns": ["market_cap", "volume"], "min_rows": 1}
 
-    def __init__(self, lake=None, instruments=None, vs_currency="usd", per_page=100):
+    def __init__(self, lake=None, instruments=None, vs_currency="usd", per_page=100,
+                 api_key=None):
         super().__init__(lake, instruments)
         self.vs_currency = vs_currency
         self.per_page = per_page
+        # Optional demo API key: raises the free-tier rate limit. Read from env only,
+        # never hardcoded; absence just means unauthenticated (public) access.
+        self.api_key = api_key if api_key is not None else os.environ.get("COINGECKO_API_KEY")
 
     def fetch(self, start, end) -> list[dict]:
         import requests
 
+        headers = {"x-cg-demo-api-key": self.api_key} if self.api_key else None
         resp = requests.get(
             "https://api.coingecko.com/api/v3/coins/markets",
             params={"vs_currency": self.vs_currency, "order": "market_cap_desc",
-                    "per_page": self.per_page, "page": 1}, timeout=30)
+                    "per_page": self.per_page, "page": 1},
+            headers=headers, timeout=30)
         resp.raise_for_status()
         return resp.json()
 

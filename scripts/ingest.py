@@ -101,10 +101,53 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
 DATASETS = ["prices", "funding", "fx", "macro", "french", "cot", "universe", "all"]
 
 
+def _make_stage2_loaders(lake: Lake, instruments):
+    """Construct every Stage-2 macro/sentiment loader against the default lake.
+
+    These emit macro-style series (ADS, NAAIM, CBOE put/call, FINRA short interest,
+    FRED nowcasts, and the optional manual AAII drop-in) and take no per-sleeve symbol
+    scoping, so they are wired as a fixed batch behind `--stage 2`.
+    """
+    from production.data.loaders.stage2 import (
+        AaiiManualLoader, AdsLoader, CboePutCallLoader, FinraShortInterestLoader,
+        FredStage2Loader, NaaimLoader,
+    )
+
+    return [
+        FredStage2Loader(lake, instruments),
+        AdsLoader(lake, instruments),
+        NaaimLoader(lake, instruments),
+        CboePutCallLoader(lake, instruments),
+        FinraShortInterestLoader(lake, instruments),
+        AaiiManualLoader(lake, instruments),
+    ]
+
+
+def _run_stage2(lake: Lake, instruments, start, end, incremental: bool) -> int:
+    """Run the Stage-2 loader batch, keeping going across failures (e.g. the AAII
+    manual file being absent) and returning a non-zero code if any loader failed."""
+    rc = 0
+    for loader in _make_stage2_loaders(lake, instruments):
+        name = type(loader).__name__
+        try:
+            res = loader.run(start, end, incremental=incremental)
+            print(f"[{name}] vendor={res.vendor} rows={res.rows} "
+                  f"start={res.start.date()} end={res.end.date()} "
+                  f"warnings={res.audit.get('warnings')}")
+        except Exception as exc:
+            print(f"[{name}] FAILED: {exc}", file=sys.stderr)
+            rc = 1
+    return rc
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Ingest a dataset into the parquet lake.")
-    p.add_argument("--dataset", required=True, choices=DATASETS,
-                   help="dataset to ingest (or 'universe' to build reference tables)")
+    p.add_argument("--dataset", default=None, choices=DATASETS,
+                   help="dataset to ingest (or 'universe' to build reference tables); "
+                        "not required when --stage 2 is given")
+    p.add_argument("--stage", type=int, default=1, choices=[1, 2],
+                   help="ingest stage: 1 = the --dataset loader (default); "
+                        "2 = the Stage-2 macro/sentiment loader batch")
     p.add_argument("--sleeve", default="equity",
                    help="sleeve for symbol-scoped datasets (prices)")
     p.add_argument("--start", default="2010-01-01", help="ISO start date")
@@ -115,6 +158,14 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
 
     lake = Lake(args.lake_root)
+    incremental = not args.full
+
+    if args.stage == 2:
+        instruments = _load_instruments(lake)
+        return _run_stage2(lake, instruments, args.start, args.end, incremental)
+
+    if args.dataset is None:
+        p.error("--dataset is required unless --stage 2 is given")
 
     if args.dataset == "universe":
         _build_universe(lake)
@@ -127,7 +178,6 @@ def main(argv=None) -> int:
 
     todo = (["prices", "funding", "fx", "macro", "french", "cot"]
             if args.dataset == "all" else [args.dataset])
-    incremental = not args.full
     rc = 0
     for ds in todo:
         loader = _make_loader(ds, args.sleeve, lake, instruments)
