@@ -11,6 +11,8 @@ optimizer:
   risk_aversion_init: 10.0
   lambda_bisect_iters: 5       # calibrate lambda so unconstrained sol hits sleeve vol target
   tcost_weight: 1.0
+  robust_kappa: 0.0            # opt-in alpha-uncertainty ellipsoid radius (0 = plain MV,
+                              # objective bit-identical); see research-robust-alpha.md wiki page
   solver: CLARABEL
   solver_fallback: OSQP
 

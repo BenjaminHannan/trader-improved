@@ -42,7 +42,8 @@ def _factor_sqrt(F: np.ndarray) -> np.ndarray:
 
 
 def optimize_sleeve(alpha, risk_model, w_prev, cost_bps, sleeve, cfg,
-                    vol_target=None, lam=None, betas=None, sectors=None) -> OptResult:
+                    vol_target=None, lam=None, betas=None, sectors=None,
+                    alpha_se=None) -> OptResult:
     ids = pd.Index(risk_model.ids)
     n = len(ids)
 
@@ -51,6 +52,10 @@ def optimize_sleeve(alpha, risk_model, w_prev, cost_bps, sleeve, cfg,
           if w_prev is not None else np.zeros(n))
     c = pd.Series(cost_bps).reindex(ids).fillna(0.0).to_numpy(dtype=float) / 1e4
     kappa = float(cfg["optimizer"]["tcost_weight"])
+    # Alpha-uncertainty robustness (Goldfarb-Iyengar ellipsoid). Opt-in: default
+    # robust_kappa=0 leaves the objective bit-identical to the plain MV problem (no extra
+    # SOC atom is built), see research/wiki/questions/research-robust-alpha.md.
+    robust_kappa = float(cfg["optimizer"].get("robust_kappa", 0.0))
 
     betas_a = betas.reindex(ids).to_numpy(dtype=float) if isinstance(betas, pd.Series) else betas
     sectors_a = sectors.reindex(ids).to_numpy() if isinstance(sectors, pd.Series) else sectors
@@ -72,7 +77,12 @@ def optimize_sleeve(alpha, risk_model, w_prev, cost_bps, sleeve, cfg,
         risk_expr = cp.quad_form(w, cp.psd_wrap(Sigma))
 
     cost_expr = kappa * cp.sum(cp.multiply(c, cp.abs(w - wp)))
-    objective = cp.Maximize(a @ w - lam_param * risk_expr - cost_expr)
+    obj_expr = a @ w - lam_param * risk_expr - cost_expr
+    if robust_kappa > 0.0 and alpha_se is not None:
+        # Diagonal ellipsoid: penalize sqrt(sum_i (se_i * w_i)^2) = ||diag(se) w||_2.
+        se = pd.Series(alpha_se).reindex(ids).fillna(0.0).to_numpy(dtype=float)
+        obj_expr = obj_expr - robust_kappa * cp.norm(cp.multiply(se, w), 2)
+    objective = cp.Maximize(obj_expr)
     cons = build_constraints(w, wp, sleeve, cfg, betas=betas_a, sectors=sectors_a)
     prob = cp.Problem(objective, cons)
 

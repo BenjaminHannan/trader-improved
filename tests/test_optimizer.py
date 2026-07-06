@@ -162,6 +162,80 @@ def test_beta_neutrality():
     assert abs(float(betas.to_numpy() @ res.w.to_numpy())) <= band + 1e-6
 
 
+# ----------------------------------------- robust alpha-uncertainty ellipsoid (opt-in)
+def _diag_stub(ids, var=0.04):
+    """Diagonal-covariance stub: zero factor exposure, equal specific variance -> Sigma=var*I.
+    Isolates the robust term's effect from cross-name risk coupling."""
+    n = len(ids)
+    return StubRisk(ids, np.zeros((n, 2)), np.diag([1e-8, 1e-8]), np.full(n, var))
+
+
+def _robust_cfg(kappa):
+    cfg = loose_cfg()
+    cfg["optimizer"]["robust_kappa"] = kappa
+    return cfg
+
+
+def _eff_n(w):
+    a = np.abs(np.asarray(w, dtype=float))
+    denom = float((a ** 2).sum())
+    return (float(a.sum()) ** 2 / denom) if denom > 0 else 0.0
+
+
+def test_robust_kappa_zero_identical_to_no_param():
+    """robust_kappa=0 with an alpha_se passed reproduces the no-parameter solution bit-for-bit
+    (no SOC atom is built when the radius is zero)."""
+    rm = make_stub(seed=12)
+    alpha = pd.Series(np.random.default_rng(13).normal(0, 1, 8), index=IDS)
+    cost = pd.Series(0.0, index=IDS)
+    se = pd.Series(np.abs(np.random.default_rng(14).normal(0, 1, 8)), index=IDS)
+    base = optimize_sleeve(alpha, rm, pd.Series(0.0, index=IDS), cost, "equity",
+                           loose_cfg(), lam=10.0)
+    withse = optimize_sleeve(alpha, rm, pd.Series(0.0, index=IDS), cost, "equity",
+                             _robust_cfg(0.0), lam=10.0, alpha_se=se)
+    assert np.allclose(base.w.to_numpy(), withse.w.to_numpy(), atol=1e-9)
+
+
+def test_robust_monotonicity_gross_and_effn():
+    """As kappa grows 0 -> 0.5 -> 2.0 with dispersed alpha_se (largest bets most uncertain),
+    gross exposure is non-increasing and effective N = (sum|w|)^2 / sum(w^2) non-decreasing:
+    robustness spreads bets it cannot trust."""
+    ids = list(IDS)
+    rm = _diag_stub(ids)
+    alpha = pd.Series([3.0, -2.5, 2.0, -1.5, 1.0, -0.8, 0.5, -0.3], index=ids)
+    se = alpha.abs()                       # estimation error concentrated on the big bets
+    cost = pd.Series(0.0, index=ids)
+    gross, effn = [], []
+    for k in (0.0, 0.5, 2.0):
+        res = optimize_sleeve(alpha, rm, pd.Series(0.0, index=ids), cost, "equity",
+                              _robust_cfg(k), lam=1.0, alpha_se=se)
+        assert res.status in ("optimal", "optimal_inaccurate"), (k, res.status)
+        w = res.w.to_numpy()
+        gross.append(float(np.abs(w).sum()))
+        effn.append(_eff_n(w))
+    assert gross[0] >= gross[1] >= gross[2] - 1e-9, gross
+    assert effn[0] <= effn[1] <= effn[2] + 1e-9, effn
+
+
+def test_robust_asymmetric_uncertainty_downweights_uncertain():
+    """Two names, equal alpha and equal risk, but one carries 3x the alpha uncertainty: the
+    robust optimum weights the certain name strictly more (the whole point of the ellipsoid)."""
+    ids = ["EQ:SYN00:2000-01-03", "EQ:SYN01:2000-01-03"]
+    rm = _diag_stub(ids)
+    alpha = pd.Series([1.0, 1.0], index=ids)
+    se = pd.Series([1.0, 3.0], index=ids)  # second name 3x as uncertain
+    cost = pd.Series(0.0, index=ids)
+    res = optimize_sleeve(alpha, rm, pd.Series(0.0, index=ids), cost, "equity",
+                          _robust_cfg(0.3), lam=1.0, alpha_se=se)
+    assert res.status in ("optimal", "optimal_inaccurate"), res.status
+    w = res.w
+    assert w.iloc[0] > w.iloc[1] + 1e-6, w.to_dict()
+    # Without robustness the two would be identical.
+    plain = optimize_sleeve(alpha, rm, pd.Series(0.0, index=ids), cost, "equity",
+                            _robust_cfg(0.0), lam=1.0, alpha_se=se)
+    assert plain.w.iloc[0] == pytest.approx(plain.w.iloc[1])
+
+
 # ------------------------------------------------------------------ overlays
 def test_vol_target_known_answer():
     rng = np.random.default_rng(0)

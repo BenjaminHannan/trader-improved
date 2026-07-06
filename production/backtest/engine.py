@@ -183,14 +183,39 @@ def _select_factors(registry: FactorRegistry) -> tuple[dict, bool, list]:
     return allf, False, warnings_out
 
 
+def _rolling_ic_se(ic_by_date: pd.Series, window: int = 252, horizon_days: int = 1) -> pd.Series:
+    """Trailing standard error of the IC series over the SAME embargoed window as
+    ``rolling_shrunk_ic``: ``std(window) / sqrt(max(n_window, 1))``.
+
+    This is the estimation-error scale of the shrunk IC that drives the alpha-uncertainty
+    ellipsoid. The window selection mirrors ``rolling_shrunk_ic`` exactly (positional
+    horizon embargo on the IC index), so the SE at ``t`` is a pure function of IC dates
+    whose forward window has resolved by ``t`` — PIT-safe by the same argument.
+    """
+    s = pd.Series(ic_by_date).dropna().sort_index()
+    out: dict = {}
+    for i, t in enumerate(s.index):
+        j_max = i - horizon_days
+        if j_max < 0:
+            out[t] = float("nan")
+            continue
+        w = s.iloc[:j_max + 1].iloc[-window:]
+        n = len(w)
+        out[t] = float(w.std(ddof=1) / np.sqrt(max(n, 1))) if n >= 2 else float("nan")
+    return pd.Series(out)
+
+
 def _precompute_factor(name: str, spec: dict, registry: FactorRegistry,
-                       data: dict, sleeve_map: pd.Series, ic_floor=None):
+                       data: dict, sleeve_map: pd.Series, ic_floor=None,
+                       compute_se: bool = False):
     """Signal -> z-scores -> per-sleeve rolling shrunk IC* for one factor.
 
-    Returns ``(z_panel, ic_table, icstar_by_sleeve)`` or ``None`` if the signal produced
-    nothing usable. ``icstar_by_sleeve[sleeve]`` is a date-indexed Series of IC*. The IC
-    series fed to ``rolling_shrunk_ic`` is trimmed to ``obs_date >= ic_floor`` (a tail long
-    enough to cover every grid-date rolling window) purely to bound the Python-loop cost.
+    Returns ``(z_panel, ic_table, icstar_by_sleeve, icse_by_sleeve)`` or ``None`` if the
+    signal produced nothing usable. ``icstar_by_sleeve[sleeve]`` is a date-indexed Series
+    of IC*; ``icse_by_sleeve[sleeve]`` the matching IC standard-error series (empty dict
+    unless ``compute_se`` — the robust term is opt-in and this is the only extra cost). The
+    IC series fed to ``rolling_shrunk_ic`` is trimmed to ``obs_date >= ic_floor`` (a tail
+    long enough to cover every grid-date rolling window) purely to bound the Python-loop cost.
     """
     cls = registry.signal_class(name)
     panel = cls().compute(data)
@@ -203,13 +228,17 @@ def _precompute_factor(name: str, spec: dict, registry: FactorRegistry,
     fwd = forward_returns(data["prices"], horizon)
     ic = rank_ic(z, fwd, sleeve_map)
     icstar_by_sleeve: dict = {}
+    icse_by_sleeve: dict = {}
     for sleeve, g in ic.groupby("sleeve"):
         ic_by_date = g.set_index("obs_date")["rank_ic"].sort_index()
         if ic_floor is not None:
             ic_by_date = ic_by_date[ic_by_date.index >= ic_floor]
         icstar_by_sleeve[sleeve] = rolling_shrunk_ic(
             ic_by_date, window=252, n0=126, horizon_days=horizon)
-    return z, ic, icstar_by_sleeve
+        if compute_se:
+            icse_by_sleeve[sleeve] = _rolling_ic_se(
+                ic_by_date, window=252, horizon_days=horizon)
+    return z, ic, icstar_by_sleeve, icse_by_sleeve
 
 
 def _latest_z_at(z_panel: pd.DataFrame, t, ids) -> pd.DataFrame:
@@ -276,6 +305,9 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     sleeve_ids = {s: sorted(traded[traded == s].index.tolist()) for s in sleeves}
 
     factors, gate_applied, warn_list = _select_factors(registry)
+    # Alpha-uncertainty robustness is opt-in; when off (default) we skip the per-factor IC
+    # standard-error precompute and the per-rebalance alpha_se assembly entirely.
+    robust_kappa = float(cfg["optimizer"].get("robust_kappa", 0.0))
 
     # ---- timeline ---------------------------------------------------------------------
     start = pd.Timestamp(prices["obs_date"].min())
@@ -299,21 +331,25 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     z_panels: dict = {}
     ic_tables: dict = {}
     icstar: dict = {}          # (factor, sleeve) -> date-indexed IC* series
+    icse: dict = {}            # (factor, sleeve) -> date-indexed IC-SE series (robust only)
     factor_sleeves: dict = {}
     for name, spec in factors.items():
         try:
-            pre = _precompute_factor(name, spec, registry, data, sleeve_map, ic_floor)
+            pre = _precompute_factor(name, spec, registry, data, sleeve_map, ic_floor,
+                                     compute_se=robust_kappa > 0.0)
         except Exception as exc:  # noqa: BLE001 - one bad signal must not sink the run
             warn_list.append(f"factor {name}: precompute failed ({exc}) — skipped")
             continue
         if pre is None:
             continue
-        z, ic, icstar_by_sleeve = pre
+        z, ic, icstar_by_sleeve, icse_by_sleeve = pre
         z_panels[name] = z
         ic_tables[name] = ic
         factor_sleeves[name] = set(spec["sleeves"])
         for sleeve, series in icstar_by_sleeve.items():
             icstar[(name, sleeve)] = series
+        for sleeve, series in icse_by_sleeve.items():
+            icse[(name, sleeve)] = series
 
     min_hist = 252  # trailing observations required before an id enters the risk model
     sleeve_vol_target = cfg.get("sleeve_vol_target")
@@ -408,6 +444,9 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
             alpha_panels: dict = {}
             z_by_factor: dict = {}   # factor -> z(t) panel, for the Grinold combine
             ic_by_factor: dict = {}  # factor -> IC*(t)
+            # Quadrature accumulator for the per-name alpha standard error (robust term only):
+            # se_i^2 = sum_f (resid_vol_i * se_IC_f * |z_i,f|)^2, aligned like the alpha combine.
+            se_sq = pd.Series(0.0, index=rm_ids) if robust_kappa > 0.0 else None
             for f in active_factors:
                 ic_star = icstar.get((f, sleeve))
                 if ic_star is None or ic_star.empty:
@@ -425,6 +464,15 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
                     ic_by_factor[f] = float(val)
                     # stand-alone (single-factor) target weights for per-alpha attribution
                     _record_factor_weights(weights_by_factor[f], t, a_f, rm_ids)
+                    if se_sq is not None:
+                        se_series = icse.get((f, sleeve))
+                        se_ic = float(se_series.asof(t)) if (
+                            se_series is not None and not se_series.empty) else float("nan")
+                        if np.isfinite(se_ic):
+                            z_abs = (z_t.set_index("instrument_id")["value"]
+                                     .reindex(rm_ids).abs().fillna(0.0))
+                            contrib = resid_vol.reindex(rm_ids).fillna(0.0) * se_ic * z_abs
+                            se_sq = se_sq.add(contrib ** 2, fill_value=0.0)
 
             if not alpha_panels:
                 continue
@@ -446,9 +494,14 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
             cost_opt = cost_model.cost_bps(repr_trade, adv, sigma, sleeve,
                                            instrument_ids=rm_ids)
 
+            alpha_se = None
+            if se_sq is not None:
+                alpha_se = np.sqrt(se_sq).reindex(rm_ids).fillna(0.0)
+
             wp = w_prev.reindex(rm_ids).fillna(0.0)
             res = optimize_sleeve(alpha_series, rm, wp, cost_opt, sleeve, cfg,
-                                  vol_target=sleeve_vol_target, sectors=sleeve_sectors)
+                                  vol_target=sleeve_vol_target, sectors=sleeve_sectors,
+                                  alpha_se=alpha_se)
             w_new = res.w.reindex(rm_ids).fillna(0.0)
 
             # --- realized cost on the actual trade ---
