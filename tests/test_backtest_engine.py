@@ -20,7 +20,8 @@ import yaml
 from production.alpha.registry import FactorRegistry, GateStats
 
 from production.backtest.attribution import factor_attribution, per_alpha_contribution
-from production.backtest.bootstrap import sharpe_ci, stationary_bootstrap
+from production.backtest.bootstrap import (politis_white_block_length, sharpe_ci,
+                                           stationary_bootstrap)
 from production.backtest.deflated_sharpe import deflated_sharpe, probabilistic_sharpe
 from production.backtest.engine import run_backtest
 from production.backtest.metrics import (ann_vol, hit_rate, max_drawdown, sharpe,
@@ -306,6 +307,66 @@ def test_bootstrap_ci_contains_point_estimate():
     lo, hi = sharpe_ci(r, level=0.95, n_boot=400, seed=1)
     assert lo <= point <= hi
     assert len(stationary_bootstrap(r, n_boot=100, seed=1)) == 100
+
+
+# ============================================================ Politis-White block length
+def _ar1(rho: float, n: int, seed: int) -> pd.Series:
+    rng = np.random.default_rng(seed)
+    eps = rng.normal(0.0, 1.0, n)
+    x = np.empty(n)
+    x[0] = eps[0]
+    for t in range(1, n):
+        x[t] = rho * x[t - 1] + eps[t]
+    return pd.Series(x)
+
+
+def test_ppw_iid_gives_short_block():
+    """iid N(0,1), T=1000: no serial dependence -> a short expected block (< 10)."""
+    rng = np.random.default_rng(7)
+    r = pd.Series(rng.normal(0.0, 1.0, 1000))
+    b = politis_white_block_length(r)
+    assert 1.0 <= b < 10.0
+
+
+def test_ppw_ar1_much_longer_than_iid():
+    """AR(1) rho=0.9 at the same T is substantially more dependent -> >= 3x the iid block."""
+    rng = np.random.default_rng(7)
+    iid = pd.Series(rng.normal(0.0, 1.0, 1000))
+    b_iid = politis_white_block_length(iid)
+    b_ar1 = politis_white_block_length(_ar1(0.9, 1000, seed=11))
+    assert b_ar1 >= 3.0 * b_iid
+
+
+def test_ppw_block_within_bounds_short_and_constant():
+    """b in [1, ceil(T/3)] on a short series; a constant series degenerates to 1.0."""
+    short = _ar1(0.5, 30, seed=3)
+    b = politis_white_block_length(short)
+    assert 1.0 <= b <= np.ceil(len(short) / 3.0)
+    assert politis_white_block_length(pd.Series([0.01] * 200)) == 1.0
+    assert politis_white_block_length(pd.Series([0.0, 0.0])) == 1.0
+
+
+def test_sharpe_ci_auto_brackets_true_sharpe():
+    """'auto' block selection still yields a CI that brackets a seeded generator's Sharpe."""
+    rng = np.random.default_rng(21)
+    r = pd.Series(rng.normal(0.0005, 0.01, 1000))
+    point = sharpe(r)
+    lo, hi = sharpe_ci(r, level=0.95, n_boot=400, avg_block="auto", seed=1)
+    assert lo <= point <= hi
+
+
+def test_sharpe_ci_numeric_block_bit_identical():
+    """A numeric avg_block reproduces the pre-'auto' fixed-block CI exactly (same seed)."""
+    rng = np.random.default_rng(5)
+    r = pd.Series(rng.normal(0.0004, 0.01, 750))
+    a = stationary_bootstrap(r, n_boot=200, avg_block=21, seed=1)
+    b = stationary_bootstrap(r, n_boot=200, avg_block=21, seed=1)
+    assert np.array_equal(a, b)
+    ci_a = sharpe_ci(r, n_boot=200, avg_block=21, seed=1)
+    ci_b = sharpe_ci(r, n_boot=200, avg_block=21, seed=1)
+    assert ci_a == ci_b
+    # and 'auto' generally selects a different block than the old fixed 21 here.
+    assert politis_white_block_length(r) != 21.0
 
 
 # ============================================================ attribution
