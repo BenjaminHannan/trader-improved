@@ -61,4 +61,9 @@ overlays:
     z_trigger: 1.5
     scale: 0.6
 
+alpha:
+  purify: true                 # neutralize each factor's z against the risk exposures B
+  purify_sleeves: [equity, crypto]   # structural sleeves only (N too small for ETF sleeves)
+  factor_momentum_gamma: 0.25  # tilt IC weights by trailing single-factor momentum (0.0 = off)
+
 report_dir: reports/

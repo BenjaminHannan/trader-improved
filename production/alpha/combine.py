@@ -31,6 +31,80 @@ def combine_alphas(alpha_panels: dict[str, pd.DataFrame]) -> pd.DataFrame:
     return out
 
 
+def factor_momentum_tilt(factor_returns_trailing: pd.Series, gamma: float) -> float:
+    """Multiplicative factor-momentum tilt on a factor's IC weight.
+
+    Ehsani-Linnainmaa (JF 2022) / Gupta-Kelly (JPM 2019): single-factor returns are
+    positively autocorrelated — a factor that has been winning over the trailing year
+    tends to keep winning. We express this as a bounded tilt on the factor's combination
+    weight: ``clip(1 + gamma * sign(sum trailing returns), 0, 2)``. A factor with a
+    positive trailing sum is scaled up (toward ``1 + gamma``), a persistently losing one
+    scaled down (toward ``1 - gamma``); the clip keeps the tilt in ``[0, 2]`` so it can
+    never flip a factor's sign or blow its weight up. ``gamma = 0`` returns exactly 1.0
+    (feature off, bit-identical). An empty/all-NaN trailing series also returns 1.0 (no
+    evidence -> no tilt).
+    """
+    if gamma == 0.0:
+        return 1.0
+    s = pd.Series(factor_returns_trailing).dropna()
+    if s.empty:
+        return 1.0
+    sign = float(np.sign(float(s.sum())))
+    return float(np.clip(1.0 + gamma * sign, 0.0, 2.0))
+
+
+def single_factor_returns(z_panel: pd.DataFrame, prices: pd.DataFrame, sleeve_ids,
+                          quantile: float = 0.2) -> pd.Series:
+    """Weekly long-short top-minus-bottom-quintile return series for one factor/sleeve.
+
+    On each date the factor emits scores, rank the sleeve's names cross-sectionally,
+    go long the top ``quantile`` and short the bottom ``quantile`` (equal-weight, each
+    leg summing to 1), hold with the engine's one-day implementation lag, and compound
+    the daily long-short return into a weekly (``W-FRI``) series.
+
+    PIT / positional: the weight formed from the score at date ``d`` earns the return of
+    day ``d+1`` onward (``shift(1)``), never day ``d``'s own return — the same one-day
+    effect lag the engine applies to live weights. A weekly return dated ``w`` is the
+    compounded long-short return over the week *ending* at ``w`` and uses only prices
+    ``<= w``; corrupting any price after ``w`` cannot move it. Callers embargo the tail
+    (use weeks strictly before the decision date) exactly as with the IC window.
+
+    Returns a Series indexed by week-ending date (empty if the factor/sleeve has no data).
+    """
+    ids = list(sleeve_ids)
+    zc = z_panel[z_panel["instrument_id"].isin(ids)]
+    pc = prices[prices["instrument_id"].isin(ids)]
+    if zc.empty or pc.empty:
+        return pd.Series(dtype=float)
+
+    zw = (zc.pivot_table(index="obs_date", columns="instrument_id", values="value",
+                         aggfunc="last").sort_index())
+    close = (pc.pivot_table(index="obs_date", columns="instrument_id", values="close",
+                            aggfunc="last").sort_index())
+    zw.index = pd.DatetimeIndex(zw.index)
+    close.index = pd.DatetimeIndex(close.index)
+    daily_ret = close.pct_change()
+
+    def _ls_weights(row: pd.Series) -> pd.Series:
+        r = row.dropna()
+        nn = len(r)
+        k = int(np.floor(quantile * nn))
+        w = pd.Series(0.0, index=row.index)
+        if k < 1 or nn < 2 * k or nn < 2:
+            return w
+        order = r.sort_values()
+        w[order.index[-k:]] = 1.0 / k     # long the top quantile
+        w[order.index[:k]] = -1.0 / k     # short the bottom quantile
+        return w
+
+    W = zw.apply(_ls_weights, axis=1)
+    # Hold each date's weights until the next scored date, effective one day later.
+    W_daily = (W.reindex(daily_ret.index, method="ffill").shift(1).fillna(0.0))
+    ls_daily = (W_daily * daily_ret.reindex(columns=W_daily.columns)).sum(axis=1, min_count=1)
+    weekly = (1.0 + ls_daily.fillna(0.0)).resample("W-FRI").prod() - 1.0
+    return weekly.dropna()
+
+
 def score_correlation(z_panels: dict[str, pd.DataFrame], as_of,
                       window: int = 252, min_obs: int = 60) -> pd.DataFrame:
     """PIT estimate of the K x K correlation matrix of factor *scores*.

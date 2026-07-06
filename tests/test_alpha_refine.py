@@ -10,7 +10,8 @@ import pytest
 import yaml
 
 from production.alpha.combine import (combine_alphas, combine_alphas_grinold,
-                                      score_correlation)
+                                      factor_momentum_tilt, score_correlation,
+                                      single_factor_returns)
 from production.alpha.refine import refine_alpha
 from production.alpha.registry import FactorRegistry, GateStats
 from production.alpha.zscore import mad, winsorize, zscore_scores
@@ -254,6 +255,129 @@ def test_score_correlation_pit_and_window():
     # min_obs: with a window shorter than the required min_obs, no pair clears the bar -> 0.
     C_short = score_correlation({"f1": z1, "f2": z2}, as_of, window=10, min_obs=30)
     assert C_short.loc["f1", "f2"] == 0.0
+
+
+# ==================================================== factor momentum: tilt arithmetic
+def test_factor_momentum_tilt_arithmetic_and_clip():
+    up = pd.Series([0.01, 0.02, -0.005])       # sum > 0
+    down = pd.Series([-0.01, -0.02, 0.005])    # sum < 0
+    # sign(+)*gamma -> 1+gamma ; sign(-)*gamma -> 1-gamma
+    assert factor_momentum_tilt(up, 0.25) == pytest.approx(1.25)
+    assert factor_momentum_tilt(down, 0.25) == pytest.approx(0.75)
+    # clip bounds [0, 2]: a large gamma cannot flip sign or exceed 2.
+    assert factor_momentum_tilt(up, 3.0) == pytest.approx(2.0)
+    assert factor_momentum_tilt(down, 3.0) == pytest.approx(0.0)
+    # zero trailing sum -> sign 0 -> exactly 1.0 (no tilt); empty -> 1.0 (no evidence)
+    assert factor_momentum_tilt(pd.Series([0.01, -0.01]), 0.25) == pytest.approx(1.0)
+    assert factor_momentum_tilt(pd.Series([], dtype=float), 0.25) == pytest.approx(1.0)
+
+
+def test_factor_momentum_gamma_zero_is_identity():
+    """gamma=0 -> tilt is exactly 1.0 for any trailing series, so ic*tilt == ic and the
+    combination is bit-identical to the no-feature path."""
+    for s in (pd.Series([0.5, 0.5]), pd.Series([-0.5, -0.5]), pd.Series([], dtype=float)):
+        assert factor_momentum_tilt(s, 0.0) == 1.0
+
+    # applied to a Grinold combine: tilting every ic by 1.0 reproduces the untilted output.
+    ids = ["A", "B", "C", "D"]
+    z1 = _z_panel(ids, [1.0, -1.0, 0.5, -0.5])
+    z2 = _z_panel(ids, [-0.5, 1.5, -1.0, 0.0])
+    vol = _z_panel(ids, [0.02, 0.03, 0.04, 0.05])
+    ic = {"f1": 0.10, "f2": 0.05}
+    C = pd.DataFrame(np.eye(2), index=["f1", "f2"], columns=["f1", "f2"])
+    base = combine_alphas_grinold({"f1": z1, "f2": z2}, ic, vol, C, ridge=0.0)
+    tilted_ic = {f: ic[f] * factor_momentum_tilt(pd.Series([1.0]), 0.0) for f in ic}
+    same = combine_alphas_grinold({"f1": z1, "f2": z2}, tilted_ic, vol, C, ridge=0.0)
+    assert np.allclose(base.set_index("instrument_id")["value"].to_numpy(),
+                       same.set_index("instrument_id")["value"].to_numpy())
+
+
+def test_factor_momentum_losing_factor_downweighted_vs_ic_only():
+    """A persistently-losing factor's IC is tilted down (0.75), so its alpha contribution
+    is strictly smaller than the IC-only (untilted) weight — the Ehsani-Linnainmaa effect."""
+    losing = pd.Series([-0.02, -0.01, -0.03, -0.015])   # persistently negative
+    winning = pd.Series([0.02, 0.01, 0.03, 0.015])
+    tilt_lose = factor_momentum_tilt(losing, 0.25)
+    tilt_win = factor_momentum_tilt(winning, 0.25)
+    assert tilt_lose == pytest.approx(0.75) and tilt_lose < 1.0
+    assert tilt_win == pytest.approx(1.25)
+
+    # C = I so w = ic; a name scored only by the losing factor carries sigma*ic*tilt*z.
+    z = _z_panel(["A"], [1.0])
+    vol = _z_panel(["A"], [1.0])
+    ic_only = combine_alphas_grinold({"f1": z}, {"f1": 0.10}, vol,
+                                     pd.DataFrame([[1.0]], index=["f1"], columns=["f1"]),
+                                     ridge=0.0).set_index("instrument_id")["value"]
+    tilted = combine_alphas_grinold({"f1": z}, {"f1": 0.10 * tilt_lose}, vol,
+                                    pd.DataFrame([[1.0]], index=["f1"], columns=["f1"]),
+                                    ridge=0.0).set_index("instrument_id")["value"]
+    assert tilted.loc["A"] < ic_only.loc["A"]
+    assert tilted.loc["A"] == pytest.approx(ic_only.loc["A"] * 0.75)
+
+
+# ==================================================== single_factor_returns: known answer
+def _price_panel(price_by_id_by_date: dict, dates) -> pd.DataFrame:
+    rows = []
+    for iid, series in price_by_id_by_date.items():
+        for d, px in zip(dates, series):
+            rows.append({"obs_date": d, "instrument_id": iid, "close": float(px)})
+    return pd.DataFrame(rows)
+
+
+def test_single_factor_returns_known_answer_tiny_panel():
+    """5 names, one week (Mon-Fri): long the top-z name (A), short the bottom (E), one-day
+    lag. A jumps +10% on Tue, E drops -5% on Fri; every other move is zero. The single
+    weekly long-short return is (1+0.10)*(1+0.05)-1 = 0.155 exactly."""
+    dates = pd.bdate_range("2020-01-06", periods=5)   # Mon .. Fri (one W-FRI bucket)
+    ids = ["EQ:A", "EQ:B", "EQ:C", "EQ:D", "EQ:E"]
+    prices = _price_panel({
+        "EQ:A": [100, 110, 110, 110, 110],   # +10% Tue, then flat
+        "EQ:B": [100, 100, 100, 100, 100],
+        "EQ:C": [100, 100, 100, 100, 100],
+        "EQ:D": [100, 100, 100, 100, 100],
+        "EQ:E": [100, 100, 100, 100, 95],    # -5% Fri
+    }, dates)
+    # constant z ranking A>B>C>D>E on every date.
+    zrows = []
+    for d in dates:
+        zrows.append(pd.DataFrame({"obs_date": d, "instrument_id": ids,
+                                   "value": [5.0, 4.0, 3.0, 2.0, 1.0]}))
+    z_panel = pd.concat(zrows, ignore_index=True)
+
+    ser = single_factor_returns(z_panel, prices, ids, quantile=0.2)
+    assert len(ser) == 1
+    assert ser.iloc[0] == pytest.approx(1.10 * 1.05 - 1.0)   # 0.155
+
+
+def test_single_factor_returns_embargo_future_prices_do_not_move_past_weeks():
+    """PIT/embargo: corrupting prices strictly after a pivot changes only weekly returns
+    for weeks ending after it; the trailing weeks a tilt at the pivot would read are
+    bit-identical. This is the property the engine's `index < t` embargo relies on."""
+    dates = pd.bdate_range("2020-01-06", periods=15)  # 3 weeks (Fridays: Jan10, Jan17, Jan24)
+    ids = ["EQ:A", "EQ:B", "EQ:C", "EQ:D", "EQ:E"]
+    rng = np.random.default_rng(4)
+    price_map = {iid: (100.0 * np.cumprod(1.0 + rng.normal(0.001, 0.02, len(dates))))
+                 for iid in ids}
+    prices = _price_panel(price_map, dates)
+    zrows = [pd.DataFrame({"obs_date": d, "instrument_id": ids,
+                           "value": [5.0, 4.0, 3.0, 2.0, 1.0]}) for d in dates]
+    z_panel = pd.concat(zrows, ignore_index=True)
+
+    ser_clean = single_factor_returns(z_panel, prices, ids)
+
+    pivot = pd.Timestamp("2020-01-17")               # end of week 2
+    corrupt = prices.copy()
+    fut = corrupt["obs_date"] > pivot
+    corrupt.loc[fut, "close"] = corrupt.loc[fut, "close"].to_numpy() * 7.0 + 13.0
+    ser_corrupt = single_factor_returns(z_panel, corrupt, ids)
+
+    pre_c = ser_clean[ser_clean.index <= pivot]
+    pre_k = ser_corrupt[ser_corrupt.index <= pivot]
+    assert pre_c.index.equals(pre_k.index)
+    assert np.allclose(pre_c.to_numpy(), pre_k.to_numpy(), atol=1e-12, rtol=0.0)
+    # non-vacuous: the corruption did reach a later week.
+    assert not np.allclose(ser_clean.reindex(ser_corrupt.index).fillna(0).to_numpy(),
+                           ser_corrupt.fillna(0).to_numpy())
 
 
 # ================================================================= registry gate

@@ -32,8 +32,10 @@ import numpy as np
 import pandas as pd
 
 from production.alpha.combine import (combine_alphas, combine_alphas_grinold,
-                                      score_correlation)
+                                      factor_momentum_tilt, score_correlation,
+                                      single_factor_returns)
 from production.alpha.ic import forward_returns, rank_ic, rolling_shrunk_ic
+from production.alpha.purify import exclude_for, purify_scores
 from production.alpha.refine import refine_alpha
 from production.alpha.registry import FactorRegistry
 from production.alpha.zscore import zscore_scores
@@ -309,6 +311,15 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     # standard-error precompute and the per-rebalance alpha_se assembly entirely.
     robust_kappa = float(cfg["optimizer"].get("robust_kappa", 0.0))
 
+    # Alpha-refinement toggles (backtest.yaml `alpha` block). Both default OFF so an absent
+    # block reproduces the pre-feature behavior bit-identically:
+    #  - purify: neutralize each factor's z cross-section against the risk exposures B;
+    #  - factor_momentum_gamma>0: tilt each factor's IC by its trailing factor-momentum sign.
+    alpha_cfg = cfg.get("alpha", {}) or {}
+    purify_on = bool(alpha_cfg.get("purify", False))
+    purify_sleeves = set(alpha_cfg.get("purify_sleeves", []) or [])
+    fm_gamma = float(alpha_cfg.get("factor_momentum_gamma", 0.0))
+
     # ---- timeline ---------------------------------------------------------------------
     start = pd.Timestamp(prices["obs_date"].min())
     end = pd.Timestamp(prices["obs_date"].max())
@@ -350,6 +361,24 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
             icstar[(name, sleeve)] = series
         for sleeve, series in icse_by_sleeve.items():
             icse[(name, sleeve)] = series
+
+    # ---- precompute per-(factor, sleeve) factor-momentum return series (once) ----------
+    # The trailing single-factor top-minus-bottom-quintile weekly return series, computed
+    # over the full span; the engine slices a trailing embargoed tail per rebalance to form
+    # the tilt (see factor_momentum_tilt). Only built when the feature is on (gamma > 0).
+    fm_returns: dict = {}  # (factor, sleeve) -> weekly LS return Series
+    if fm_gamma > 0.0:
+        for name in z_panels:
+            for sleeve in factor_sleeves[name]:
+                if sleeve not in sleeve_ids:
+                    continue
+                try:
+                    ser = single_factor_returns(z_panels[name], prices, sleeve_ids[sleeve])
+                except Exception as exc:  # noqa: BLE001 - never sink the run on one factor
+                    warn_list.append(f"factor-momentum {name}/{sleeve}: {exc} — no tilt")
+                    continue
+                if ser is not None and not ser.empty:
+                    fm_returns[(name, sleeve)] = ser
 
     min_hist = 252  # trailing observations required before an id enters the risk model
     sleeve_vol_target = cfg.get("sleeve_vol_target")
@@ -404,6 +433,10 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
         # points (window 252) and cached across the intervening weekly rebalances — the same
         # monthly-cadence trick used for the risk model. Only built when >=2 factors are live.
         score_corr = None
+        do_purify = purify_on and sleeve in purify_sleeves
+        # Factor-momentum tilt per active factor, re-derived PIT at the monthly points and
+        # cached across the intervening weekly rebalances (same cadence as the IC / risk model).
+        fm_tilt: dict | None = None
         w_prev = pd.Series(dtype=float)   # over union ids, carried across rebalances
         rebal_weights: dict = {}          # grid date -> Series (rm_ids)
         rebal_costs: dict = {}            # grid date -> cost_return (fraction of NAV)
@@ -436,6 +469,20 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
                 score_corr = score_correlation(
                     {f: z_panels[f] for f in active_factors}, t, window=252)
 
+            # --- monthly factor-momentum tilt re-derive (PIT, cached) ---
+            # Tilt at t uses only weekly single-factor returns realized strictly before t
+            # (index < t) over a trailing 252-day window — the same embargo idea as the IC.
+            if fm_gamma > 0.0 and (t in month_pts or fm_tilt is None):
+                fm_tilt = {}
+                for f in active_factors:
+                    ser = fm_returns.get((f, sleeve))
+                    if ser is None or ser.empty:
+                        fm_tilt[f] = 1.0
+                        continue
+                    trailing = ser[(ser.index < t)
+                                   & (ser.index >= t - pd.Timedelta(days=252))]
+                    fm_tilt[f] = factor_momentum_tilt(trailing, fm_gamma)
+
             resid_vol = rm.resid_vol.reindex(rm_ids)
             resid_panel = pd.DataFrame({"obs_date": t, "instrument_id": rm_ids,
                                         "value": resid_vol.to_numpy()})
@@ -457,6 +504,16 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
                 z_t = _latest_z_at(z_panels[f], t, rm_ids)
                 if z_t.empty:
                     continue
+                # Purify: neutralize this factor's z against the current PIT exposures B
+                # (own style excluded), re-standardized. Same-date cross-section -> PIT-safe.
+                if do_purify and rm.B is not None:
+                    z_ser = z_t.set_index("instrument_id")["value"]
+                    z_pure = purify_scores(z_ser, rm.B, exclude=exclude_for(f))
+                    z_t = pd.DataFrame({"obs_date": t,
+                                        "instrument_id": z_pure.index,
+                                        "value": z_pure.to_numpy()})
+                # Factor-momentum tilt on the IC (both combine paths read this scaled ic).
+                val = float(val) * (fm_tilt.get(f, 1.0) if fm_tilt is not None else 1.0)
                 a_f = refine_alpha(z_t, float(val), resid_panel)
                 if not a_f.empty:
                     alpha_panels[f] = a_f
