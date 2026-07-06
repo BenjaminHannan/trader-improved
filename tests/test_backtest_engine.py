@@ -24,6 +24,7 @@ from production.backtest.bootstrap import (politis_white_block_length, sharpe_ci
                                            stationary_bootstrap)
 from production.backtest.deflated_sharpe import deflated_sharpe, probabilistic_sharpe
 from production.backtest.engine import run_backtest
+from production.core.calendar import offset_grid, rebalance_grid, trading_days
 from production.backtest.metrics import (ann_vol, hit_rate, max_drawdown, sharpe,
                                          turnover)
 from production.backtest.report import build_report, write_report
@@ -437,6 +438,109 @@ def test_per_alpha_contribution_shape():
                      index=[idx[0], idx[20]])
     out = per_alpha_contribution({"momentum": W}, inst_ret)
     assert "momentum" in out and np.isfinite(out["momentum"])
+
+
+# ============================================================ tranching + per-sleeve cadence
+def _cfg(n_tranches=None, rebalance="weekly", drop_ntranches=False):
+    """A backtest cfg with the tranching / cadence knobs set (short deep-copied override)."""
+    cfg = copy.deepcopy(backtest_config())
+    cfg["walk_forward"]["rebalance"] = rebalance
+    if drop_ntranches:
+        cfg["walk_forward"].pop("n_tranches", None)
+    elif n_tranches is not None:
+        cfg["walk_forward"]["n_tranches"] = n_tranches
+    return cfg
+
+
+def _daily_book(W: pd.DataFrame, common_idx: pd.DatetimeIndex) -> pd.DataFrame:
+    """Averaged (event-resolution) book reindexed onto a common daily grid, held constant
+    between events — the object whose day-over-day L1 change is the traded turnover."""
+    return W.reindex(common_idx, method="ffill").fillna(0.0)
+
+
+def test_offset_grid_next_trading_day_known_answer():
+    """offset_grid(·, 1) maps every grid date to the next NYSE trading day; 0 is identity."""
+    grid = rebalance_grid("2019-01-01", "2019-06-30", "weekly")
+    days = trading_days("nyse", "2019-01-01", "2019-08-31")
+    o1 = offset_grid(grid, 1)
+    assert len(o1) == len(grid)
+    for gi, oi in zip(grid, o1):
+        pos = int(days.searchsorted(gi))
+        assert oi == days[pos + 1]
+    # offset 2 = two trading days forward; offset 0 = bit-identical passthrough.
+    o2 = offset_grid(grid, 2)
+    for gi, oi in zip(grid, o2):
+        assert oi == days[int(days.searchsorted(gi)) + 2]
+    assert offset_grid(grid, 0).equals(grid)
+
+
+def test_ntranches_one_matches_pre_change_semantics():
+    """n_tranches=1 reproduces the pre-tranching single-grid behavior bit-for-bit, and the
+    engine is deterministic: n_tranches=1 (twice) and n_tranches-absent all agree exactly."""
+    data = {"prices": make_gbm_prices(_EQ, start="2016-12-15", end="2020-03-31")}
+    inst = pd.Series(_EQ)
+    r1a = run_backtest(data, inst, cfg=_cfg(n_tranches=1))
+    r1b = run_backtest(data, inst, cfg=_cfg(n_tranches=1))
+    r_absent = run_backtest(data, inst, cfg=_cfg(drop_ntranches=True))
+    # determinism: same cfg twice -> identical net returns
+    assert r1a.total_returns.index.equals(r1b.total_returns.index)
+    assert np.array_equal(r1a.total_returns.to_numpy(), r1b.total_returns.to_numpy())
+    # pre-change equivalence: n_tranches absent behaves exactly like n_tranches=1
+    assert r1a.total_returns.index.equals(r_absent.total_returns.index)
+    assert np.allclose(r1a.total_returns.to_numpy(), r_absent.total_returns.to_numpy(),
+                       atol=0.0, rtol=0.0)
+
+
+@pytest.fixture(scope="module")
+def tranche_eq():
+    """Equity-only K=1 vs K=3 over the module window (weekly, so K is the only difference)."""
+    data = {"prices": make_gbm_prices(_EQ, start=_START, end=_END)}
+    inst = pd.Series(_EQ)
+    return (run_backtest(data, inst, cfg=_cfg(n_tranches=1)),
+            run_backtest(data, inst, cfg=_cfg(n_tranches=3)))
+
+
+def test_tranching_lowers_traded_turnover_at_equal_gross(tranche_eq):
+    """K=3 averages three offset sub-books: the traded book's day-over-day turnover is
+    strictly lower than K=1 (the moving-average smoothing), at the same average gross."""
+    r1, r3 = tranche_eq
+    W1, W3 = r1.avg_book_weights["equity"], r3.avg_book_weights["equity"]
+    idx = pd.date_range(min(W1.index.min(), W3.index.min()),
+                        max(W1.index.max(), W3.index.max()), freq="D")
+    D1, D3 = _daily_book(W1, idx), _daily_book(W3, idx)
+    burn = len(idx) // 3          # drop the position-building transient (K>1 ramps in over K days)
+    tv1 = float(D1.iloc[burn:].diff().abs().sum().sum())
+    tv3 = float(D3.iloc[burn:].diff().abs().sum().sum())
+    assert tv1 > 0.0              # the comparison is non-vacuous (the book actually trades)
+    assert tv3 < tv1             # tranching strictly reduces traded turnover
+    g1 = float(D1.iloc[burn:].abs().sum(axis=1).mean())
+    g3 = float(D3.iloc[burn:].abs().sum(axis=1).mean())
+    assert abs(g3 / g1 - 1.0) < 0.10   # same average exposure (within 10%)
+
+
+def test_twice_weekly_crypto_trades_more_dates_than_weekly_equity():
+    """Per-sleeve cadence: crypto on the twice_weekly grid rebalances on ~2x as many dates
+    as the weekly equity sleeve in the same run."""
+    inst = {**_EQ, **_CR}
+    crypto = [i for i, s in inst.items() if s == "crypto"]
+    data = {"prices": make_gbm_prices(inst, start="2016-12-15", end="2020-03-31"),
+            "funding": make_funding(crypto, start="2016-12-15", end="2020-03-31")}
+    cfg = _cfg(n_tranches=1, rebalance={"default": "weekly", "crypto": "twice_weekly"})
+    r = run_backtest(data, pd.Series(inst), cfg=cfg)
+    eq_dates = len(r.weights_history["equity"].index)
+    cr_dates = len(r.weights_history["crypto"].index)
+    assert eq_dates > 0 and cr_dates > 0
+    assert cr_dates > 1.5 * eq_dates
+
+
+def test_default_config_ships_tranching_and_crypto_cadence_on():
+    """The shipped default drives the PIT money test (test_pit_no_lookahead) through the new
+    machinery: n_tranches>1 and a per-sleeve crypto override are ON in the default cfg the
+    module `result` fixture uses."""
+    wf = backtest_config()["walk_forward"]
+    assert int(wf["n_tranches"]) > 1
+    assert isinstance(wf["rebalance"], dict)
+    assert wf["rebalance"].get("crypto") == "twice_weekly"
 
 
 # ============================================================ CLI smoke (subprocess)

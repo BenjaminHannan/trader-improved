@@ -2,7 +2,12 @@
 walk_forward:
   train_years: 3               # rolling training window for IC estimation + gate stats
   step_months: 1               # re-estimate IC / lambda / sleeve allocation monthly
-  rebalance: weekly            # shared weekly grid across sleeves (crypto: daily bars, weekly trades)
+  n_tranches: 5                # tranching: K sub-portfolios on grids offset 0..K-1 trading
+                               # days, averaged; ~1/K of the book trades per day (smooths the
+                               # sqrt-impact cost, time-diversifies the decision point). 1 = off.
+  rebalance:                   # per-sleeve cadence (string = one grid for all sleeves)
+    default: weekly            # equities / FX-ETF / commodity-ETF: weekly NYSE grid
+    crypto: twice_weekly       # crypto: weekly grid + the trading day nearest each Monday
   purge_days: 21               # max factor horizon between train end and test start
   start: "2016-01-01"
   end: null                    # null = latest available
