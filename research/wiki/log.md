@@ -1,5 +1,17 @@
 # autoresearch log
 
+## [2026-07-06] edge-implementation goal | iterations 21-25 (all edges landed)
+- IC multipliers: signal purification (planted IC 0.53->0.83), factor-momentum tilt
+  (Ehsani-Linnainmaa), both ON for structural sleeves
+- Breadth: rates/intl/sector ETF sleeves (4->7 tradable sleeves, 76 instruments,
+  carry_curve factor), tranching K=5, crypto twice-weekly cadence, prediction-market
+  events sleeve (8th, 10% risk cap) via Kalshi/Polymarket
+- Foundations: EDGAR PIT fundamentals (earnings_yield + pead), passive limit orders,
+  audit extension-dtype hardening
+- Fourth wiring gap found and fixed: allocation.risk_caps was never applied
+- Factor registry: 13 candidates; n_trials still 7 (bumps only at gate time)
+- Suite: 402 tests green at close-out
+
 ## [2026-07-06] autoresearch | iterations 2-17 batch summary
 - Implemented: Grinold combination (2), overlay smoothing+deadband (3), cost
   ledger/sensitivity (4), DSR trial variance w/ unit fix (5), PW block length (7),

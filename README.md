@@ -1,9 +1,10 @@
 # trader-improved
 
 A Grinold–Kahn multi-factor, multi-asset trading system — clean-room rebuild with
-point-in-time discipline as the load-bearing wall. Four sleeves (US equities, crypto,
-FX via ETF proxies, commodities via ETF proxies), daily bars, weekly rebalance,
-walk-forward validation with deflated Sharpe.
+point-in-time discipline as the load-bearing wall. Eight sleeves (US equities,
+crypto, FX / commodities / rates / international / sectors via ETF proxies, and a
+capped prediction-market events book), daily bars, tranched weekly rebalance
+(crypto twice-weekly), walk-forward validation with deflated Sharpe.
 
 **Everything here is free-data only** (see the availability rules below) and
 **no ML** — v1 is deliberately boring, well-documented premia combined linearly.
