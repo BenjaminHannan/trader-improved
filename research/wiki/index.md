@@ -6,6 +6,15 @@ findings here, and (when the evidence survives) lands a verified implementation 
 
 ## Syntheses
 - [[questions/research-covariance-shrinkage]] — iteration 1, implemented
+- [[questions/research-alpha-combination]] — iteration 2, implemented
+- [[questions/research-vol-targeting-overlay]] — iteration 3, implemented
+- [[questions/research-cost-model-calibration]] — iteration 4, implemented (reporting)
+- [[questions/research-dsr-var-trials]] — iteration 5, implemented
+- [[questions/research-garleanu-pedersen]] — iteration 6, NOT adopted (negative result)
+- [[questions/research-bootstrap-block-length]] — iteration 7, implemented
+- [[questions/research-zscore-robustness]] — iteration 8, design confirmed
+- [[questions/research-sector-threading-gap]] — iteration 9 (internal audit), implemented
+- [[questions/research-crypto-carry]] — iteration 10, confirmed + backlog add
 
 ## Concepts
 - [[concepts/ewma-shrinkage-combination]]
@@ -26,4 +35,8 @@ findings here, and (when the evidence survives) lands a verified implementation 
 7. IC shrinkage n0 choice + factor-timing (avoid) literature
 8. Winsorization/z-score robustness (MAD vs sigma-clip) cross-sectional evidence
 9. Purge/embargo sizing for CPCV on overlapping-label panels
-10. Deflated Sharpe var_trials estimation from the registry's actual gate history
+10. ~~Deflated Sharpe var_trials estimation from the registry's actual gate history~~ (iteration 5)
+11. Crypto basis factor: ccxt perp-mark-price loader + registered signal (strongest
+    documented cross-sectional crypto predictor — see iteration 10)
+12. GP persistence weighting — revisit once live IC decay curves exist (iteration 6)
+13. Robust-alpha ellipsoid in the QP (named upgrade path; after real-data baseline)
