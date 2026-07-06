@@ -51,6 +51,63 @@ class FundingCarry(Signal):
         return self._finalize(out, anchor=f)
 
 
+@register
+class BasisCarry(Signal):
+    """``-(trailing 7d mean perp-vs-spot basis)``, crypto only.
+
+    Basis (``perp_close/spot_close - 1``) is the strongest documented cross-sectional
+    crypto predictor: a persistent perp premium (positive basis / contango) marks
+    crowded longs and a negative expected return, so the carry score is the negated
+    trailing mean basis. Basis is a lag-stamped source (``available_from`` = bar close
+    + 24h): the trailing mean ending at basis date ``B`` is only knowable at ``B``'s
+    availability, so it is as-of joined (by availability date) onto each instrument's
+    own price dates. Only basis rows knowable by end of day D feed the value at D —
+    the same PIT join that keeps :class:`RateDifferentialCarry` honest.
+    """
+
+    name = "basis_carry"
+    sleeves = ["crypto"]
+    required_datasets = ["prices", "basis"]
+    min_history_days = 7
+    horizon_days = 5
+
+    def compute(self, data: dict[str, pd.DataFrame]) -> pd.DataFrame:
+        prices = self._restrict_to_sleeves(data["prices"])
+        basis = self._restrict_to_sleeves(data["basis"])
+        if prices.empty or basis.empty:
+            return pd.DataFrame(columns=OUTPUT_COLUMNS)
+        basis = basis.sort_values(["instrument_id", "obs_date"], kind="stable")
+
+        frames = []
+        for iid, grp in prices.groupby("instrument_id", sort=False):
+            b = basis.loc[basis["instrument_id"] == iid]
+            if b.empty:
+                continue
+            # Trailing 7d mean carried at each basis row's OWN availability, then as-of
+            # joined onto price dates: a mean ending at basis date B is knowable only
+            # once B's bar has closed (available_from), never before.
+            step = pd.DataFrame({
+                "obs_date": b["obs_date"].to_numpy(),
+                "available_from": b["available_from"].to_numpy(),
+                "series_id": iid,
+                "value": -b["basis"].rolling(7).mean().to_numpy(),
+            })
+            if "ingested_at" in b.columns:
+                step["ingested_at"] = b["ingested_at"].to_numpy()
+            eff = _asof_by_avail_date(step, iid)
+            if eff.empty:
+                continue
+            dates = grp[["obs_date"]].sort_values("obs_date", kind="stable").reset_index(drop=True)
+            joined = pd.merge_asof(dates, eff, left_on="obs_date", right_on="avail_date",
+                                   direction="backward")
+            frames.append(pd.DataFrame({"obs_date": dates["obs_date"], "instrument_id": iid,
+                                        "value": joined["value"]}))
+        if not frames:
+            return pd.DataFrame(columns=OUTPUT_COLUMNS)
+        out = pd.concat(frames, ignore_index=True)
+        return self._finalize(out, anchor=prices)
+
+
 def _asof_by_avail_date(macro: pd.DataFrame, series_id: str) -> pd.DataFrame:
     """Reduce a macro series to a step function keyed by *availability date*.
 

@@ -47,6 +47,13 @@ factors:
     min_history_days: 21
     status: candidate
     gate_stats: {}
+  basis_carry:
+    signal: production.signals.carry.BasisCarry
+    sleeves: [crypto]
+    horizon_days: 5
+    min_history_days: 7
+    status: candidate
+    gate_stats: {}
   tsmom:
     signal: production.signals.momentum.TimeSeriesMomentum
     sleeves: [fx_etf, commodity_etf]

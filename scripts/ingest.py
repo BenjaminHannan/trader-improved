@@ -79,6 +79,10 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
 
         pairs = [f"{s}/USDT:USDT" for s in _sleeve_symbols("crypto")]
         return CcxtFundingLoader(lake, instruments, symbols=pairs)
+    if dataset == "basis":
+        from production.data.loaders.ccxt_perp_basis import CcxtPerpBasisLoader
+
+        return CcxtPerpBasisLoader(lake, instruments, symbols=_sleeve_symbols("crypto"))
     if dataset == "fx":
         from production.data.loaders.frankfurter_fx import FrankfurterFxLoader
 
@@ -98,7 +102,7 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
     raise ValueError(f"no loader for dataset {dataset!r}")
 
 
-DATASETS = ["prices", "funding", "fx", "macro", "french", "cot", "universe", "all"]
+DATASETS = ["prices", "funding", "basis", "fx", "macro", "french", "cot", "universe", "all"]
 
 # Curated `source` values that identify the two independent price feeds we cross-check.
 _PRIMARY_SOURCES = ("yfinance",)
