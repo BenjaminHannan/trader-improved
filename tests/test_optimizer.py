@@ -326,6 +326,22 @@ def _macro_panel(vals, avail_offset_days=1):
     })
 
 
+def _macro_panel_two(num_vals, den_vals, num_id="A", den_id="B", avail_offset_days=1):
+    """Two-leg macro panel on a shared obs_date grid — the input for ratio-pair tests."""
+    n = len(num_vals)
+    obs = pd.bdate_range("2019-01-01", periods=n)
+    avail = obs.tz_localize("UTC") + pd.Timedelta(days=avail_offset_days)
+
+    def leg(vals, sid):
+        return pd.DataFrame({
+            "obs_date": obs, "series_id": sid, "value": vals,
+            "available_from": avail, "source": "syn",
+            "ingested_at": avail + pd.Timedelta(minutes=5),
+        })
+
+    return pd.concat([leg(num_vals, num_id), leg(den_vals, den_id)], ignore_index=True)
+
+
 def test_macro_spike_triggers_and_causal_shift():
     rng = np.random.default_rng(0)
     zwin = 30
@@ -366,6 +382,105 @@ def test_macro_causality_future_corruption():
     corrupt.loc[future, "value"] = 1e9
     m1 = macro_derisk_multiplier(corrupt, t, series=("X",), z_window=zwin, z_trigger=1.5)
     assert m0 == m1
+
+
+# ------------------------------------------------- macro ratio-pair (VIX term structure)
+def test_macro_ratio_known_answer():
+    """Hand-built two-leg frame: the derived ratio z (causal, shift(1)) and the multiplier
+    match. A final backwardation jump in the numerator lifts the ratio z above trigger."""
+    rng = np.random.default_rng(5)
+    zwin = 30
+    num = 18.0 + rng.normal(0, 0.3, zwin + 6)
+    den = 20.0 + rng.normal(0, 0.3, zwin + 6)
+    num[-1] = 34.0                                  # ratio spikes on the last obs
+    panel = _macro_panel_two(num, den)
+    t = panel["obs_date"].max() + pd.Timedelta(days=5)
+
+    ratio = pd.Series(num / den)                    # legs share the obs grid -> elementwise
+    z = (ratio.iloc[-1] - ratio.rolling(zwin).mean().shift(1).iloc[-1]) / \
+        ratio.rolling(zwin).std().shift(1).iloc[-1]
+    assert z > 1.5                                  # sanity: this is a stress spike
+
+    # Trigger just under z -> scales; just over z -> neutral. Pins the derived z exactly.
+    assert macro_derisk_multiplier(panel, t, series=(), z_window=zwin,
+                                   z_trigger=float(z) - 0.01, scale=0.6,
+                                   ratio_pairs=[["A", "B"]]) == pytest.approx(0.6)
+    assert macro_derisk_multiplier(panel, t, series=(), z_window=zwin,
+                                   z_trigger=float(z) + 0.01, scale=0.6,
+                                   ratio_pairs=[["A", "B"]]) == 1.0
+
+
+def test_macro_ratio_discriminates_backwardation_from_parallel_shift():
+    """The discriminating test: a backwardation episode (num rises above den, ratio z high)
+    scales, while a parallel proportional shift of BOTH legs (ratio constant) does NOT —
+    even though each level's z would have fired on that very same panel."""
+    rng = np.random.default_rng(6)
+    zwin = 30
+    base_num = 18.0 + rng.normal(0, 0.2, zwin + 6)
+    base_den = 20.0 + rng.normal(0, 0.2, zwin + 6)
+
+    # (a) backwardation: numerator spikes above denominator -> ratio z large -> scales.
+    num_b, den_b = base_num.copy(), base_den.copy()
+    num_b[-1] = 36.0                                # ratio 36/20 = 1.8 vs ~0.9 baseline
+    panel_b = _macro_panel_two(num_b, den_b)
+    t_b = panel_b["obs_date"].max() + pd.Timedelta(days=5)
+    assert macro_derisk_multiplier(panel_b, t_b, series=(), z_window=zwin,
+                                   z_trigger=1.5, scale=0.6,
+                                   ratio_pairs=[["A", "B"]]) == pytest.approx(0.6)
+
+    # (b) parallel shift: BOTH legs doubled on the last obs -> ratio 36/40 = 0.9 unchanged.
+    num_p, den_p = base_num.copy(), base_den.copy()
+    num_p[-1], den_p[-1] = 36.0, 40.0
+    panel_p = _macro_panel_two(num_p, den_p)
+    t_p = panel_p["obs_date"].max() + pd.Timedelta(days=5)
+
+    # the ratio (term-structure) overlay does NOT scale ...
+    assert macro_derisk_multiplier(panel_p, t_p, series=(), z_window=zwin,
+                                   z_trigger=1.5, scale=0.6,
+                                   ratio_pairs=[["A", "B"]]) == 1.0
+    # ... even though each LEVEL's z would have fired on the same panel (the pathology).
+    assert macro_derisk_multiplier(panel_p, t_p, series=("A", "B"), z_window=zwin,
+                                   z_trigger=1.5, scale=0.6) == pytest.approx(0.6)
+
+
+def test_macro_ratio_pit_future_corruption():
+    """Corrupting future macro rows (available_from > t) cannot move the ratio-path
+    multiplier at t."""
+    rng = np.random.default_rng(7)
+    zwin = 30
+    num = 18.0 + rng.normal(0, 0.2, zwin + 6)
+    den = 20.0 + rng.normal(0, 0.2, zwin + 6)
+    panel = _macro_panel_two(num, den)
+    t = panel["obs_date"].iloc[-3] + pd.Timedelta(days=1)   # last rows are "future"
+    m0 = macro_derisk_multiplier(panel, t, series=(), z_window=zwin,
+                                 z_trigger=1.5, ratio_pairs=[["A", "B"]])
+
+    corrupt = panel.copy()
+    future = corrupt["available_from"] > pd.Timestamp(t).tz_localize("UTC")
+    corrupt.loc[future, "value"] = 1e9
+    m1 = macro_derisk_multiplier(corrupt, t, series=(), z_window=zwin,
+                                 z_trigger=1.5, ratio_pairs=[["A", "B"]])
+    assert m0 == m1
+
+
+def test_macro_ratio_pairs_absent_back_compat():
+    """ratio_pairs absent / None / [] reproduces the pre-existing level-only behavior
+    bit-for-bit on the same inputs."""
+    rng = np.random.default_rng(8)
+    zwin = 30
+    baseline = 4.0 + rng.normal(0, 0.05, zwin + 5)
+    spike = baseline[-zwin:].mean() + 5.0 * baseline[-zwin:].std(ddof=1)
+    vals = np.append(baseline, spike)
+    panel = _macro_panel(vals)                       # single level series "X"
+    t = panel["obs_date"].iloc[-1] + pd.Timedelta(days=5)
+
+    old = macro_derisk_multiplier(panel, t, series=("X",), z_window=zwin,
+                                  z_trigger=1.5, scale=0.6)
+    assert old == pytest.approx(0.6)
+    assert macro_derisk_multiplier(panel, t, series=("X",), z_window=zwin, z_trigger=1.5,
+                                   scale=0.6, ratio_pairs=None) == old
+    assert macro_derisk_multiplier(panel, t, series=("X",), z_window=zwin, z_trigger=1.5,
+                                   scale=0.6, ratio_pairs=[]) == old
 
 
 # --------------------------------------------------- vol-target EWMA + deadband

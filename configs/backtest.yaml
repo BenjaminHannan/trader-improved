@@ -51,7 +51,10 @@ overlays:
     recovery_frac: 0.75        # re-risk to 1.0 only once DD recovers below 0.75*threshold (6%)
   macro_derisk:
     enabled: true
-    series: [BAMLH0A0HYM2, VIXCLS]   # HY OAS + VIX level, trailing causal z
+    series: [BAMLH0A0HYM2]              # HY OAS credit channel, trailing causal z
+    ratio_pairs: [[VIXCLS, VXVCLS]]      # VIX term structure (backwardation = stress);
+                                         # level VIX dropped — contrarian pathology,
+                                         # see research/wiki/questions/research-vix-term-structure.md
     z_window_days: 252
     z_trigger: 1.5
     scale: 0.6

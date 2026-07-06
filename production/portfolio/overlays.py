@@ -104,10 +104,29 @@ def drawdown_multiplier(equity: pd.Series, t, threshold: float = 0.08,
     return float(ramp)
 
 
+def _causal_z(vals: pd.Series, z_window: int) -> float | None:
+    """Trailing, shift(1) z-score of the latest value in `vals`.
+
+    The rolling mean/std end at the PREVIOUS observation, so the latest value never
+    enters its own baseline. Returns None when there is insufficient history or the
+    trailing std is non-finite / non-positive.
+    """
+    vals = vals.reset_index(drop=True)
+    if len(vals) < z_window + 1:
+        return None
+    mean = vals.rolling(z_window).mean().shift(1)
+    std = vals.rolling(z_window).std().shift(1)
+    m, s = mean.iloc[-1], std.iloc[-1]
+    if not np.isfinite(m) or not np.isfinite(s) or s <= 0.0:
+        return None
+    return (float(vals.iloc[-1]) - float(m)) / float(s)
+
+
 def macro_derisk_multiplier(macro_panel: pd.DataFrame, t,
                             series=("BAMLH0A0HYM2", "VIXCLS"),
                             z_window: int = 252, z_trigger: float = 1.5,
-                            scale: float = 0.6) -> float:
+                            scale: float = 0.6,
+                            ratio_pairs: list[list[str]] | None = None) -> float:
     """De-risk when a macro-stress z-score breaches its trigger.
 
     Causality: only rows with `available_from <= t` are visible (future vintages, even if
@@ -115,6 +134,15 @@ def macro_derisk_multiplier(macro_panel: pd.DataFrame, t,
     z-score of the latest value is measured against a rolling mean/std ENDING at the
     previous observation (`shift(1)`), so the latest value never inflates its own baseline.
     If the mean z across the requested series exceeds `z_trigger`, return `scale`.
+
+    `ratio_pairs` (optional, list of `[num, den]` series-id pairs): for each pair, the PIT
+    ratio series is built by aligning the two legs' visible histories on `obs_date`
+    (`ratio = num / den`) and its causal z is included in the composite z alongside the
+    level series above. This captures term-structure / spread signals (e.g. VIX/VIX3M)
+    whose *level* legs individually carry a weaker or contrarian signal. A pair whose
+    aligned history is too short (or whose trailing std degenerates) is skipped, exactly
+    as an insufficient level series is. Absent `ratio_pairs` -> level-only behavior,
+    bit-for-bit unchanged.
     """
     tt = pd.Timestamp(t)
     if tt.tzinfo is None:
@@ -127,15 +155,24 @@ def macro_derisk_multiplier(macro_panel: pd.DataFrame, t,
     zs: list[float] = []
     for sid in series:
         sub = visible[visible["series_id"] == sid].sort_values("obs_date")
-        vals = sub["value"].reset_index(drop=True)
-        if len(vals) < z_window + 1:
-            continue
-        mean = vals.rolling(z_window).mean().shift(1)
-        std = vals.rolling(z_window).std().shift(1)
-        m, s = mean.iloc[-1], std.iloc[-1]
-        if not np.isfinite(m) or not np.isfinite(s) or s <= 0.0:
-            continue
-        zs.append((float(vals.iloc[-1]) - float(m)) / float(s))
+        z = _causal_z(sub["value"], z_window)
+        if z is not None:
+            zs.append(z)
+
+    for pair in (ratio_pairs or []):
+        num_id, den_id = pair
+        num = (visible[visible["series_id"] == num_id]
+               .sort_values("obs_date")[["obs_date", "value"]]
+               .rename(columns={"value": "num"}))
+        den = (visible[visible["series_id"] == den_id]
+               .sort_values("obs_date")[["obs_date", "value"]]
+               .rename(columns={"value": "den"}))
+        aligned = num.merge(den, on="obs_date", how="inner").sort_values("obs_date")
+        aligned = aligned[aligned["den"] != 0.0]
+        ratio = (aligned["num"] / aligned["den"])
+        z = _causal_z(ratio, z_window)
+        if z is not None:
+            zs.append(z)
 
     if not zs:
         return 1.0
@@ -190,7 +227,8 @@ def overlay_components(daily_returns: pd.Series, equity: pd.Series,
     m_macro = 1.0
     if md.get("enabled", True):
         m_macro = macro_derisk_multiplier(macro_panel, t, tuple(md["series"]),
-                                          md["z_window_days"], md["z_trigger"], md["scale"])
+                                          md["z_window_days"], md["z_trigger"], md["scale"],
+                                          ratio_pairs=md.get("ratio_pairs"))
     product = float(m_vol * m_dd * m_macro)
     return {"vol_target": float(m_vol), "drawdown": float(m_dd),
             "macro": float(m_macro), "product": product}

@@ -31,6 +31,7 @@ ALIAS = {
     "DGS3MO": "DGS3MO_US",
     "BAMLH0A0HYM2": "BAMLH0A0HYM2",
     "VIXCLS": "VIXCLS",
+    "VXVCLS": "VXVCLS",
 }
 FALLBACK_WARNING = "no vintages — fredgraph fallback"
 
