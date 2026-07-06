@@ -26,7 +26,7 @@ from production.signals.base import all_signals, sleeve_from_id
 # Every value column that any input frame carries. Corrupting all of them at once is
 # the strongest test: a signal must not depend on any future value cell.
 VALUE_COLS = ["close", "volume", "dollar_volume", "funding_rate", "value",
-              "noncomm_net", "open_interest"]
+              "noncomm_net", "open_interest", "mcap", "tvl"]
 
 REGISTERED = sorted(all_signals())
 

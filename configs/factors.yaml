@@ -61,6 +61,13 @@ factors:
     min_history_days: 156
     status: candidate
     gate_stats: {}
+  mcap_tvl:
+    signal: production.signals.value.CryptoMcapTvl
+    sleeves: [crypto]
+    horizon_days: 21
+    min_history_days: 30
+    status: candidate
+    gate_stats: {}
 
 # Multiple-testing ledger: incremented every time a factor is put through the gate,
 # never decremented. Feeds n_trials of the deflated Sharpe ratio.
