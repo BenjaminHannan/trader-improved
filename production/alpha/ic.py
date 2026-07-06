@@ -97,20 +97,23 @@ def rolling_shrunk_ic(ic_by_date: pd.Series, window: int = 252,
     """Trailing shrunk IC usable at each date, embargoing the unresolved forward window.
 
     ``ic_by_date`` is an IC series indexed by date. The value at date ``t`` is the shrunk
-    mean of the (up to ``window``) most recent IC observations on dates ``d`` with
-    ``d <= t - horizon_days``. Observations in the half-open interval
-    ``(t - horizon_days, t]`` are *not yet resolved* at ``t`` and are excluded — this is
-    the core no-look-ahead guarantee for factor weighting.
+    mean of the (up to ``window``) most recent IC observations whose ``horizon_days``
+    forward-return window has fully resolved by ``t``. The embargo is POSITIONAL on the
+    IC index: ``horizon_days`` is a trading-day horizon and the IC index consists of
+    trading dates, so the IC at position ``j`` is resolved at position ``i`` only when
+    ``j <= i - horizon_days``. (A calendar ``Timedelta`` cutoff would under-embargo:
+    21 calendar days < 21 trading days, letting unresolved ICs leak in.) On an index
+    sparser than daily this over-embargoes — the conservative direction.
     """
     s = pd.Series(ic_by_date).dropna()
     s = s.sort_index()
-    embargo = pd.Timedelta(days=horizon_days)
     out: dict = {}
-    for t in s.index:
-        eligible = s[s.index <= t - embargo]
-        if len(eligible) == 0:
+    for i, t in enumerate(s.index):
+        j_max = i - horizon_days
+        if j_max < 0:
             out[t] = float("nan")
             continue
+        eligible = s.iloc[:j_max + 1]
         w = eligible.iloc[-window:]
         out[t] = shrunk_ic(w, n0=n0)
     return pd.Series(out)
