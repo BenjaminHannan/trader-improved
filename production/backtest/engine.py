@@ -9,7 +9,10 @@ reads only inputs knowable by end of day ``t`` and earns returns from ``t+1``):
   then, walking the weekly rebalance grid:
     monthly:  RiskModel.build(as_of)  and  sleeve_allocation refresh
     weekly:   z(t) -> refine_alpha(IC*(t), resid_vol) -> combine -> optimize_sleeve
-              -> new sleeve weights
+              -> new sleeve weights. With >=2 live factors in a sleeve the combine is the
+              correlation-aware Grinold-Kahn blend (w = C^-1 ic) using a score-correlation
+              matrix C re-estimated PIT at the monthly points (cached like the risk model);
+              single-factor sleeves keep the plain refine path.
     daily:    positions (lagged one day) earn returns; costs charged on the first
               effective day of each rebalance; sleeves blended by the monthly allocation;
               total exposure scaled by the (PIT) overlay multiplier.
@@ -28,7 +31,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from production.alpha.combine import combine_alphas
+from production.alpha.combine import (combine_alphas, combine_alphas_grinold,
+                                      score_correlation)
 from production.alpha.ic import forward_returns, rank_ic, rolling_shrunk_ic
 from production.alpha.refine import refine_alpha
 from production.alpha.registry import FactorRegistry
@@ -341,6 +345,10 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
 
         rm: RiskModel | None = None
         rm_ids: list = []
+        # Score-correlation matrix for the Grinold combine, re-estimated PIT at the monthly
+        # points (window 252) and cached across the intervening weekly rebalances — the same
+        # monthly-cadence trick used for the risk model. Only built when >=2 factors are live.
+        score_corr = None
         w_prev = pd.Series(dtype=float)   # over union ids, carried across rebalances
         rebal_weights: dict = {}          # grid date -> Series (rm_ids)
         rebal_costs: dict = {}            # grid date -> cost_return (fraction of NAV)
@@ -366,12 +374,19 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
             if rm is None or not rm_ids:
                 continue
 
+            # --- monthly score-correlation re-estimate (PIT, cached) ---
+            if len(active_factors) >= 2 and (t in month_pts or score_corr is None):
+                score_corr = score_correlation(
+                    {f: z_panels[f] for f in active_factors}, t, window=252)
+
             resid_vol = rm.resid_vol.reindex(rm_ids)
             resid_panel = pd.DataFrame({"obs_date": t, "instrument_id": rm_ids,
                                         "value": resid_vol.to_numpy()})
 
             # --- per-factor alpha at t ---
             alpha_panels: dict = {}
+            z_by_factor: dict = {}   # factor -> z(t) panel, for the Grinold combine
+            ic_by_factor: dict = {}  # factor -> IC*(t)
             for f in active_factors:
                 ic_star = icstar.get((f, sleeve))
                 if ic_star is None or ic_star.empty:
@@ -385,12 +400,20 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
                 a_f = refine_alpha(z_t, float(val), resid_panel)
                 if not a_f.empty:
                     alpha_panels[f] = a_f
+                    z_by_factor[f] = z_t
+                    ic_by_factor[f] = float(val)
                     # stand-alone (single-factor) target weights for per-alpha attribution
                     _record_factor_weights(weights_by_factor[f], t, a_f, rm_ids)
 
             if not alpha_panels:
                 continue
-            combined = combine_alphas(alpha_panels)
+            if len(alpha_panels) >= 2 and score_corr is not None:
+                # Correlation-aware blend: down-weights redundant factors (no double count).
+                # PIT: z_by_factor is already knowable at t; score_corr was estimated <= t.
+                combined = combine_alphas_grinold(z_by_factor, ic_by_factor, resid_panel,
+                                                  score_corr, ridge=0.10)
+            else:
+                combined = combine_alphas(alpha_panels)
             alpha_series = (combined.set_index("instrument_id")["value"]
                             .reindex(rm_ids).fillna(0.0))
 

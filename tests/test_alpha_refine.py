@@ -9,7 +9,8 @@ import pandas as pd
 import pytest
 import yaml
 
-from production.alpha.combine import combine_alphas
+from production.alpha.combine import (combine_alphas, combine_alphas_grinold,
+                                      score_correlation)
 from production.alpha.refine import refine_alpha
 from production.alpha.registry import FactorRegistry, GateStats
 from production.alpha.zscore import mad, winsorize, zscore_scores
@@ -128,6 +129,131 @@ def test_combine_outer_aligned_sum():
 
 def test_combine_empty_input():
     assert combine_alphas({}).empty
+
+
+# ============================================= combine — Grinold (correlation-aware)
+def _z_panel(ids, vals, date="2020-01-01"):
+    return pd.DataFrame({"obs_date": pd.Timestamp(date), "instrument_id": list(ids),
+                         "value": list(vals)})
+
+
+def test_grinold_duplicated_signal_no_double_count():
+    """Two identical z panels with equal ICs: the Grinold blend collapses them to ~one
+    signal's worth of alpha, while the plain sum double-counts to ~2x."""
+    ids = ["A", "B", "C", "D", "E"]
+    z = _z_panel(ids, [1.0, -2.0, 0.5, -0.5, 1.5])
+    vol = _z_panel(ids, [0.02] * 5)
+    ic = 0.10
+
+    # Score correlation of two identical panels is exactly 1 -> C = all-ones.
+    corr = pd.DataFrame([[1.0, 1.0], [1.0, 1.0]], index=["f1", "f2"], columns=["f1", "f2"])
+    g = combine_alphas_grinold({"f1": z, "f2": z.copy()},
+                               {"f1": ic, "f2": ic}, vol, corr, ridge=0.10)
+    g = g.set_index("instrument_id")["value"]
+
+    a_single = refine_alpha(z, ic, vol)
+    single = a_single.set_index("instrument_id")["value"]
+
+    # plain: two refined copies summed -> exactly 2x the single-factor alpha (the bug).
+    plain = combine_alphas({"f1": a_single, "f2": a_single.copy()})
+    plain = plain.set_index("instrument_id")["value"]
+
+    # Grinold ratio is a known answer: w1=w2=ic/(2-ridge), so g = 2/(2-ridge) * single.
+    ratio_g = (g / single).to_numpy()
+    ratio_plain = (plain / single).to_numpy()
+    assert np.allclose(ratio_g, 2.0 / (2.0 - 0.10))          # ~1.0526 exact
+    assert np.allclose(ratio_plain, 2.0)                     # the double-count
+    # near the single signal (not near 2x): comfortably inside the "~single" band.
+    assert np.all(np.abs(ratio_g - 1.0) < 0.06)
+
+
+def test_grinold_independent_reduces_to_plain_sum():
+    """C = I special case: the Grinold blend equals the plain per-factor alpha sum."""
+    ids = ["A", "B", "C", "D"]
+    z1 = _z_panel(ids, [1.0, -1.0, 0.5, -0.5])
+    z2 = _z_panel(ids, [-0.5, 1.5, -1.0, 0.0])
+    vol = _z_panel(ids, [0.02, 0.03, 0.04, 0.05])
+    ic = {"f1": 0.10, "f2": 0.05}
+    C = pd.DataFrame(np.eye(2), index=["f1", "f2"], columns=["f1", "f2"])
+
+    g = combine_alphas_grinold({"f1": z1, "f2": z2}, ic, vol, C, ridge=0.0)
+    g = g.set_index("instrument_id")["value"]
+
+    a1 = refine_alpha(z1, ic["f1"], vol)
+    a2 = refine_alpha(z2, ic["f2"], vol)
+    plain = combine_alphas({"f1": a1, "f2": a2}).set_index("instrument_id")["value"]
+
+    assert np.allclose(g.reindex(plain.index).to_numpy(), plain.to_numpy())
+
+
+def test_grinold_weights_known_answer():
+    """w = C_r^{-1} ic recovered directly: name scored by a single factor carries w_k."""
+    rho, ridge = 0.5, 0.10
+    ic = np.array([0.05, 0.03])
+    C = pd.DataFrame([[1.0, rho], [rho, 1.0]], index=["f1", "f2"], columns=["f1", "f2"])
+    C_r = (1 - ridge) * C.to_numpy() + ridge * np.eye(2)
+    w_expected = np.linalg.solve(C_r, ic)
+
+    # f1 scores only A (z=1), f2 scores only B (z=1), unit vol -> alpha_A=w1, alpha_B=w2.
+    z1 = _z_panel(["A"], [1.0])
+    z2 = _z_panel(["B"], [1.0])
+    vol = _z_panel(["A", "B"], [1.0, 1.0])
+    out = combine_alphas_grinold({"f1": z1, "f2": z2},
+                                 {"f1": ic[0], "f2": ic[1]}, vol, C, ridge=ridge)
+    out = out.set_index("instrument_id")["value"]
+    assert out.loc["A"] == pytest.approx(w_expected[0])
+    assert out.loc["B"] == pytest.approx(w_expected[1])
+
+
+def test_grinold_negative_ic_gets_negative_weight():
+    """A negative-IC factor keeps a negative weight through the C^{-1} inversion."""
+    rho, ridge = 0.5, 0.10
+    ic = {"f1": 0.05, "f2": -0.03}
+    C = pd.DataFrame([[1.0, rho], [rho, 1.0]], index=["f1", "f2"], columns=["f1", "f2"])
+    z1 = _z_panel(["A"], [1.0])
+    z2 = _z_panel(["B"], [1.0])
+    vol = _z_panel(["A", "B"], [1.0, 1.0])
+    out = combine_alphas_grinold({"f1": z1, "f2": z2}, ic, vol, C, ridge=ridge)
+    out = out.set_index("instrument_id")["value"]
+    assert out.loc["A"] > 0.0       # positive-IC factor -> positive weight
+    assert out.loc["B"] < 0.0       # negative-IC factor -> negative weight (sign preserved)
+
+
+def test_score_correlation_pit_and_window():
+    """score_correlation is a pure function of scores dated <= as_of, and honors window."""
+    ids = [f"S{i}" for i in range(8)]
+    dates = pd.bdate_range("2020-01-01", periods=120)
+    rng = np.random.default_rng(7)
+    # two positively-correlated factors: z2 = z1 + noise on each date.
+    rows1, rows2 = [], []
+    for d in dates:
+        base = rng.normal(size=len(ids))
+        rows1.append(pd.DataFrame({"obs_date": d, "instrument_id": ids, "value": base}))
+        rows2.append(pd.DataFrame({"obs_date": d, "instrument_id": ids,
+                                   "value": base + 0.3 * rng.normal(size=len(ids))}))
+    z1 = pd.concat(rows1, ignore_index=True)
+    z2 = pd.concat(rows2, ignore_index=True)
+
+    as_of = dates[80]
+    C = score_correlation({"f1": z1, "f2": z2}, as_of, window=252, min_obs=30)
+    assert C.loc["f1", "f2"] == pytest.approx(C.loc["f2", "f1"])   # symmetric
+    assert C.loc["f1", "f1"] == pytest.approx(1.0)                 # unit diagonal
+    assert C.loc["f1", "f2"] > 0.5                                 # genuine correlation seen
+    base_val = C.loc["f1", "f2"]
+
+    # PIT: corrupt every score strictly after as_of; the matrix must not move.
+    def corrupt(z):
+        z = z.copy()
+        fut = z["obs_date"] > as_of
+        z.loc[fut, "value"] = z.loc[fut, "value"].to_numpy() * 1e6 + 42.0
+        return z
+    C2 = score_correlation({"f1": corrupt(z1), "f2": corrupt(z2)},
+                           as_of, window=252, min_obs=30)
+    assert C2.loc["f1", "f2"] == pytest.approx(base_val)
+
+    # min_obs: with a window shorter than the required min_obs, no pair clears the bar -> 0.
+    C_short = score_correlation({"f1": z1, "f2": z2}, as_of, window=10, min_obs=30)
+    assert C_short.loc["f1", "f2"] == 0.0
 
 
 # ================================================================= registry gate
