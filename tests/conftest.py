@@ -97,6 +97,33 @@ def make_macro(series: dict[str, float], start="2018-01-02", end="2021-12-31",
     return out.reset_index(drop=True)
 
 
+def make_mcap_tvl(crypto_ids: list[str], start="2018-01-02", end="2021-12-31",
+                  seed=19) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Daily mcap and TVL snapshot panels (CoinGecko/DefiLlama shape).
+
+    Snapshots are stamped at ingest time (next day 06:00 UTC) — no rewritten
+    history is trusted, mirroring the real loaders. BTC gets no TVL row
+    (not a smart-contract chain), mirroring reality.
+    """
+    rng = np.random.default_rng(seed)
+    dates = pd.date_range(start, end, freq="D")
+    mcap_frames, tvl_frames = [], []
+    for i, iid in enumerate(sorted(crypto_ids)):
+        mcap = np.exp(np.cumsum(rng.normal(0.0005, 0.03, len(dates)))) * 1e9 * (i + 1)
+        mcap_frames.append(pd.DataFrame({
+            "obs_date": dates, "instrument_id": iid, "mcap": mcap}))
+        if ":BTC:" not in iid:
+            tvl = mcap * np.clip(rng.normal(0.15, 0.05, len(dates)), 0.01, None)
+            tvl_frames.append(pd.DataFrame({
+                "obs_date": dates, "instrument_id": iid, "tvl": tvl}))
+    offset = pd.Timedelta(hours=30)  # snapshot pulled next morning
+    mcap_df = pd.concat(mcap_frames, ignore_index=True)
+    mcap_df = mcap_df.assign(**_mandatory(mcap_df["obs_date"], offset, "synthetic:mcap"))
+    tvl_df = pd.concat(tvl_frames, ignore_index=True)
+    tvl_df = tvl_df.assign(**_mandatory(tvl_df["obs_date"], offset, "synthetic:tvl"))
+    return mcap_df.reset_index(drop=True), tvl_df.reset_index(drop=True)
+
+
 def make_cot(etf_ids: list[str], start="2018-01-02", end="2021-12-31",
              seed=17) -> pd.DataFrame:
     """Tuesday obs_date, Friday 20:30 UTC availability — the canonical lag."""
@@ -154,10 +181,19 @@ def cot_panel(synthetic_instruments) -> pd.DataFrame:
 
 
 @pytest.fixture(scope="session")
-def signal_data(price_panel, funding_panel, macro_panel, cot_panel) -> dict[str, pd.DataFrame]:
+def mcap_tvl_panels(synthetic_instruments) -> tuple[pd.DataFrame, pd.DataFrame]:
+    ids = [i for i, s in synthetic_instruments.items() if s == "crypto"]
+    return make_mcap_tvl(ids)
+
+
+@pytest.fixture(scope="session")
+def signal_data(price_panel, funding_panel, macro_panel, cot_panel,
+                mcap_tvl_panels) -> dict[str, pd.DataFrame]:
     """The full signal input bundle."""
+    mcap, tvl = mcap_tvl_panels
     return {"prices": price_panel, "funding": funding_panel,
-            "macro": macro_panel, "cot": cot_panel}
+            "macro": macro_panel, "cot": cot_panel,
+            "mcap": mcap, "tvl": tvl}
 
 
 @pytest.fixture()
