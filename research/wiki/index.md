@@ -22,6 +22,9 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[questions/research-data-remediation]] — 2026-07-07 research-only: source/coverage/
   price/effort matrix for the four data gaps (crypto pre-2021, delisted equities,
   nowcast vintages, ETF adjustment normalization)
+- [[questions/research-risk-model-validation]] — 2026-07-07 research-only (iteration 4):
+  bias-stat + MVP-horse-race scoring harness spec; QIS not for our shapes; NW horizon
+  check; per-sleeve-vs-global and exposure-set questions reduced to harness cells
 
 ## Concepts
 - [[concepts/ewma-shrinkage-combination]]
@@ -34,6 +37,8 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[sources/trend-cot-value-2024-2026-regime]] — SG Trend/CTA + value regime record for the OOS window
 - [[sources/canonical-factor-constructions]] — AMP/MOP/KRT/industry-value canonical constructions vs ours
 - [[sources/etf-adjustment-methodology]] — why cross-vendor adjusted closes disagree; the normalization fix
+- [[sources/use4-bias-statistics]] — Barra bias statistics, NW horizon scaling, validation portfolios
+- [[sources/ledoit-wolf-nonlinear-shrinkage-guide]] — QIS/nonlinear shrinkage: where it pays (large N/T) and why not at N=8
 - [[sources/practitioner-mechanism-scan-2026-07]] — 8 mechanism-backed niche ideas
   (prediction-market microstructure primary), pre-registered predictions, promotion
   protocol; top 2 need a Kalshi resolved-market backfill first
