@@ -174,6 +174,41 @@ def _net_validation_return(z_oos: pd.DataFrame, prices: pd.DataFrame,
     return float(net), net_by_date
 
 
+def _cpcv_sign_stability(train_ic: pd.Series, horizon: int, n_blocks: int = 8,
+                         k: int = 4) -> float:
+    """Fraction of C(n_blocks, k) within-train block recombinations whose mean IC
+    shares the full-train sign (research-oos-gate-design, 2026-07-07).
+
+    Operates on the already-computed per-date IC series, so the whole diagnostic is
+    block-mean arithmetic: split the train span into `n_blocks` contiguous blocks,
+    purge `horizon`-day strips at every internal block boundary (overlapping labels),
+    and score each k-block subset. Advisory/reject-only at the call site; NaN when
+    the series is too short to split.
+    """
+    from itertools import combinations
+
+    s = train_ic.dropna().sort_index()
+    if len(s) < n_blocks * 10:
+        return float("nan")
+    base_sign = np.sign(s.mean())
+    if base_sign == 0:
+        return float("nan")
+    blocks = np.array_split(np.arange(len(s)), n_blocks)
+    purged = []
+    for b in blocks:
+        keep = b[(b >= b[0] + 0) & (b <= b[-1] - min(horizon, max(len(b) // 3, 1)))]
+        purged.append(keep)
+    vals = s.to_numpy()
+    same = 0
+    combos = list(combinations(range(n_blocks), k))
+    for combo in combos:
+        idx = np.concatenate([purged[i] for i in combo])
+        if len(idx) == 0:
+            continue
+        same += int(np.sign(vals[idx].mean()) == base_sign)
+    return same / len(combos)
+
+
 def run_ic_report(start, end, lake_root, apply: bool) -> int:
     lake = Lake(lake_root)
     bundle = load_bundle(lake, start, end)
@@ -217,13 +252,39 @@ def run_ic_report(start, end, lake_root, apply: bool) -> int:
         if ic.empty:
             print(f"  {name}: no IC observations — skipped")
             continue
-        ic_by_date = ic.groupby("obs_date")["rank_ic"].mean().sort_index()
+        # Precision-weighted per-date aggregation: a per-date rank IC across N names
+        # has variance ~1/(N-1), so an unweighted mean across sleeves lets an 8-name
+        # sleeve contribute ~60x the noise of the 500-name sleeve. First live gate
+        # run (2026-07-07): mom_12_1 pooled unweighted t=0.85 while equity alone was
+        # t=3.3 and commodity t=2.3 — an aggregation artifact, confirmed by the
+        # pre-registered forensics check. Weight each sleeve-date IC by (N-1).
+        icw = ic.assign(_w=(ic["n_names"].clip(lower=2) - 1).astype(float))
+        ic_by_date = (icw.assign(_wx=icw["rank_ic"] * icw["_w"])
+                         .groupby("obs_date")[["_wx", "_w"]].sum()
+                         .pipe(lambda g: g["_wx"] / g["_w"]).sort_index())
 
-        train = ic_by_date[ic_by_date.index < cut]
-        oos = ic_by_date[ic_by_date.index >= cut]
+        # Purge + embargo at the split boundary (research-oos-gate-design, 2026-07-07):
+        # the last `horizon` train days share forward windows with the first OOS days,
+        # and serial correlation leaks past them. Both trims can only REDUCE the
+        # information available to pass — strictly non-loosening.
+        embargo_days = max(int(round(len(ic_by_date) * 0.01)), horizon)
+        purge_cut = cut - pd.Timedelta(days=int(horizon * 1.6))   # ~horizon in bdays
+        oos_start = cut + pd.Timedelta(days=int(embargo_days * 1.6))
+        train = ic_by_date[ic_by_date.index < purge_cut]
+        oos = ic_by_date[ic_by_date.index >= oos_start]
         train_ic = float(train.mean()) if len(train) else float("nan")
         tstat = ic_tstat(train)
         oos_ic = float(oos.mean()) if len(oos) else float("nan")
+        # SE of the mean OOS IC with T_eff = T/horizon (overlapping-label discount):
+        # lets a rejection log distinguish "sign flip > 2 SE" from "uninformative cell".
+        t_eff = max(len(oos) / max(horizon, 1), 1.0)
+        oos_se = float(oos.std(ddof=1) / np.sqrt(t_eff)) if len(oos) > 2 else float("nan")
+
+        # Within-train CPCV sign-stability diagnostic (reject-only; zero trial cost):
+        # C(8,4)=70 purged block recombinations of the TRAIN span; the fraction whose
+        # mean IC shares the train sign. Low stability = the train t-stat lives in
+        # one regime pocket.
+        sign_frac = _cpcv_sign_stability(train, horizon)
 
         decay = ic_decay(z, prices, sleeve_map)
         # Anchor the half-life at the factor's own horizon: the criterion is
@@ -239,6 +300,15 @@ def run_ic_report(start, end, lake_root, apply: bool) -> int:
                           net_validation_return=net, n_dates=int(len(ic_by_date)),
                           val_sharpe=val_sharpe)
         verdict = registry.gate(name, stats)
+        # Reject-only stability flag: a factor whose train signal holds its sign in
+        # fewer than 60% of within-train CPCV paths is regime-pocket-dependent. This
+        # can only ADD a rejection, never rescue one.
+        if verdict.passed and sign_frac == sign_frac and sign_frac < 0.6:
+            verdict.passed = False
+            verdict.reasons.append(
+                f"within-train CPCV sign stability {sign_frac:.2f} < 0.60")
+        stats._oos_se = oos_se
+        stats._cpcv_sign_frac = sign_frac
         rows.append({"name": name, "sleeves": ",".join(spec.get("sleeves", [])),
                      "stats": stats, "verdict": verdict})
         if apply:
@@ -255,7 +325,7 @@ def run_ic_report(start, end, lake_root, apply: bool) -> int:
 
 def _print_table(rows: list[dict]) -> None:
     header = (f"{'factor':<18}{'sleeves':<26}{'train_IC':>10}{'tstat':>8}"
-              f"{'OOS_IC':>10}{'halflife':>10}  verdict")
+              f"{'OOS_IC':>10}{'halflife':>10}{'OOS_SE':>9}{'CPCV':>6}  verdict")
     print(header)
     print("-" * len(header))
     for r in rows:
@@ -263,8 +333,13 @@ def _print_table(rows: list[dict]) -> None:
         v = r["verdict"]
         tag = "PASS" if v.passed else "FAIL"
         hl = "inf" if not np.isfinite(s.decay_halflife_days) else f"{s.decay_halflife_days:.1f}"
+        se = getattr(s, "_oos_se", float("nan"))
+        sf = getattr(s, "_cpcv_sign_frac", float("nan"))
+        se_s = f"{se:.4f}" if se == se else "n/a"
+        sf_s = f"{sf:.2f}" if sf == sf else "n/a"
         print(f"{r['name']:<18}{r['sleeves']:<26}{s.train_ic:>10.4f}"
-              f"{s.train_tstat:>8.2f}{s.oos_ic:>10.4f}{hl:>10}  {tag}")
+              f"{s.train_tstat:>8.2f}{s.oos_ic:>10.4f}{hl:>10}"
+              f"{se_s:>9}{sf_s:>6}  {tag}")
         if not v.passed:
             for reason in v.reasons:
                 print(f"{'':<18}    - {reason}")

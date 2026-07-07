@@ -17,6 +17,7 @@ NO NETWORK: everything is written to a ``tmp_path`` lake.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -144,3 +145,51 @@ def test_net_validation_return_rebalances_on_horizon_grid():
     assert len(by_date) <= 4
     assert net < 0                                  # costs are never zero
     assert net >= -(len(by_date) + 1) * 2 * 5e-4    # bounded by per-grid churn
+
+
+# --------------------------------------------- gate: CPCV sign-stability diagnostic
+def test_cpcv_sign_stability_stable_vs_pocket_series():
+    from scripts.build_factors import _cpcv_sign_stability
+
+    dates = pd.date_range("2018-01-01", periods=800, freq="B")
+    rng = np.random.default_rng(11)
+
+    stable = pd.Series(0.02 + rng.normal(0, 0.01, 800), index=dates)
+    assert _cpcv_sign_stability(stable, horizon=21) > 0.9
+
+    # All the "signal" lives in one pocket (first eighth); rest is zero-mean noise.
+    pocket = pd.Series(rng.normal(0, 0.02, 800), index=dates)
+    pocket.iloc[:100] += 0.15
+    frac = _cpcv_sign_stability(pocket, horizon=21)
+    assert frac < 0.85            # well below the stable series (~0.79 on this seed:
+                                  # combos containing the pocket block pass, the rest
+                                  # coin-flip — exactly the regime-pocket signature)
+    # too-short series -> NaN (advisory only)
+    assert np.isnan(_cpcv_sign_stability(stable.iloc[:50], horizon=21))
+
+
+def test_gate_precision_weighted_aggregation_defeats_small_sleeve_dilution():
+    """Per-date (N-1)-weighted IC aggregation: a strong 500-name sleeve must not be
+    drowned by a zero-signal 8-name sleeve (first live gate run: mom_12_1 pooled
+    unweighted t=0.85 vs equity-alone t=3.3)."""
+    rng = np.random.default_rng(5)
+    dates = pd.date_range("2020-01-01", periods=400, freq="B")
+    rows = []
+    for d in dates:
+        rows.append({"obs_date": d, "sleeve": "equity",
+                     "rank_ic": 0.03 + rng.normal(0, 0.045), "n_names": 500})
+        rows.append({"obs_date": d, "sleeve": "fx_etf",
+                     "rank_ic": rng.normal(0, 0.38), "n_names": 8})
+    ic = pd.DataFrame(rows)
+
+    unweighted = ic.groupby("obs_date")["rank_ic"].mean()
+    icw = ic.assign(_w=(ic["n_names"].clip(lower=2) - 1).astype(float))
+    weighted = (icw.assign(_wx=icw["rank_ic"] * icw["_w"])
+                   .groupby("obs_date")[["_wx", "_w"]].sum()
+                   .pipe(lambda g: g["_wx"] / g["_w"]))
+
+    def t(s):
+        return s.mean() / s.std(ddof=1) * np.sqrt(len(s))
+
+    assert t(weighted) > t(unweighted) + 2.0     # dilution removed
+    assert t(weighted) > 4.0                     # recovers the real equity signal

@@ -450,9 +450,12 @@ def test_record_and_save_roundtrip(tmp_path):
     assert reloaded["n_trials"] == n0 + 2               # bumped once per record
     # gate stats persisted
     assert reloaded["factors"]["mom_12_1"]["gate_stats"]["train_tstat"] == pytest.approx(3.0)
-    # unrelated factors untouched
-    assert reloaded["factors"]["carry_funding"]["status"] == "candidate"
-    assert reloaded["factors"]["str_reversal_1m"]["status"] == "candidate"
+    # unrelated factors untouched — compare against the SOURCE registry rather than
+    # hardcoding statuses (the live registry's statuses legitimately change once the
+    # real gate has run; the invariant is that record() only touches what it records).
+    src_reg = yaml.safe_load(open(src))
+    for other in ("carry_funding", "str_reversal_1m"):
+        assert reloaded["factors"][other]["status"] ==             src_reg["factors"][other]["status"]
     # structure preserved (gate block + keys intact)
     assert reloaded["gate"]["train_ic_tstat_min"] == 2.0
     assert set(reloaded["factors"]["mom_12_1"]["sleeves"]) == \

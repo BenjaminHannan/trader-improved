@@ -19,11 +19,11 @@ factors:
     min_history_days: 273
     status: rejected
     gate_stats:
-      train_ic: 0.004075005652164194
-      train_tstat: 0.8520637385548153
-      oos_ic: 0.06875171639930655
+      train_ic: 0.010967173657804492
+      train_tstat: 2.3164217004177137
+      oos_ic: 0.04676581403504967
       decay_halflife_days: .inf
-      net_validation_return: -0.6639542086553041
+      net_validation_return: -0.663954208655304
       n_dates: 3254
       val_sharpe: -0.39958974623844773
   str_reversal_1m:
@@ -83,9 +83,9 @@ factors:
     min_history_days: 21
     status: accepted
     gate_stats:
-      train_ic: 0.04041493539726142
-      train_tstat: 3.924890585801851
-      oos_ic: 0.07728850090099769
+      train_ic: 0.038926005700513445
+      train_tstat: 3.766117144836945
+      oos_ic: 0.06757455205187092
       decay_halflife_days: .inf
       net_validation_return: 0.002348324546952045
       n_dates: 2614
@@ -98,9 +98,9 @@ factors:
     min_history_days: 7
     status: accepted
     gate_stats:
-      train_ic: -0.014149348966670453
-      train_tstat: -2.00500096633429
-      oos_ic: -0.027105298709490366
+      train_ic: -0.01460959359962737
+      train_tstat: -2.0639375085223217
+      oos_ic: -0.03517447918223583
       decay_halflife_days: .inf
       net_validation_return: 0.12966291675446892
       n_dates: 1738
@@ -116,13 +116,13 @@ factors:
     min_history_days: 252
     status: rejected
     gate_stats:
-      train_ic: -0.00250364880474664
-      train_tstat: -0.3687912261842287
-      oos_ic: 0.035068056736885525
+      train_ic: 0.004040913865163584
+      train_tstat: 0.6054110910647512
+      oos_ic: 0.046918164171736845
       decay_halflife_days: .inf
-      net_validation_return: 0.11450876749938876
+      net_validation_return: 0.3509545200652416
       n_dates: 2459
-      val_sharpe: 0.4294985496510432
+      val_sharpe: 0.6734646275843648
   carry_curve:
     signal: production.signals.carry.CurveCarry
     sleeves:
@@ -192,4 +192,4 @@ factors:
       net_validation_return: 0.09123719789962716
       n_dates: 2354
       val_sharpe: 0.5147030138184474
-n_trials: 20
+n_trials: 24

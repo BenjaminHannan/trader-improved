@@ -24,6 +24,33 @@ from production.backtest.bootstrap import (politis_white_block_length, sharpe_ci
                                            stationary_bootstrap)
 from production.backtest.deflated_sharpe import deflated_sharpe, probabilistic_sharpe
 from production.backtest.engine import run_backtest
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _pregate_registry(tmp_path_factory):
+    """Pin every engine test to an all-candidate registry snapshot.
+
+    These tests exercise ENGINE MECHANICS (tranching, events, determinism) and were
+    authored against the pre-gate registry; once the real gate ran (2026-07-07) the
+    live registry's accepted set changed which factors the engine trades, making the
+    synthetic bundles produce no weights. Hermetic input, identical mechanics.
+    """
+    import production.backtest.engine as _eng
+    from production.core.config import CONFIG_DIR
+
+    cfg = yaml.safe_load(open(CONFIG_DIR / "factors.yaml"))
+    for spec in cfg["factors"].values():
+        spec["status"] = "candidate"
+    path = tmp_path_factory.mktemp("registry") / "factors.yaml"
+    yaml.safe_dump(cfg, open(path, "w"), sort_keys=False)
+    class _PinnedRegistry(FactorRegistry):   # a real class: engine isinstance()s it
+        def __init__(self, cfg_path=None):
+            super().__init__(cfg_path if cfg_path is not None else path)
+
+    mp = pytest.MonkeyPatch()   # module-scoped: must outlive the module fixtures
+    mp.setattr(_eng, "FactorRegistry", _PinnedRegistry)
+    yield
+    mp.undo()
 from production.core.calendar import offset_grid, rebalance_grid, trading_days
 from production.backtest.metrics import (ann_vol, hit_rate, max_drawdown, sharpe,
                                          turnover)

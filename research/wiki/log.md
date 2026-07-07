@@ -1,5 +1,34 @@
 # autoresearch log
 
+## [2026-07-07] Gate v2 + re-specification round — n_trials 20 -> 24
+
+Step-0 zero-trial diagnostics steered the round: momentum aggregation artifact
+CONFIRMED (per-sleeve train t: equity +3.26, commodity +2.34 vs pooled unweighted
+0.85); earnings_yield sector-tilt REFUTED (R2=0.000 vs pre-registered >0.25); COT
+opposite-premia NOT CONFIRMED (both components same-sign positive). Two re-spec
+trials funded, two declined.
+
+Gate v2 (thresholds untouched): precision-weighted per-date IC aggregation
+(weight (N-1)), purge+embargo at the 80/20 boundary, SE(OOS IC) reporting,
+within-train CPCV sign-stability (reject-only, floor 0.60). Verdicts under v2:
+- carry_rate_diff PASS (t=3.77, CPCV 0.96), basis_carry PASS (t=-2.06, CPCV 0.86)
+- mom_12_1 (re-candidated): train t 0.85 -> 2.32 under weighting — criterion 1 now
+  passes — but FAILS net validation (-0.66): the OOS L/S book loses net-of-cost.
+  Measurement objection resolved; economics objection stands.
+- tsmom (canonical MOP vol-scaled re-spec): train t=0.61, CPCV 0.37 — construction
+  fix does not rescue it. Question closed.
+
+Cleveland Fed nowcast VINTAGE history captured: the chart JSON carries the full
+as-published daily path per quarter since 2013:Q3 — 12,908 rows ingested
+(CLEV_NOWCAST_{CPI,CORECPI,PCE,COREPCE}), falsifying the research-session finding
+of "no public archive" (believed-as-published caveat in the loader docstring;
+daily re-pull is the ongoing verification). `--dataset nowcast` wired; the daily
+scheduled task is an OWNER action (permission classifier blocks schtasks).
+
+Engine tests + synthetic smoke pinned to an all-candidate registry snapshot (they
+test mechanics and were authored pre-gate; live-registry coupling broke them once
+real verdicts landed). OPUS.md handoff written at repo root.
+
 ## [2026-07-07] autoresearch (research-only) | risk-model validation harness (iteration 4)
 - Rounds: 3 (bias-stat/MVP/QIS broad → USE4+Goldilocks fetch attempts (PDFs blocked)
   → NW-horizon + Barra factor list + hierarchical gap fill; itsjustbeta.com assembly

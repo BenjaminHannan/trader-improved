@@ -175,7 +175,27 @@ def main(argv: list[str] | None = None) -> int:
         instruments = _instrument_map(lake, data["prices"])
         sectors = _sector_map(lake, data["prices"])
 
-    result = run_backtest(data, instruments, cfg=cfg, sectors=sectors)
+    factors_cfg = None
+    if args.synthetic:
+        # The synthetic smoke exercises ENGINE MECHANICS. Once the real gate has run,
+        # the live accepted set may require datasets (basis, full macro) the GBM
+        # bundle deliberately lacks — so pin the smoke to an all-candidate registry
+        # snapshot; the real (lake) path stays gated.
+        import tempfile
+
+        import yaml as _yaml
+
+        from production.core.config import CONFIG_DIR as _CD
+        _fc = _yaml.safe_load(open(_CD / "factors.yaml"))
+        for _spec in _fc["factors"].values():
+            _spec["status"] = "candidate"
+        _tmp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+        _yaml.safe_dump(_fc, _tmp, sort_keys=False)
+        _tmp.close()
+        factors_cfg = _tmp.name
+
+    result = run_backtest(data, instruments, cfg=cfg, sectors=sectors,
+                          factors_cfg=factors_cfg)
     path = write_report(result.report, out_dir=args.report_dir)
     _print_headline(result.report)
     print(f"\nreport written: {path}")

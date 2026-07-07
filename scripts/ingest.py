@@ -192,6 +192,12 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
         # dash form (BRK-B) matches the SEC ticker directory's convention.
         return EdgarFundamentalsLoader(lake, instruments,
                                        symbols=_equity_symbols(instruments, "yfinance"))
+    if dataset == "nowcast":
+        from production.data.loaders.stage2.cleveland_nowcast import ClevelandNowcastLoader
+
+        # Daily-scheduled archiver: each pull re-captures the as-published vintage
+        # history and today's value (see the loader docstring's vintage caveat).
+        return ClevelandNowcastLoader(lake, instruments)
     if dataset == "crypto_meta":
         from production.data.loaders.coingecko import CoinGeckoLoader
 
@@ -206,7 +212,8 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
 
 
 DATASETS = ["prices", "stooq", "tiingo", "alpaca", "funding", "basis", "fx", "macro",
-            "french", "cot", "fundamentals", "crypto_meta", "defi_tvl", "universe", "all"]
+            "french", "cot", "fundamentals", "nowcast", "crypto_meta", "defi_tvl",
+            "universe", "all"]
 
 # Curated `source` values that identify the two independent price feeds we cross-check.
 _PRIMARY_SOURCES = ("yfinance",)
@@ -281,10 +288,12 @@ def _make_stage2_loaders(lake: Lake, instruments):
         AaiiManualLoader, AdsLoader, CboePutCallLoader, FinraShortInterestLoader,
         FredStage2Loader, NaaimLoader,
     )
+    from production.data.loaders.stage2.cleveland_nowcast import ClevelandNowcastLoader
 
     return [
         FredStage2Loader(lake, instruments),
         AdsLoader(lake, instruments),
+        ClevelandNowcastLoader(lake, instruments),
         NaaimLoader(lake, instruments),
         CboePutCallLoader(lake, instruments),
         FinraShortInterestLoader(lake, instruments),

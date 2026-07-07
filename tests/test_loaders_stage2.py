@@ -270,3 +270,39 @@ def test_ingest_stage2_cli_smoke(tmp_lake, monkeypatch):
     assert rc == 1
     cur = tmp_lake.read_curated("macro", "macro")
     assert {"WEI", "ADS_INDEX", "NAAIM_EXPOSURE", "CBOE_TOTAL_PC"} <= set(cur["series_id"])
+
+
+# ------------------------------------------- cleveland fed nowcast vintages
+def test_cleveland_nowcast_parses_quarter_nodes_with_year_inference():
+    """Canned payload of the REAL FusionCharts shape (live probe 2026-07-07): one
+    node per target quarter, MM/DD labels that can precede the quarter (a December
+    label on a Q1 chart belongs to the prior year), 'Actual ...' series skipped,
+    quarter-transition overlaps resolved to the newer target quarter."""
+    from production.data.loaders.stage2.cleveland_nowcast import ClevelandNowcastLoader
+
+    raw = [
+        {"chart": {"subcaption": "2014:Q1", "_comment": "x"},
+         "categories": [{"category": [{"label": "12/30"}, {"label": "01/02"}]}],
+         "dataset": [
+             {"seriesname": "CPI Inflation",
+              "data": [{"value": "1.51"}, {"value": "1.62"}]},
+             {"seriesname": "Actual CPI Inflation",
+              "data": [{"value": ""}, {"value": "1.60"}]},
+         ]},
+        {"chart": {"subcaption": "2013:Q4", "_comment": "x"},
+         "categories": [{"category": [{"label": "12/30"}]}],
+         "dataset": [
+             {"seriesname": "CPI Inflation", "data": [{"value": "1.20"}]},
+         ]},
+    ]
+    loader = ClevelandNowcastLoader()
+    df = loader.transform(raw)
+
+    assert set(df["series_id"]) == {"CLEV_NOWCAST_CPI"}          # actuals skipped
+    by_date = df.set_index("obs_date")["value"]
+    # 12/30 on the 2014:Q1 chart -> 2013-12-30 (prior year); overlap with the
+    # 2013:Q4 node's same date resolves to the NEWER target quarter (Q1's 1.51,
+    # not Q4's 1.20) because nodes arrive oldest-first and keep="last" wins.
+    assert by_date[pd.Timestamp("2013-12-30")] == 1.51
+    assert by_date[pd.Timestamp("2014-01-02")] == 1.62
+    assert len(df) == 2

@@ -71,10 +71,16 @@ class ShortTermReversal1m(Signal):
 
 @register
 class TimeSeriesMomentum(Signal):
-    """Time-series momentum: ``sign(close / close.shift(252) - 1)``.
+    """Time-series momentum, canonical vol-scaled form (Moskowitz-Ooi-Pedersen 2012).
 
-    A trend-following signal used on the macro sleeves (fx/commodity ETFs): +1 if the
-    instrument is above its ~12-month-ago level, -1 if below.
+    ``r_12m / sigma_ann`` per instrument: the trailing 12-month return scaled by the
+    instrument's trailing 252d annualized daily-return vol. The original v1 used
+    ``sign(r_12m)`` — a two-valued score that is nearly degenerate under a
+    cross-sectional rank at N≈8-16 (first live gate run, 2026-07-07; see
+    research-rejected-factor-forensics). The vol-scaled continuous score is the
+    canonical construction and carries cross-sectional resolution. The trailing vol
+    window is strictly backward-looking (shift(1) before the rolling window feeds a
+    same-day score).
     """
 
     name = "tsmom"
@@ -89,7 +95,12 @@ class TimeSeriesMomentum(Signal):
             return pd.DataFrame(columns=OUTPUT_COLUMNS)
         close = p.groupby("instrument_id", sort=False)["close"]
         trailing = p["close"] / close.shift(252) - 1.0
-        value = np.sign(trailing)
+        ret1d = close.pct_change(fill_method=None)
+        sigma = (ret1d.shift(1)
+                      .groupby(p["instrument_id"], sort=False)
+                      .transform(lambda s: s.rolling(252, min_periods=126).std())
+                 * np.sqrt(252.0))
+        value = trailing / sigma.replace(0.0, np.nan)
         out = pd.DataFrame({"obs_date": p["obs_date"], "instrument_id": p["instrument_id"],
                             "value": value})
         return self._finalize(out, anchor=p)
