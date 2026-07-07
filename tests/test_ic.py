@@ -218,3 +218,29 @@ def test_ic_decay_on_constructed_decaying_panel():
     hl = decay_halflife(decay)
     assert np.isfinite(hl)
     assert 1.0 < hl < 21.0
+
+
+def test_decay_halflife_anchored_at_factor_horizon():
+    """Regression (first live gate run, 2026-07-07): slow carry signals show
+    opposite-signed 1-day microstructure noise (|IC| high at h=1, crossing zero,
+    RISING through the factor's own horizon). Anchored at the factor horizon the
+    signal has not decayed (inf); the default h=1 anchor misreads it as ~1.6d."""
+    decay = pd.DataFrame({
+        "sleeve": ["fx_etf"] * 6,
+        "horizon": [1, 2, 5, 10, 21, 42],
+        "ic": [-0.052, -0.008, 0.020, 0.037, 0.048, 0.054],   # live carry shape
+    })
+    assert np.isinf(decay_halflife(decay, anchor_horizon=21))
+    assert decay_halflife(decay) < 2.0                        # legacy anchor, for contrast
+
+
+def test_decay_halflife_fast_decay_still_fails_at_own_horizon():
+    """A genuinely fast-decaying signal must still produce a small half-life even
+    when anchored at its own horizon — the fix must not grandfather real decay."""
+    decay = pd.DataFrame({
+        "sleeve": ["equity"] * 6,
+        "horizon": [1, 2, 5, 10, 21, 42],
+        "ic": [0.06, 0.05, 0.048, 0.020, 0.008, 0.004],
+    })
+    hl = decay_halflife(decay, anchor_horizon=5)   # base |IC|=0.048 at h=5
+    assert 5 < hl <= 10.5                          # halves between h=5 and h=10

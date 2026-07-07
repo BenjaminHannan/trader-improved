@@ -137,13 +137,24 @@ def ic_decay(scores: pd.DataFrame, prices: pd.DataFrame, sleeve_map: pd.Series,
     return pd.DataFrame(rows, columns=["sleeve", "horizon", "ic"])
 
 
-def decay_halflife(decay: pd.DataFrame) -> float:
-    """Horizon at which ``|IC|`` first falls to half of ``|IC|`` at the shortest horizon.
+def decay_halflife(decay: pd.DataFrame, anchor_horizon: float = 1.0) -> float:
+    """Horizon at which ``|IC|`` first falls to half its level at ``anchor_horizon``.
+
+    ``anchor_horizon`` should be the factor's OWN trading horizon (``horizon_days``):
+    the gate criterion is persistence of the signal actually traded. Anchoring at h=1
+    misclassifies slow signals — the first live-data gate run (2026-07-07) showed
+    carry factors whose 1-day IC is opposite-signed microstructure noise (fx
+    rate-differential: IC -0.05 at h=1 crossing to +0.05 at h=42); measured from h=1
+    they all "decayed" in ~1.6 days while their monthly signal was still
+    strengthening. The base level is ``|IC|`` at the largest tabled horizon <=
+    ``anchor_horizon``; only horizons beyond it count as decay. The default anchor of
+    1 preserves the shortest-horizon behavior for callers that want raw decay.
 
     The per-sleeve decay table is collapsed to a single ``|IC|`` curve by averaging the
     absolute IC across sleeves at each horizon. Returns the horizon (linearly
     interpolated between the two bracketing horizons) where the curve first crosses half
-    its base level, or ``np.inf`` if it never does.
+    its base level, or ``np.inf`` if it never does — a signal still at or above
+    half-strength at every measured horizon past its own has not decayed.
     """
     if decay.empty:
         return np.inf
@@ -152,10 +163,14 @@ def decay_halflife(decay: pd.DataFrame) -> float:
                   .sort_index())
     horizons = curve.index.to_numpy(dtype=float)
     vals = curve.to_numpy(dtype=float)
-    if len(vals) == 0 or vals[0] <= 0:
+    if len(vals) == 0:
         return np.inf
-    half = 0.5 * vals[0]
-    for i in range(1, len(vals)):
+    # Anchor index: largest tabled horizon <= anchor_horizon (fall back to the first).
+    anchored = max(int(np.searchsorted(horizons, float(anchor_horizon), side="right")) - 1, 0)
+    if vals[anchored] <= 0:
+        return np.inf
+    half = 0.5 * vals[anchored]
+    for i in range(anchored + 1, len(vals)):
         if vals[i] <= half:
             x0, x1 = horizons[i - 1], horizons[i]
             y0, y1 = vals[i - 1], vals[i]

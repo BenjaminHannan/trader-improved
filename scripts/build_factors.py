@@ -120,11 +120,23 @@ def _net_validation_return(z_oos: pd.DataFrame, prices: pd.DataFrame,
     floors = {s: spec.get("floor_bps", 0.0)
               for s, spec in costs.get("sleeves", {}).items()}
 
+    # Rebalance on a `horizon`-day cadence over the OOS grid, so each rebalance books
+    # ONE non-overlapping forward window. The first live-data gate run (2026-07-07)
+    # exposed the prior behavior — iterating every date — as summing ~horizon-times
+    # overlapping fwd returns while charging turnover on daily quintile churn, which
+    # produced net "returns" like -166 on a 2y slice for a 500-name book. Only the
+    # sign feeds the gate, but the sign was being set by churn costs the documented
+    # weekly-cadence book would never pay.
+    all_dates = sorted(panel["obs_date"].unique())
+    grid = set(all_dates[::max(int(horizon), 1)])
+
     prev_w: dict = {}
     net = 0.0
     net_dates: list = []
     net_vals: list = []
     for _date, day in panel.groupby("obs_date", sort=True):
+        if _date not in grid:
+            continue
         gross = 0.0
         w_today: dict = {}
         for sleeve, g in day.groupby("sleeve"):
@@ -214,7 +226,9 @@ def run_ic_report(start, end, lake_root, apply: bool) -> int:
         oos_ic = float(oos.mean()) if len(oos) else float("nan")
 
         decay = ic_decay(z, prices, sleeve_map)
-        halflife = decay_halflife(decay)
+        # Anchor the half-life at the factor's own horizon: the criterion is
+        # persistence of the signal we trade, not of 1-day microstructure noise.
+        halflife = decay_halflife(decay, anchor_horizon=horizon)
 
         z_oos = z[z["obs_date"] >= cut]
         net, net_by_date = _net_validation_return(z_oos, prices, sleeve_map, horizon, costs)

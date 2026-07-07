@@ -106,3 +106,41 @@ def test_series_keyed_tvl_is_not_admitted(lake):
     bundle = read_signal_bundle(lake)
     assert "tvl" not in bundle
     assert set(bundle) == {"prices"}
+
+
+# ------------------------------------------- gate validation-return cadence
+def test_net_validation_return_rebalances_on_horizon_grid():
+    """Regression (first live gate run, 2026-07-07): iterating EVERY date summed
+    ~horizon-times overlapping forward returns while charging turnover on daily
+    quintile churn (a 500-name low-vol book "returned" -166 on a 2y slice). The
+    documented economics rebalance on a horizon cadence: with a flat-return panel
+    and a churning signal, the cost must be charged once per grid date, not daily."""
+    import numpy as np
+
+    from scripts.build_factors import _net_validation_return
+
+    dates = pd.date_range("2024-01-01", periods=20, freq="B")
+    iids = [f"EQ:S{k:02d}:2000-01-03" for k in range(10)]
+    rng = np.random.default_rng(7)
+
+    # z-scores churn every day; forward returns are exactly zero for every name.
+    z = pd.concat([
+        pd.DataFrame({"obs_date": d, "instrument_id": iids,
+                      "value": rng.permutation(np.linspace(-2, 2, len(iids)))})
+        for d in dates
+    ], ignore_index=True)
+    prices = pd.concat([
+        pd.DataFrame({"obs_date": dates, "instrument_id": iid, "close": 100.0})
+        for iid in iids
+    ], ignore_index=True)
+    sleeve_map = pd.Series({iid: "equity" for iid in iids})
+    costs = {"sleeves": {"equity": {"floor_bps": 5.0}}}
+
+    net, by_date = _net_validation_return(z, prices, sleeve_map, horizon=5, costs=costs)
+
+    # Zero gross everywhere -> net is pure cost. On a 5-day grid over 20 dates
+    # (minus the unresolved tail) at most 3 rebalances fire; full two-sided churn
+    # costs ~2 * 5bp per rebalance. Daily iteration would charge ~5x that.
+    assert len(by_date) <= 4
+    assert net < 0                                  # costs are never zero
+    assert net >= -(len(by_date) + 1) * 2 * 5e-4    # bounded by per-grid churn
