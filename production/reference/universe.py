@@ -91,6 +91,36 @@ def _parse_current(html: str) -> list[str]:
     return [t for t in (_clean_ticker(v) for v in df[sym_col]) if t]
 
 
+def sector_map_from_wikipedia(html_current: str | None = None) -> dict[str, str]:
+    """Parse ``symbol -> GICS sector`` from the current-constituents table.
+
+    PIT-honest caveat: this is a *current* snapshot of each name's sector — the same
+    treatment ``scripts/run_backtest.py:_sector_map`` already documents. Delisted names
+    absent from today's table simply get no sector (their master row stays ``None``).
+
+    Pass `html_current` to inject page HTML (tests do this — no network in pytest); when
+    ``None`` the S&P 500 page is fetched once with a UA header.
+    """
+    if html_current is None:
+        import requests
+
+        resp = requests.get(WIKI_SP500_URL, headers={"User-Agent": _UA}, timeout=30)
+        resp.raise_for_status()
+        html_current = resp.text
+
+    df = _flatten_columns(_read_tables(html_current)[0])
+    sym_col = _find_col(df, "symbol") or _find_col(df, "ticker") or df.columns[0]
+    sec_col = _find_col(df, "gics", "sector") or _find_col(df, "sector")
+    if sec_col is None:
+        return {}
+    out: dict[str, str] = {}
+    for sym, sec in zip(df[sym_col], df[sec_col]):
+        ticker = _clean_ticker(sym)
+        if ticker and not _is_blank(sec):
+            out[ticker] = str(sec).strip()
+    return out
+
+
 def _parse_changes(html: str) -> pd.DataFrame:
     tables = _read_tables(html)
     # The changes table is the one carrying Added/Removed ticker columns.

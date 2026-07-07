@@ -14,11 +14,17 @@ the reference tables to exist first — run `--dataset universe` once before the
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 import pandas as pd
 
 from production.core.lake import Lake
+
+# Every sleeve that carries daily prices — the price loaders iterate all of these when
+# no single sleeve is scoped via --sleeve.
+_PRICE_SLEEVES = ("equity", "crypto", "fx_etf", "commodity_etf",
+                  "rates_etf", "intl_etf", "sector_etf")
 
 
 def _load_instruments(lake: Lake) -> "pd.DataFrame | None":
@@ -41,9 +47,28 @@ def _build_universe(lake: Lake) -> None:
         raise SystemExit(2)
 
     master = ref_instruments.build_instrument_master(lake=lake)
+
+    # Equities are a PIT membership problem: mint their ids from the S&P 500 Wikipedia
+    # walk-back, threading each current member's GICS sector from the same page.
+    membership = ref_universe.sp500_membership_from_wikipedia()
+    symbol_meta = {sym: {"sector": sec}
+                   for sym, sec in ref_universe.sector_map_from_wikipedia().items()}
+    master = ref_instruments.add_equity_instruments(master, membership, symbol_meta)
     lake.write_reference(master, "instruments")
-    print(f"instrument master: {len(master)} rows -> reference/instruments.parquet")
-    for sleeve in ("equity", "crypto", "fx_etf", "commodity_etf"):
+    n_eq = int((master["sleeve"] == "equity").sum())
+    print(f"instrument master: {len(master)} rows ({n_eq} equity) "
+          "-> reference/instruments.parquet")
+
+    eq_membership = ref_universe.to_instrument_membership(membership, master)
+    if eq_membership.empty:
+        raise SystemExit(
+            "FATAL: equity membership is empty after the S&P 500 walk-back — refusing "
+            "to write a silently-empty universe. Check the Wikipedia scrape / parsing.")
+    lake.write_reference(eq_membership, "membership_equity")
+    print(f"membership[equity]: {len(eq_membership)} rows")
+
+    for sleeve in ("crypto", "fx_etf", "commodity_etf",
+                   "rates_etf", "intl_etf", "sector_etf"):
         try:
             mem = ref_universe.static_membership(sleeve)
             lake.write_reference(mem, f"membership_{sleeve}")
@@ -63,6 +88,31 @@ def _sleeve_symbols(sleeve: str) -> list[str]:
     return list(syms)                 # crypto is a plain list
 
 
+def _master_vendor_symbols(instruments, sleeve: str, vendor: str) -> list[str]:
+    """Vendor symbols for a sleeve, read from the instrument master's ``vendor_symbols``.
+
+    The equity universe is PIT membership, not a static ``symbols`` list — its symbols
+    live only in the minted master rows. Returns the deduped vendor symbols for every
+    row of `sleeve` that carries the requested `vendor` key (e.g. 'yfinance'/'stooq')."""
+    if instruments is None or getattr(instruments, "empty", True):
+        return []
+    sub = instruments[instruments["sleeve"] == sleeve]
+    out: list[str] = []
+    for raw in sub["vendor_symbols"]:
+        try:
+            sym = json.loads(raw).get(vendor)
+        except (TypeError, ValueError):
+            sym = None
+        if sym:
+            out.append(sym)
+    return list(dict.fromkeys(out))   # dedupe, preserve order
+
+
+def _equity_symbols(instruments, vendor: str) -> list[str]:
+    """yfinance/stooq symbols for the equity sleeve, from the instrument master."""
+    return _master_vendor_symbols(instruments, "equity", vendor)
+
+
 def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
     """Construct the loader for a dataset (+ sleeve where symbol lists differ)."""
     if dataset == "prices":
@@ -73,7 +123,21 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
             return CcxtPricesLoader(lake, instruments, symbols=pairs)
         from production.data.loaders.yfinance_prices import YFinancePricesLoader
 
-        return YFinancePricesLoader(lake, instruments, symbols=_sleeve_symbols(sleeve))
+        # Equity symbols come from the PIT master (no static `symbols` list); the ETF
+        # sleeves also resolve through the master so the yfinance vendor symbol (e.g.
+        # BRK.B -> BRK-B) matches what the loader's resolve() expects.
+        syms = (_master_vendor_symbols(instruments, sleeve, "yfinance")
+                or _sleeve_symbols(sleeve))
+        return YFinancePricesLoader(lake, instruments, symbols=syms)
+    if dataset == "stooq":
+        from production.data.loaders.stooq_prices import StooqPricesLoader
+
+        # Secondary feed for the cross-check: the same equity + ETF universe as
+        # yfinance, addressed by each row's 'stooq' vendor symbol (e.g. AAPL.US).
+        syms = _equity_symbols(instruments, "stooq")
+        for etf in ("fx_etf", "commodity_etf", "rates_etf", "intl_etf", "sector_etf"):
+            syms += _master_vendor_symbols(instruments, etf, "stooq")
+        return StooqPricesLoader(lake, instruments, symbols=list(dict.fromkeys(syms)))
     if dataset == "funding":
         from production.data.loaders.ccxt_funding import CcxtFundingLoader
 
@@ -107,7 +171,7 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
     raise ValueError(f"no loader for dataset {dataset!r}")
 
 
-DATASETS = ["prices", "funding", "basis", "fx", "macro", "french", "cot",
+DATASETS = ["prices", "stooq", "funding", "basis", "fx", "macro", "french", "cot",
             "fundamentals", "universe", "all"]
 
 # Curated `source` values that identify the two independent price feeds we cross-check.
@@ -219,8 +283,9 @@ def main(argv=None) -> int:
     p.add_argument("--stage", type=int, default=1, choices=[1, 2],
                    help="ingest stage: 1 = the --dataset loader (default); "
                         "2 = the Stage-2 macro/sentiment loader batch")
-    p.add_argument("--sleeve", default="equity",
-                   help="sleeve for symbol-scoped datasets (prices)")
+    p.add_argument("--sleeve", default=None,
+                   help="scope symbol-scoped datasets (prices) to one sleeve; "
+                        "omit to ingest every price sleeve")
     p.add_argument("--start", default="2010-01-01", help="ISO start date")
     p.add_argument("--end", default=str(pd.Timestamp.now().date()), help="ISO end date")
     p.add_argument("--full", action="store_true",
@@ -254,16 +319,30 @@ def main(argv=None) -> int:
 
     todo = (["prices", "funding", "fx", "macro", "french", "cot"]
             if args.dataset == "all" else [args.dataset])
-    rc = 0
+
+    # Expand into (dataset, sleeve) jobs. `prices` fans out across every price sleeve
+    # (equity + crypto + the ETF sleeves) unless the user scoped one with --sleeve;
+    # crypto has its own loader so it rides the same fan-out. Every other dataset runs
+    # once with no sleeve scoping.
+    jobs: list[tuple[str, "str | None"]] = []
     for ds in todo:
-        loader = _make_loader(ds, args.sleeve, lake, instruments)
+        if ds == "prices":
+            sleeves = [args.sleeve] if args.sleeve else list(_PRICE_SLEEVES)
+            jobs.extend((ds, s) for s in sleeves)
+        else:
+            jobs.append((ds, args.sleeve))
+
+    rc = 0
+    for ds, sleeve in jobs:
+        label = f"{ds}:{sleeve}" if ds == "prices" else ds
+        loader = _make_loader(ds, sleeve, lake, instruments)
         try:
             res = loader.run(args.start, args.end, incremental=incremental)
-            print(f"[{ds}] vendor={res.vendor} rows={res.rows} "
+            print(f"[{label}] vendor={res.vendor} rows={res.rows} "
                   f"start={res.start.date()} end={res.end.date()} "
                   f"warnings={res.audit.get('warnings')}")
         except Exception as exc:  # keep going across datasets in an 'all' run
-            print(f"[{ds}] FAILED: {exc}", file=sys.stderr)
+            print(f"[{label}] FAILED: {exc}", file=sys.stderr)
             rc = 1
 
     if args.cross_check and "prices" in todo:  # cross-check the feeds just ingested
