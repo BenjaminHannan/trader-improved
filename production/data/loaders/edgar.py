@@ -177,7 +177,10 @@ class EdgarFundamentalsLoader(BaseLoader):
         cols = ["obs_date", "instrument_id", "field", "value", "filed_ts", "asset_class"]
         rows = []
         for symbol, facts_json in (raw or {}).items():
-            iid = self.resolve(symbol, self.vendor) or self.resolve(symbol)
+            # Symbols arrive in the SEC/yfinance dash form (BRK-B); the master's plain
+            # `symbol` is the dotted Wikipedia form, so try the yfinance vendor key too.
+            iid = (self.resolve(symbol, self.vendor)
+                   or self.resolve(symbol, "yfinance") or self.resolve(symbol))
             if iid is None:
                 self.warnings.append(f"unresolved instrument for symbol {symbol!r}")
                 continue
@@ -190,6 +193,20 @@ class EdgarFundamentalsLoader(BaseLoader):
                     end, val, filed = e.get("end"), e.get("val"), e.get("filed")
                     if end is None or val is None or filed is None:
                         continue
+                    # Duration concepts (eps/revenue) are reported under the SAME `end`
+                    # for Q4 and the full fiscal year, often in the SAME filing — which
+                    # collides on the (obs_date, field, available_from) key with two
+                    # different values. Keep the quarterly duration; the annual figure
+                    # is derivable and the quarterly one is what the signals consume.
+                    start = e.get("start")
+                    if start is not None:
+                        try:
+                            span = (pd.Timestamp(str(end))
+                                    - pd.Timestamp(str(start))).days
+                        except (TypeError, ValueError):
+                            span = None
+                        if span is not None and span > 200:
+                            continue
                     try:
                         value = float(val)
                     except (TypeError, ValueError):
@@ -206,6 +223,12 @@ class EdgarFundamentalsLoader(BaseLoader):
 
         df = pd.DataFrame(rows)
         df = self._dedup_vintages(df)
+        # Same-day refilings that survive the vintage dedup (e.g. a 10-Q and its /A
+        # amendment filed the same day with different values) share an available_from
+        # and would trip the audit's duplicate check; the amendment (later in stable
+        # sort order) wins deterministically.
+        df = df.drop_duplicates(subset=["obs_date", "instrument_id", "field", "filed"],
+                                keep="last")
         # available_from source: filing day @ 21:00 (localized to UTC by the "explicit"
         # availability rule). Kept tz-naive so the audit's numeric-column probe skips it.
         df["filed_ts"] = df["filed"] + pd.Timedelta(hours=21)

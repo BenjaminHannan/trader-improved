@@ -30,22 +30,24 @@ from production.core.config import CONFIG_DIR, REPO_ROOT, backtest_config
 # when the script is invoked directly (not under pytest, which adds it automatically).
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-from production.core.lake import Lake, LakeError
+from production.core.lake import Lake, SIGNAL_BUNDLE_DATASETS, read_signal_bundle
 from production.signals.base import sleeve_from_id
 
-_DATASETS = ("prices", "funding", "macro", "cot")
+_DATASETS = SIGNAL_BUNDLE_DATASETS
 
 
 def _load_lake_bundle(lake: Lake, start, end) -> dict:
-    bundle: dict = {}
+    """Load the signal bundle from the lake, echoing which optional datasets are absent.
+
+    ``prices`` is required (a FATAL note if missing); the rest are optional. Bundle-key
+    normalization (mcap<-crypto_meta, tvl<-defi_tvl) is handled by
+    ``production.core.lake.read_signal_bundle``.
+    """
+    bundle = read_signal_bundle(lake, start=start, end=end)
     for ds in _DATASETS:
-        try:
-            df = lake.read_curated(ds, start=start, end=end)
-        except LakeError:
-            df = None
-        if df is not None and not df.empty:
-            bundle[ds] = df
-        elif ds == "prices":
+        if ds in bundle:
+            continue
+        if ds == "prices":
             print(f"FATAL: no curated 'prices' in lake at {lake.root}", file=sys.stderr)
         else:
             print(f"  note: optional dataset '{ds}' absent — continuing without it")

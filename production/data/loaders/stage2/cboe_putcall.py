@@ -57,6 +57,9 @@ class CboePutCallLoader(BaseLoader):
 
         import requests
 
+        # NOTE (live-ingest 2026-07-07): this CDN object now returns S3 AccessDenied
+        # for every user agent — CBOE retired the anonymous daily-statistics CSV.
+        # Loader kept for when a replacement public endpoint is identified.
         resp = requests.get(self.url, timeout=60)
         resp.raise_for_status()
         return pd.read_csv(io.StringIO(resp.text))

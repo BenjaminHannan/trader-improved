@@ -138,6 +138,28 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
         for etf in ("fx_etf", "commodity_etf", "rates_etf", "intl_etf", "sector_etf"):
             syms += _master_vendor_symbols(instruments, etf, "stooq")
         return StooqPricesLoader(lake, instruments, symbols=list(dict.fromkeys(syms)))
+    if dataset == "tiingo":
+        from production.data.loaders.tiingo_prices import TiingoPricesLoader
+
+        # Replacement secondary feed (stooq is JS-walled — diagnostics/stooq_verdict.md).
+        # Tiingo tickers use the yfinance dash form. ETF sleeves first (fixed, small),
+        # then the equity universe; the loader's 429 guard + max_symbols protect the
+        # free-tier quota and incremental re-runs extend coverage.
+        syms: list[str] = []
+        for etf in ("fx_etf", "commodity_etf", "rates_etf", "intl_etf", "sector_etf"):
+            syms += _master_vendor_symbols(instruments, etf, "yfinance")
+        syms += _equity_symbols(instruments, "yfinance")
+        return TiingoPricesLoader(lake, instruments, symbols=list(dict.fromkeys(syms)))
+    if dataset == "alpaca":
+        from production.data.loaders.alpaca_prices import AlpacaPricesLoader
+
+        # Third feed (free with the owner's keys, full-universe breadth, ~2021+ IEX
+        # history). Alpaca uses the dotted class-share form = the master's plain
+        # symbol, carried under the 'alpaca' vendor key.
+        syms = _equity_symbols(instruments, "alpaca")
+        for etf in ("fx_etf", "commodity_etf", "rates_etf", "intl_etf", "sector_etf"):
+            syms += _master_vendor_symbols(instruments, etf, "alpaca")
+        return AlpacaPricesLoader(lake, instruments, symbols=list(dict.fromkeys(syms)))
     if dataset == "funding":
         from production.data.loaders.ccxt_funding import CcxtFundingLoader
 
@@ -166,17 +188,29 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
     if dataset == "fundamentals":
         from production.data.loaders.edgar import EdgarFundamentalsLoader
 
+        # Equity symbols live in the minted master, not universe.yaml; the yfinance
+        # dash form (BRK-B) matches the SEC ticker directory's convention.
         return EdgarFundamentalsLoader(lake, instruments,
-                                       symbols=_sleeve_symbols("equity"))
+                                       symbols=_equity_symbols(instruments, "yfinance"))
+    if dataset == "crypto_meta":
+        from production.data.loaders.coingecko import CoinGeckoLoader
+
+        # Snapshot loader (available_from = ingest time): each run appends today's
+        # market caps. History accumulates from the first pull — run it daily.
+        return CoinGeckoLoader(lake, instruments)
+    if dataset == "defi_tvl":
+        from production.data.loaders.defillama import DefiLlamaLoader
+
+        return DefiLlamaLoader(lake, instruments)   # snapshot, same accumulation model
     raise ValueError(f"no loader for dataset {dataset!r}")
 
 
-DATASETS = ["prices", "stooq", "funding", "basis", "fx", "macro", "french", "cot",
-            "fundamentals", "universe", "all"]
+DATASETS = ["prices", "stooq", "tiingo", "alpaca", "funding", "basis", "fx", "macro",
+            "french", "cot", "fundamentals", "crypto_meta", "defi_tvl", "universe", "all"]
 
 # Curated `source` values that identify the two independent price feeds we cross-check.
 _PRIMARY_SOURCES = ("yfinance",)
-_SECONDARY_SOURCES = ("stooq",)
+_SECONDARY_SOURCES = ("stooq", "tiingo", "alpaca")
 
 
 def _source_matches(series: "pd.Series", markers: tuple[str, ...]) -> "pd.Series":

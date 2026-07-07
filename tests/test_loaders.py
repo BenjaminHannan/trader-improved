@@ -283,6 +283,65 @@ def test_fred_fallback_no_vintages_warns_and_uses_offset():
     assert any("fredgraph" in w for w in loader.warnings)
 
 
+def test_fred_realtime_chunks_stay_under_vintage_cap():
+    """Regression (live-ingest 2026-07-07): ALFRED 400s when the realtime window spans
+    > 2000 vintage dates (10y of a daily series is ~2600). The window must be walked in
+    <=4-year chunks, contiguous and non-overlapping, final chunk open at 9999-12-31."""
+    from production.data.loaders.fred_alfred import _realtime_chunks
+
+    chunks = _realtime_chunks("2016-01-01", "2026-07-07")
+    assert len(chunks) >= 3
+    assert str(chunks[0][0]) == "2016-01-01"
+    assert chunks[-1][1] == "9999-12-31"
+    for (cs, ce), (ns, _) in zip(chunks, chunks[1:]):
+        assert pd.Timestamp(ns) == pd.Timestamp(ce) + pd.Timedelta(days=1)  # contiguous
+        # each closed chunk spans <= 4 years => under the ~2000 daily-vintage cap
+        assert (pd.Timestamp(ce) - pd.Timestamp(cs)).days <= 4 * 366
+
+
+def test_fred_vintaged_fetch_stitches_chunks_and_keeps_earliest_vintage(monkeypatch):
+    """Chunked ALFRED pulls re-report older observations clamped to each chunk start;
+    the stitcher must keep the earliest realtime_start per (date, value) while a
+    genuine revision (same date, new value) keeps its own later vintage."""
+    import sys
+    import types
+
+    calls = []
+
+    class _Resp:
+        status_code = 200
+        text = ""
+        def __init__(self, obs):
+            self._obs = obs
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"observations": self._obs}
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(params)
+        cs = params["realtime_start"]
+        if cs == "2016-01-01":        # chunk 1: original print
+            obs = [{"date": "2016-06-01", "value": "2.0", "realtime_start": "2016-06-02"}]
+        else:                          # later chunk: clamped carry-in + a real revision
+            obs = [{"date": "2016-06-01", "value": "2.0", "realtime_start": cs},
+                   {"date": "2016-06-01", "value": "2.5", "realtime_start": "2021-03-01"}]
+        return _Resp(obs)
+
+    mod = types.ModuleType("requests")
+    mod.get = fake_get
+    monkeypatch.setitem(sys.modules, "requests", mod)
+
+    loader = FredAlfredLoader(api_key="test-key", series=["DGS3MO"])
+    df = loader._fetch_vintaged("DGS3MO", pd.Timestamp("2016-01-01").date(),
+                                pd.Timestamp("2026-07-07").date())
+    assert len(calls) >= 2                          # actually chunked
+    got = {(r["value"], r["realtime_start"]) for _, r in df.iterrows()}
+    assert ("2.0", "2016-06-02") in got             # earliest vintage wins
+    assert ("2.5", "2021-03-01") in got             # revision kept
+    assert len(df) == 2                             # clamped duplicates dropped
+
+
 # ===================================================== (6) incremental watermark
 def test_incremental_only_repulls_tail(tmp_lake, monkeypatch):
     # Seed the lake so a watermark exists, then confirm an incremental run adjusts
@@ -512,6 +571,71 @@ def test_funding_all_symbols_fail_raises_geoblock_message(monkeypatch):
     assert "geo-block" in msg and "--help" in msg
 
 
+def test_funding_perp_symbol_resolves_against_spot_master(monkeypatch):
+    """Regression (live-ingest 2026-07-07): the REAL master keys ccxt on the spot pair
+    ("BTC/USD" — see instruments._crypto_vendor_symbols), while funding fetches the
+    perp ("BTC/USDT:USDT"). transform() must fall back to the base's spot pair or every
+    row silently resolves to None and the schema audit fails on an empty frame."""
+    def spot_row(iid, base):
+        return dict(
+            instrument_id=iid, asset_class="crypto", sleeve="crypto", symbol=base,
+            vendor_symbols=json.dumps({"ccxt": f"{base}/USD"}),   # real master shape
+            currency="USD", valid_from="1990-01-01", valid_to="2099-01-01",
+            proxy_of=None, sector=None, meta="{}",
+        )
+    master = pd.DataFrame([spot_row("CR:BTC:2015-01-01", "BTC"),
+                           spot_row("CR:ETH:2015-01-01", "ETH")])
+    loader = CcxtFundingLoader(instruments=master,
+                               symbols=["BTC/USDT:USDT", "ETH/USDT:USDT"])
+    raw = {"BTC/USDT:USDT": _funding_hist(0.0001),
+           "ETH/USDT:USDT": _funding_hist(0.0002)}
+    long = loader.transform(raw)
+    assert set(long["instrument_id"]) == {"CR:BTC:2015-01-01", "CR:ETH:2015-01-01"}
+    assert (long["funding_rate"].abs() <= 0.05).all()
+
+
+def test_funding_fetch_paginates_past_venue_page_cap(monkeypatch):
+    """Regression (live-ingest 2026-07-07): one fetch_funding_rate_history call returns
+    only the venue's most recent page (bybit ~200 cycles ≈ 66 days), so a 2016 start
+    silently yielded ~93 days. fetch() must advance `since` past each page."""
+    import sys
+    import types
+
+    day0 = pd.Timestamp("2021-01-01", tz="UTC")
+
+    class _PagingExchange:
+        # honors `since` like a real venue (the shared _FakeExchange drops it), and —
+        # like bybit — returns EMPTY when `since` predates the listing, not a clamp.
+        # 12 cycles spaced 30d apart (~1y of history, longer than the probe stride).
+        def fetch_funding_rate_history(self, sym, since=None):
+            rows = [{"timestamp": int((day0 + pd.Timedelta(days=30 * k)).timestamp() * 1000),
+                     "fundingRate": 0.0001} for k in range(12)]
+            if since is not None and since < rows[0]["timestamp"] - 1:
+                return []                   # pre-listing: empty page, no clamping
+            rows = [r for r in rows if since is None or r["timestamp"] >= since]
+            return rows[:4]                 # pages of 4 cycles
+
+    mod = types.ModuleType("ccxt")
+    mod.bybit = _PagingExchange
+    monkeypatch.setitem(sys.modules, "ccxt", mod)
+    loader = CcxtFundingLoader(instruments=_crypto_instruments(),
+                               symbols=["BTC/USDT:USDT"], exchanges=["bybit"])
+    # In-history start: all 3 pages stitched, no duplicated boundary rows.
+    raw = loader.fetch("2021-01-01", "2022-06-01")
+    ts = [r["timestamp"] for r in raw["BTC/USDT:USDT"]]
+    assert len(ts) == 12
+    assert len(set(ts)) == 12
+
+    # Pre-listing start: bybit-style venues return an EMPTY page rather than clamping,
+    # which previously read as "venue has nothing" and fell through to okx's ~3-month
+    # retention. The forward probe must find the series (it may skip at most one
+    # ~180d stride past the listing — negligible against a multi-year live series).
+    raw = loader.fetch("2020-12-01", "2022-06-01")
+    ts = [r["timestamp"] for r in raw["BTC/USDT:USDT"]]
+    assert len(ts) >= 6                     # found the series and kept paginating
+    assert len(set(ts)) == len(ts)
+
+
 # =================================================== (10) ken french direct zips
 _FF_FACTORS_CSV = """This file was created by CMPT_ME_BEME_RETS using the 202001 CRSP database.
 
@@ -632,6 +756,45 @@ def test_cot_dedup_keeps_largest_open_interest():
     assert not out.duplicated(subset=["obs_date", "instrument_id"]).any()
 
 
+def test_cot_fetch_filters_markets_serverside_and_paginates(monkeypatch):
+    """Regression (live-ingest 2026-07-07): an unfiltered, un-ordered $limit=50000
+    socrata query silently truncated a decade of all-markets COT to an arbitrary 50k
+    slice (surfaced as history 'starting in 2019'). fetch() must (a) filter to the
+    mapped markets server-side, (b) order deterministically, (c) page past $limit."""
+    import sys
+    import types
+
+    calls = []
+
+    class _Resp:
+        def __init__(self, rows):
+            self._rows = rows
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._rows
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(params)
+        limit, offset = params["$limit"], params["$offset"]
+        total = limit + 3            # force exactly one extra page
+        rows = [{"i": k} for k in range(offset, min(offset + limit, total))]
+        return _Resp(rows)
+
+    mod = types.ModuleType("requests")
+    mod.get = fake_get
+    monkeypatch.setitem(sys.modules, "requests", mod)
+
+    loader = CftcCotLoader(instruments=_cot_instruments())
+    out = loader.fetch("2016-01-01", "2026-07-07")
+    assert len(out) == loader.PAGE_LIMIT + 3          # both pages stitched
+    where = calls[0]["$where"]
+    assert "starts_with(market_and_exchange_names, 'GOLD')" in where
+    assert "starts_with(market_and_exchange_names, 'EURO FX')" in where
+    assert calls[0]["$order"] == "report_date_as_yyyy_mm_dd"
+    assert [c["$offset"] for c in calls] == [0, loader.PAGE_LIMIT]
+
+
 def test_cot_dedup_survives_audit_no_duplicates():
     raw = [
         _cot_rec("GOLD - COMMODITY EXCHANGE INC.", oi=100.0, nc_long=40, nc_short=10),
@@ -644,3 +807,254 @@ def test_cot_dedup_survives_audit_no_duplicates():
         loader.availability_rule)
     rep = audit(stamped, loader.expectations)
     assert rep.checks["duplicates"]["ok"] is True
+
+
+# ================================================== (11) raw-zone snapshot frames
+def test_raw_frame_dict_of_json_payloads_is_row_per_key():
+    """Regression (live-ingest 2026-07-07): a universe-scale {symbol: companyfacts}
+    dict serialized into ONE parquet cell blew parquet's 2GB string cap. Dict payloads
+    of non-DataFrame values must snapshot as one row per key."""
+    from production.data.base import _to_raw_frame
+
+    payload = {"AAPL": {"cik": 320193, "facts": {"x": 1}},
+               "MSFT": {"cik": 789019, "facts": {"y": 2}}}
+    df = _to_raw_frame(payload)
+    assert list(df["__key__"]) == ["AAPL", "MSFT"]
+    assert len(df) == 2
+    # 64-bit offsets: a universe of multi-MB JSON blobs exceeds 2 GB per COLUMN chunk,
+    # which regular (32-bit-offset) pyarrow strings cannot hold. Built directly as an
+    # arrow large_string array — pandas astype routes through a 32-bit intermediate.
+    import pyarrow as pa
+    assert df["payload"].dtype == pd.ArrowDtype(pa.large_string())
+    assert json.loads(df["payload"][0])["cik"] == 320193
+
+
+def test_raw_snapshot_failure_degrades_to_key_index(tmp_path, monkeypatch):
+    """Regression (live-ingest 2026-07-07): three consecutive 25-minute SEC pulls died
+    AT THE RAW SNAPSHOT after the fetch succeeded. run() must degrade to a key-index
+    snapshot with a loud warning, never discard the completed fetch."""
+    from production.core.lake import Lake
+    from production.data.loaders.yfinance_prices import YFinancePricesLoader
+
+    lake = Lake(str(tmp_path))
+    loader = YFinancePricesLoader(lake, _instruments(), symbols=["AAA"])
+    dates = pd.date_range("2020-01-02", periods=3, freq="B")
+    monkeypatch.setattr(loader, "fetch", lambda s, e: _yf_payload(dates, ["AAA"]))
+
+    real_write_raw = lake.write_raw
+    calls = {"n": 0}
+    def flaky_write_raw(df, vendor, dataset, ts):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("array cannot contain more than 2147483646 bytes")
+        return real_write_raw(df, vendor, dataset, ts)
+    monkeypatch.setattr(lake, "write_raw", flaky_write_raw)
+
+    res = loader.run("2020-01-01", "2020-01-10", incremental=False)
+    assert res.rows == 3                               # curated write still landed
+    assert any("raw snapshot failed" in w for w in res.audit["warnings"])
+    assert calls["n"] == 2                             # fallback snapshot written
+
+
+def test_raw_frame_list_with_mixed_type_column_is_parquet_safe(tmp_path):
+    """Regression (live-ingest 2026-07-07): DefiLlama's chains list carries chainId as
+    int for some rows and str for others; the raw snapshot write must not crash."""
+    from production.core.lake import Lake
+    from production.data.base import _to_raw_frame
+
+    payload = [{"name": "Corn", "chainId": 21000000, "tvl": 0.0},
+               {"name": "Unit", "chainId": "11235", "tvl": 1.5},
+               {"name": "NoId", "chainId": None, "tvl": 2.0}]
+    df = _to_raw_frame(payload)
+    lake = Lake(str(tmp_path))
+    path = lake.write_raw(df, "defillama", "defi_tvl", pd.Timestamp.now(tz=UTC))
+    assert path.exists()
+
+
+# ============================================= (12) ccxt OHLCV pagination + depth
+def _mk_daily_bars(start: str, n: int) -> list:
+    t0 = int(pd.Timestamp(start).tz_localize(UTC).timestamp() * 1000)
+    day = 24 * 3600 * 1000
+    return [[t0 + k * day, 1.0, 1.1, 0.9, 1.0 + k * 0.01, 100.0] for k in range(n)]
+
+
+class _TruncatedVenue:
+    """Kraken-style: returns its LAST `retention` daily bars regardless of `since`."""
+    def __init__(self, bars, retention=720):
+        self.bars, self.retention = bars, retention
+
+    def fetch_ohlcv(self, sym, timeframe="1d", since=None):
+        return self.bars[-self.retention:]
+
+
+class _PagedVenue:
+    """Coinbase-style: honors `since`, pages of `page` bars."""
+    def __init__(self, bars, page=300):
+        self.bars, self.page = bars, page
+
+    def fetch_ohlcv(self, sym, timeframe="1d", since=None):
+        rows = [b for b in self.bars if since is None or b[0] >= since]
+        return rows[:self.page]
+
+
+def test_fetch_ohlcv_paginated_stitches_pages(monkeypatch):
+    from production.data.base import fetch_ohlcv_paginated
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    bars = _mk_daily_bars("2016-01-01", 1000)
+    got = fetch_ohlcv_paginated(_PagedVenue(bars), "BTC/USD",
+                                since=bars[0][0], until=bars[-1][0])
+    assert len(got) == 1000                       # 4 pages stitched
+    assert len({b[0] for b in got}) == 1000       # no duplicated boundary bars
+
+
+def test_crypto_prices_fallback_wins_when_primary_truncates(monkeypatch):
+    """Regression (live-ingest 2026-07-07): kraken serves only its last ~720 daily
+    bars, so crypto prices silently started 2024-07. The loader must consult the
+    fallback venue and keep the deeper series."""
+    import sys
+    import types
+
+    from production.data.loaders.ccxt_prices import CcxtPricesLoader
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    deep = _mk_daily_bars("2016-01-01", 3800)     # ~2016 -> 2026
+    mod = types.ModuleType("ccxt")
+    mod.kraken = lambda: _TruncatedVenue(deep, retention=720)
+    mod.coinbase = lambda: _PagedVenue(deep, page=300)
+    monkeypatch.setitem(sys.modules, "ccxt", mod)
+
+    loader = CcxtPricesLoader(symbols=["BTC/USD"])
+    raw = loader.fetch("2016-01-01", "2026-07-07")
+    bars = raw["BTC/USD"]
+    assert bars[0][0] == deep[0][0]               # reached the requested start
+    assert len(bars) == 3800
+
+
+# ==================================================== (13) tiingo secondary feed
+def test_tiingo_rows_to_long_uses_adjusted_fields():
+    """Canned payload of the REAL tiingo shape (live probe 2026-07-07): adjClose /
+    adjVolume must feed close/volume (total-return semantics, like yfinance)."""
+    from production.data.loaders.tiingo_prices import TiingoPricesLoader
+
+    rows = [
+        {"date": "2016-01-04T00:00:00.000Z", "close": 105.35, "high": 105.368,
+         "low": 102.0, "open": 102.61, "volume": 67649387,
+         "adjClose": 23.7083102515, "adjHigh": 23.71236, "adjLow": 22.95441,
+         "adjOpen": 23.09169, "adjVolume": 270597548, "divCash": 0.0,
+         "splitFactor": 1.0},
+        {"date": "2016-01-05T00:00:00.000Z", "close": 102.71, "high": 105.85,
+         "low": 102.41, "open": 105.75, "volume": 55790992,
+         "adjClose": 23.1141959747, "adjHigh": 23.82083, "adjLow": 23.04668,
+         "adjOpen": 23.79832, "adjVolume": 223163968, "divCash": 0.0,
+         "splitFactor": 1.0},
+    ]
+    loader = TiingoPricesLoader(instruments=_instruments(), api_key="test-key")
+    ohlcv = loader._to_ohlcv(rows)
+    long = loader.transform({"AAA": ohlcv})
+
+    assert set(long["instrument_id"]) == {"EQ:AAA:2000-01-03"}
+    assert len(long) == 2
+    np.testing.assert_allclose(long["close"].iloc[0], 23.7083102515)
+    np.testing.assert_allclose(long["volume"].iloc[0], 270597548)
+    np.testing.assert_allclose(long["dollar_volume"], long["close"] * long["volume"])
+
+
+def test_tiingo_requires_api_key_and_guards_quota(monkeypatch):
+    from production.data.loaders.tiingo_prices import TiingoPricesLoader
+
+    loader = TiingoPricesLoader(instruments=_instruments(), symbols=["AAA"], api_key="")
+    with pytest.raises(IngestError):
+        loader.fetch("2016-01-01", "2016-02-01")
+
+    # A 429 mid-universe stops the pull with a warning instead of burning the quota.
+    import sys
+    import types
+
+    class _Resp:
+        def __init__(self, code, payload=None):
+            self.status_code = code
+            self._payload = payload or []
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._payload
+
+    calls = []
+    def fake_get(url, params=None, timeout=None):
+        calls.append(url)
+        if len(calls) == 1:
+            return _Resp(200, [{"date": "2016-01-04T00:00:00.000Z",
+                                "adjClose": 10.0, "adjVolume": 100, "volume": 100}])
+        return _Resp(429)
+
+    mod = types.ModuleType("requests")
+    mod.get = fake_get
+    monkeypatch.setitem(sys.modules, "requests", mod)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    loader = TiingoPricesLoader(instruments=_instruments(),
+                                symbols=["AAA", "BBB", "CCC"], api_key="k", pause_s=0)
+    raw = loader.fetch("2016-01-01", "2016-02-01")
+    assert list(raw) == ["AAA"]                    # kept what landed before the 429
+    assert len(calls) == 2                         # stopped immediately at the 429
+    assert any("rate-limited" in w for w in loader.warnings)
+
+
+# ===================================================== (14) alpaca secondary feed
+def test_alpaca_bars_to_long_and_pagination(monkeypatch):
+    """Canned payload of the REAL alpaca shape (live probe 2026-07-07): {bars:
+    {SYM: [{t,o,h,l,c,v},...]}, next_page_token} with adjustment=all semantics.
+    Pagination must stitch pages; symbols resolve via the 'alpaca' vendor key or
+    the master's plain (dotted) symbol."""
+    import sys
+    import types
+
+    from production.data.loaders.alpaca_prices import AlpacaPricesLoader
+
+    pages = [
+        {"bars": {"AAA": [
+            {"t": "2021-01-04T05:00:00Z", "o": 10.0, "h": 11.0, "l": 9.5,
+             "c": 10.5, "v": 1000, "n": 5, "vw": 10.4}]},
+         "next_page_token": "tok1"},
+        {"bars": {"AAA": [
+            {"t": "2021-01-05T05:00:00Z", "o": 10.5, "h": 11.5, "l": 10.0,
+             "c": 11.0, "v": 2000, "n": 6, "vw": 10.9}]},
+         "next_page_token": None},
+    ]
+    calls = []
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._payload
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        calls.append(dict(params))
+        return _Resp(pages[len(calls) - 1])
+
+    mod = types.ModuleType("requests")
+    mod.get = fake_get
+    monkeypatch.setitem(sys.modules, "requests", mod)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    loader = AlpacaPricesLoader(instruments=_instruments(), symbols=["AAA"],
+                                key_id="k", secret="s", pause_s=0)
+    raw = loader.fetch("2021-01-01", "2021-02-01")
+    assert len(calls) == 2 and calls[1].get("page_token") == "tok1"
+
+    long = loader.transform(raw)
+    assert set(long["instrument_id"]) == {"EQ:AAA:2000-01-03"}
+    assert len(long) == 2
+    np.testing.assert_allclose(long["dollar_volume"], long["close"] * long["volume"])
+
+
+def test_alpaca_requires_credentials():
+    from production.data.loaders.alpaca_prices import AlpacaPricesLoader
+
+    loader = AlpacaPricesLoader(symbols=["AAA"], key_id="", secret="")
+    with pytest.raises(IngestError):
+        loader.fetch("2021-01-01", "2021-02-01")

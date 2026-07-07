@@ -72,9 +72,14 @@ class CcxtPerpBasisLoader(BaseLoader):
 
     @staticmethod
     def _try_ohlcv(ex, symbols, since) -> list | None:
+        from production.data.base import fetch_ohlcv_paginated
+
         for s in symbols:
             try:
-                bars = ex.fetch_ohlcv(s, timeframe="1d", since=since)
+                # One fetch_ohlcv call returns a single venue page (~500-1000 bars,
+                # anchored at the listing) — which surfaced as basis history frozen at
+                # 2021-07..2022-05 on the first live ingest. Stitch the full window.
+                bars = fetch_ohlcv_paginated(ex, s, since)
             except Exception:
                 continue  # not listed on this venue
             if bars:

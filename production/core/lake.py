@@ -158,3 +158,71 @@ class Lake:
         with open(out, "w") as f:
             json.dump(record, f, indent=2, default=str)
         return out
+
+
+# ------------------------------------------------------- signal input bundle
+# The signals consume a bundle keyed by *bundle name* (data["mcap"], data["tvl"], …).
+# For most sources the bundle key equals the curated dataset name the loader writes, but
+# the two crypto snapshot loaders write differently-named curated datasets whose columns
+# also differ from the signal contract:
+#   - CoinGecko  -> curated dataset "crypto_meta", market-cap column "market_cap"
+#     (keyed by instrument_id) — the mcap_tvl signal wants bundle key "mcap"/column "mcap".
+#   - DefiLlama  -> curated dataset "defi_tvl",   TVL column "value"
+#     (keyed by series_id "TVL_<chain>") — the signal wants bundle key "tvl"/column "tvl"
+#     keyed by instrument_id. DefiLlama emits chain-level TVL as a macro *series*, so it
+#     has no instrument_id and cannot feed the per-instrument "tvl" contract without a
+#     chain->instrument resolution table that does not exist yet. We still map + rename it
+#     best-effort (only when the curated frame carries instrument_id); until an
+#     instrument-keyed TVL feed exists the "tvl" bundle key is populated only if such rows
+#     are present, otherwise it is skipped like any other absent dataset.
+SIGNAL_BUNDLE_DATASETS = (
+    "prices", "funding", "basis", "macro", "cot", "fundamentals", "mcap", "tvl",
+)
+
+# bundle key -> curated dataset name (identity unless listed here).
+_BUNDLE_TO_CURATED = {"mcap": "crypto_meta", "tvl": "defi_tvl"}
+
+# bundle key -> {curated column: signal-contract column} normalization.
+_BUNDLE_COLUMN_RENAME = {"mcap": {"market_cap": "mcap"}, "tvl": {"value": "tvl"}}
+
+
+def _normalize_bundle_frame(key: str, df: pd.DataFrame) -> pd.DataFrame | None:
+    """Rename curated columns to the signal-contract columns for a bundle key.
+
+    Returns the normalized frame, or ``None`` when the curated frame cannot satisfy the
+    signal contract (e.g. a TVL snapshot with no ``instrument_id`` — chain-level series
+    that has no per-instrument mapping).
+    """
+    rename = _BUNDLE_COLUMN_RENAME.get(key)
+    if rename:
+        df = df.rename(columns={c: t for c, t in rename.items() if c in df.columns})
+        target = next(iter(rename.values()))
+        if target not in df.columns:
+            return None  # curated frame lacks the value column the signal needs
+        if "instrument_id" not in df.columns:
+            return None  # per-instrument signal contract; series-keyed data can't feed it
+    return df
+
+
+def read_signal_bundle(lake: "Lake", start=None, end=None) -> dict[str, pd.DataFrame]:
+    """Load every available curated dataset into the signal input bundle.
+
+    Missing datasets are skipped silently (a lake with only prices still yields a usable,
+    smaller bundle). Bundle keys are normalized to the signal contract via
+    ``_BUNDLE_TO_CURATED`` / ``_BUNDLE_COLUMN_RENAME`` so ``data["mcap"]`` / ``data["tvl"]``
+    carry the columns the signals expect.
+    """
+    bundle: dict[str, pd.DataFrame] = {}
+    for key in SIGNAL_BUNDLE_DATASETS:
+        curated = _BUNDLE_TO_CURATED.get(key, key)
+        try:
+            df = lake.read_curated(curated, start=start, end=end)
+        except LakeError:
+            continue
+        if df is None or df.empty:
+            continue
+        df = _normalize_bundle_frame(key, df)
+        if df is None or df.empty:
+            continue
+        bundle[key] = df
+    return bundle

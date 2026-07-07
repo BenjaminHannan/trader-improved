@@ -10,7 +10,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from production.data.base import AvailabilityRule, BaseLoader, asset_class_from_instrument_id
+from production.data.base import (AvailabilityRule, BaseLoader,
+                                  asset_class_from_instrument_id,
+                                  fetch_ohlcv_paginated)
+
+# A venue whose earliest returned bar is this far after the requested start is
+# serving a truncated retention window (kraken: last ~720 bars regardless of
+# `since`), so the fallback venue is consulted for deeper history.
+_DEPTH_SLACK_MS = 90 * 24 * 3600 * 1000
 
 
 class CcxtPricesLoader(BaseLoader):
@@ -41,16 +48,23 @@ class CcxtPricesLoader(BaseLoader):
         backup = getattr(ccxt, self.fallback)() if self.fallback else None
         out: dict[str, list] = {}
         for sym in self.symbols:
+            best: list = []
             for ex in (primary, backup):
                 if ex is None:
                     continue
                 try:
-                    bars = ex.fetch_ohlcv(sym, timeframe="1d", since=since)
-                    if bars:
-                        out[sym] = bars
-                        break
+                    bars = fetch_ohlcv_paginated(ex, sym, since)
                 except Exception:
                     continue
+                # Keep the deepest series across venues: a truncated-retention venue
+                # (kraken serves only its last ~720 daily bars) must not shadow a
+                # fallback that can reach the requested start.
+                if bars and (not best or bars[0][0] < best[0][0]):
+                    best = bars
+                if best and best[0][0] <= since + _DEPTH_SLACK_MS:
+                    break            # deep enough — no need to consult the fallback
+            if best:
+                out[sym] = best
         return out
 
     def transform(self, raw) -> pd.DataFrame:

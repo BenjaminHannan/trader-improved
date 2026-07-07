@@ -21,6 +21,9 @@ findings here, and (when the evidence survives) lands a verified implementation 
 
 ## Sources
 - [[sources/ledoit-wolf-2003-honey]]
+- [[sources/practitioner-mechanism-scan-2026-07]] — 8 mechanism-backed niche ideas
+  (prediction-market microstructure primary), pre-registered predictions, promotion
+  protocol; top 2 need a Kalshi resolved-market backfill first
 
 ## Backlog (prioritized frontier)
 1. ~~Covariance shrinkage: LW analytic intensity + EWMA T_eff~~ (iteration 1)
@@ -45,3 +48,21 @@ findings here, and (when the evidence survives) lands a verified implementation 
     it yet; thread overrides_table through to the CostModel call)
 15. Accumulate per-run shortfall into the `shortfall_log` reference table from
     daily_run --live fills (feeds --calibrate-tca)
+16. Kalshi resolved-market historical backfill (free API: bucket prices + settlements,
+    2023+) — unblocks the top-2 practitioner-scan mechanisms ([[sources/practitioner-mechanism-scan-2026-07]]:
+    longshot-fade calibration test + nowcast-drift regression), both with
+    pre-registered falsifiable predictions
+17. Turn-of-year tax-loss-rebound diagnostic (bottom-decile prior-year losers, last
+    3 Dec days -> first 5 Jan days, incrementality vs plain reversal) — testable on
+    the existing lake, no new ingest; n_trials-guarded if promoted
+18. Cross-check follow-ups from first live run: per-name verification of the 66
+    quarantined instruments (ticker-reuse class -> blocklist extensions; FX-ETF
+    distribution-adjustment class -> vendor-methodology doc); wire quarantine list
+    consumption into backtest universe filtering
+19. Events-sleeve maker-side execution: rest limit orders at model fair-value bands
+    (extends edge-C1 passive execution to Kalshi) instead of crossing. Whelan caveat:
+    makers ALSO lose ~10% on average — the maker seat needs the calibration model
+    (backlog #16) as the signal; seat alone is not an edge. Mandatory release-window
+    pull rule (cancel resting quotes before scheduled prints — otherwise we supply
+    the under-reaction edge to faster traders) + per-ladder inventory caps. Execution
+    layer, not signal: does not touch n_trials

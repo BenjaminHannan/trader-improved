@@ -51,17 +51,38 @@ class CftcCotLoader(BaseLoader):
         "min_rows": 1,
     }
 
+    # Socrata page size. The mapped-market pull is ~12k rows over a decade, so one page
+    # normally suffices; the $offset loop is the guard, not the norm.
+    PAGE_LIMIT = 50000
+
     def fetch(self, start, end) -> list[dict]:
         import requests
 
         s, e = pd.Timestamp(start).date(), pd.Timestamp(end).date()
+        # Filter to our mapped markets SERVER-side. An unfiltered decade of all ~500
+        # markets exceeds one page, and Socrata silently truncates an un-ordered
+        # $limit query — which surfaced as COT "starting in 2019" on first live pull.
+        markets = " OR ".join(
+            f"starts_with(market_and_exchange_names, '{k}')" for k in MARKET_MAP)
         where = (f"report_date_as_yyyy_mm_dd >= '{s}T00:00:00.000' "
-                 f"AND report_date_as_yyyy_mm_dd <= '{e}T00:00:00.000'")
+                 f"AND report_date_as_yyyy_mm_dd <= '{e}T00:00:00.000' "
+                 f"AND ({markets})")
         try:
-            resp = requests.get(SOCRATA_URL,
-                                params={"$where": where, "$limit": 50000}, timeout=60)
-            resp.raise_for_status()
-            return resp.json()
+            out: list[dict] = []
+            offset = 0
+            while True:
+                resp = requests.get(
+                    SOCRATA_URL,
+                    params={"$where": where, "$limit": self.PAGE_LIMIT,
+                            "$offset": offset,
+                            "$order": "report_date_as_yyyy_mm_dd"},
+                    timeout=60)
+                resp.raise_for_status()
+                batch = resp.json()
+                out.extend(batch)
+                if len(batch) < self.PAGE_LIMIT:
+                    return out
+                offset += self.PAGE_LIMIT
         except Exception:
             return self._fetch_zip(start, end)
 

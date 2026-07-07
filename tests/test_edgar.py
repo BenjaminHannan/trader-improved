@@ -106,6 +106,69 @@ def edgar_loader(tmp_lake):
 
 
 # ---------------------------------------------------------------- transform
+def test_transform_resolves_sec_dash_symbol_via_yfinance_vendor_key():
+    """Regression (live-ingest 2026-07-07): the REAL minted master keys equities on the
+    dotted Wikipedia symbol (BRK.B) with the dash form only under vendor_symbols
+    "yfinance" (and no "sec" key at all). Symbols arrive from the SEC ticker directory
+    in dash form, so transform's resolve chain must try the yfinance vendor key."""
+    import json as _json
+
+    master = pd.DataFrame([{
+        "instrument_id": "EQ:BRK.B:1996-05-09",
+        "symbol": "BRK.B",                                       # dotted, master form
+        "vendor_symbols": _json.dumps(
+            {"yfinance": "BRK-B", "stooq": "BRK-B.US", "alpaca": "BRK.B"}),
+        "valid_from": pd.NaT, "valid_to": pd.NaT,
+    }])
+    loader = EdgarFundamentalsLoader(None, master, symbols=["BRK-B"])
+    facts = {"BRK-B": {
+        "cik": 1067983, "entityName": "Berkshire Hathaway Inc.",
+        "facts": {"us-gaap": {"EarningsPerShareDiluted": _concept(
+            [_e("2020-03-31", 2.0, "2020-05-01")], "USD/shares")}},
+    }}
+    df = loader.transform(facts)
+    assert not df.empty
+    assert set(df["instrument_id"]) == {"EQ:BRK.B:1996-05-09"}
+
+
+def test_transform_drops_annual_duration_keeps_quarterly():
+    """Regression (live-ingest 2026-07-07): Q4 and full-FY values share the same period
+    `end` and often the same filing date, colliding on the audit's duplicate key. The
+    annual-duration row (>200d span) must be dropped; quarterly and start-less
+    (instant / legacy-fixture) rows survive."""
+    iid = "EQ:AAA:2000-01-03"
+    master = _instruments_master({"AAA": iid})
+    loader = EdgarFundamentalsLoader(None, master, symbols=["AAA"])
+    facts = {"AAA": {"facts": {"us-gaap": {"EarningsPerShareDiluted": {"units": {
+        "USD/shares": [
+            {"start": "2020-10-01", "end": "2020-12-31", "val": 1.0,
+             "filed": "2021-02-01", "form": "10-K"},          # Q4 duration — keep
+            {"start": "2020-01-01", "end": "2020-12-31", "val": 4.0,
+             "filed": "2021-02-01", "form": "10-K"},          # FY duration — drop
+        ]}}}}}}
+    df = loader.transform(facts)
+    assert len(df) == 1
+    assert df["value"].iloc[0] == 1.0
+
+
+def test_transform_same_day_refiling_keeps_one_row():
+    """A same-day amendment with a different value shares available_from with the
+    original; exactly one row (the amendment) must survive the audit key."""
+    iid = "EQ:AAA:2000-01-03"
+    master = _instruments_master({"AAA": iid})
+    loader = EdgarFundamentalsLoader(None, master, symbols=["AAA"])
+    facts = {"AAA": {"facts": {"us-gaap": {"EarningsPerShareDiluted": {"units": {
+        "USD/shares": [
+            {"start": "2020-01-01", "end": "2020-03-31", "val": 1.0,
+             "filed": "2020-05-01", "form": "10-Q"},
+            {"start": "2020-01-01", "end": "2020-03-31", "val": 1.1,
+             "filed": "2020-05-01", "form": "10-Q/A"},
+        ]}}}}}}
+    df = loader.transform(facts)
+    assert len(df) == 1
+    assert df["value"].iloc[0] == 1.1
+
+
 def test_transform_restatement_is_a_later_vintage(edgar_loader):
     df = edgar_loader.transform(_canned_companyfacts())
     aapl_q1 = df[(df["instrument_id"] == AAPL_ID) & (df["field"] == "eps")

@@ -732,7 +732,11 @@ def test_run_backtest_synthetic_smoke(tmp_path):
         [sys.executable, str(REPO_ROOT / "scripts" / "run_backtest.py"),
          "--synthetic", "--start", "2019-07-01", "--end", "2019-09-30",
          "--report-dir", str(tmp_path)],
-        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=110)
+        # Hang guard, not a perf SLA: the engine takes ~100s on the reference box, and
+        # the 2026-07-07 live-ingest session showed a 110s budget flakes under any
+        # concurrent load (ingest jobs, suite parallelism). Functional asserts below
+        # are unchanged; an actual hang still trips this.
+        cwd=str(REPO_ROOT), env=env, capture_output=True, text=True, timeout=300)
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert "net Sharpe" in proc.stdout
     assert list(tmp_path.glob("backtest_*.json"))

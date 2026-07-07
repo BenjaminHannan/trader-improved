@@ -48,6 +48,7 @@ class CcxtFundingLoader(BaseLoader):
         import ccxt
 
         since = int(pd.Timestamp(start).tz_localize("UTC").timestamp() * 1000)
+        until = int(pd.Timestamp(end).tz_localize("UTC").timestamp() * 1000)
         out: dict[str, list] = {}
         remaining = list(self.symbols)
         tried: list[str] = []
@@ -63,7 +64,7 @@ class CcxtFundingLoader(BaseLoader):
             still: list[str] = []
             for sym in remaining:
                 try:
-                    hist = ex.fetch_funding_rate_history(sym, since=since)
+                    hist = self._fetch_paginated(ex, sym, since, until)
                 except Exception:
                     still.append(sym)   # not listed / geo-blocked here — retry next venue
                     continue
@@ -86,10 +87,60 @@ class CcxtFundingLoader(BaseLoader):
                 f"funding: no exchange in {tried} served {remaining}")
         return out
 
+    @staticmethod
+    def _fetch_paginated(ex, sym, since: int, until: int,
+                         max_pages: int = 400) -> list:
+        """Walk fetch_funding_rate_history forward from `since` until `until`.
+
+        Venues cap a single call (bybit ~200 cycles ≈ 66 days at 8h), so one call from
+        2016 silently returns only the most recent window. Advance `since` past the
+        last returned timestamp each page; stop on an empty page, no forward progress,
+        or the `until` bound. First page failing raises (caller falls through to the
+        next venue); a later page failing returns what we have (partial > nothing)."""
+        import time
+
+        _probe_step_ms = 180 * 24 * 3600 * 1000   # 180d: pre-listing gap probe stride
+        all_rows: list = []
+        cursor = since
+        for page in range(max_pages):
+            # Pace beyond ccxt's own throttle: a universe of symbols × pages/probes
+            # adds up fast, and both bybit and okx IP-ban aggressive callers
+            # (learned the hard way on the 2026-07-07 live ingest).
+            time.sleep(0.25)
+            try:
+                batch = ex.fetch_funding_rate_history(sym, since=cursor)
+            except Exception:
+                if page == 0:
+                    raise
+                break
+            # Drop boundary overlap / venues that ignore `since`; only forward rows
+            # count as progress, so a stale repeat page terminates the walk.
+            new = [r for r in batch if int(r["timestamp"]) >= cursor]
+            if not new:
+                if all_rows:
+                    break             # walked off the end of the history
+                # Venues (bybit) return EMPTY when `since` predates the perp's listing
+                # instead of clamping. Probe forward until the series starts.
+                cursor += _probe_step_ms
+                if cursor >= until:
+                    break
+                continue
+            all_rows.extend(new)
+            last = max(int(r["timestamp"]) for r in new)
+            if last >= until:
+                break
+            cursor = last + 1
+        return all_rows
+
     def transform(self, raw) -> pd.DataFrame:
         frames = []
         for sym, hist in raw.items():
+            # The master's ccxt vendor symbol is the spot pair (e.g. "BTC/USD"); the
+            # funding fetch addresses the perp ("BTC/USDT:USDT"). Try the raw symbol
+            # first (tests/fixtures may key on it), then the base's spot pair.
             iid = self.resolve(sym, "ccxt")
+            if iid is None and "/" in sym:
+                iid = self.resolve(f"{sym.split('/', 1)[0]}/USD", "ccxt")
             if iid is None or not hist:
                 continue
             d = pd.DataFrame(hist)

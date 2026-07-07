@@ -32,35 +32,34 @@ from production.alpha.ic import (decay_halflife, forward_returns, ic_decay,
 from production.alpha.registry import FactorRegistry, GateStats
 from production.alpha.zscore import zscore_scores
 from production.core.config import costs_config
-from production.core.lake import Lake, LakeError
-
-# instrument_id class prefix -> sleeve. instrument_id = "CLASS:SYMBOL:first-listing".
-CLASS_TO_SLEEVE = {
-    "EQ": "equity", "CR": "crypto", "FX": "fx_etf", "CO": "commodity_etf",
-}
-_DATASETS = ("prices", "funding", "macro", "cot")
+from production.core.lake import Lake, read_signal_bundle
+from production.signals.base import sleeve_from_id
 
 
 def _sleeve_map(prices: pd.DataFrame) -> pd.Series:
+    """instrument_id -> sleeve via the shared id-prefix rule.
+
+    ``sleeve_from_id`` raises on an unknown prefix; we guard so a stray malformed id maps
+    to ``None`` (dropped downstream) rather than killing the whole report.
+    """
+    def _safe(iid) -> str | None:
+        try:
+            return sleeve_from_id(str(iid))
+        except ValueError:
+            return None
+
     ids = prices["instrument_id"].unique()
-    return pd.Series({i: CLASS_TO_SLEEVE.get(str(i).split(":", 1)[0]) for i in ids})
+    return pd.Series({i: _safe(i) for i in ids})
 
 
 def load_bundle(lake: Lake, start, end) -> dict[str, pd.DataFrame]:
     """Load available curated datasets into the signal input bundle.
 
     Missing datasets are skipped silently — a lake that only has prices still yields a
-    usable (if smaller) report.
+    usable (if smaller) report. See ``production.core.lake.read_signal_bundle`` for the
+    bundle-key -> curated-dataset-name mapping (mcap<-crypto_meta, tvl<-defi_tvl).
     """
-    bundle: dict[str, pd.DataFrame] = {}
-    for ds in _DATASETS:
-        try:
-            df = lake.read_curated(ds, start=start, end=end)
-        except LakeError:
-            continue
-        if df is not None and not df.empty:
-            bundle[ds] = df
-    return bundle
+    return read_signal_bundle(lake, start=start, end=end)
 
 
 def _load_signal_registry() -> dict[str, type]:

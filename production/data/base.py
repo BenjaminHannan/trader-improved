@@ -156,16 +156,86 @@ def _to_raw_frame(payload: object) -> pd.DataFrame:
                 f.insert(0, "__key__", str(key))
                 frames.append(f)
             return pd.concat(frames, ignore_index=True)
+        # Dict of non-DataFrame payloads (e.g. {symbol: companyfacts json}): one row
+        # per key. Serializing the WHOLE dict into a single cell breaks parquet's
+        # 2 GB-per-string cap on universe-scale pulls (874 symbols ≈ 2.6 GB) — and even
+        # row-per-key, the COLUMN needs 64-bit (large_string) offsets because pyarrow
+        # caps a regular string array's total bytes at 2 GB per chunk. The arrow array
+        # must be built DIRECTLY (pandas astype routes through a 32-bit-offset
+        # intermediate and dies with the same 2 GB error).
+        if payload:
+            import pyarrow as pa
+
+            keys = [str(k) for k in payload]
+            vals = pa.array((json.dumps(v, default=str) for v in payload.values()),
+                            type=pa.large_string())
+            return pd.DataFrame({
+                "__key__": keys,
+                "payload": pd.arrays.ArrowExtensionArray(pa.chunked_array([vals])),
+            })
         return pd.DataFrame([{"payload": json.dumps(payload, default=str)}])
     if isinstance(payload, list):
         try:
-            return pd.DataFrame(payload)
+            df = pd.DataFrame(payload)
+            # Mixed-type object columns (e.g. DefiLlama chainId int|str) break the
+            # parquet write; stringify them — the raw zone is an audit trail.
+            for col in df.columns[df.dtypes == object]:
+                df[col] = df[col].map(lambda v: v if isinstance(v, str)
+                                      else json.dumps(v, default=str))
+            return df
         except (ValueError, TypeError):
             return pd.DataFrame([{"payload": json.dumps(payload, default=str)}])
     return pd.DataFrame([{"payload": str(payload)}])
 
 
 # ------------------------------------------------------------- ohlcv helpers
+_DAY_MS = 24 * 3600 * 1000
+
+
+def fetch_ohlcv_paginated(ex, symbol: str, since: int, until: int | None = None,
+                          timeframe: str = "1d", max_pages: int = 40,
+                          pause_s: float = 0.2) -> list:
+    """Stitch a full ccxt OHLCV history by advancing ``since`` past each page.
+
+    One `fetch_ohlcv` call returns only the venue's page (coinbase 300 bars, bybit/okx
+    ~500-1000) — or, on kraken, the LAST ~720 bars regardless of ``since``. Learned on
+    the 2026-07-07 live ingest as "crypto prices start 2024-07-17". Rows are stitched
+    forward with no duplicated boundary bars; a venue that ignores ``since`` simply
+    yields its one retention window (callers can detect that from the earliest bar).
+    An empty first page (pre-listing ``since`` on venues that do not clamp) probes
+    forward by 180d strides, mirroring the funding-history paginator.
+    """
+    import time
+
+    if until is None:
+        until = int(pd.Timestamp.now(tz="UTC").timestamp() * 1000)
+    probe_step = 180 * _DAY_MS
+    out: list = []
+    cursor = since
+    for page in range(max_pages):
+        time.sleep(pause_s)          # stay far from venue rate limits
+        try:
+            batch = ex.fetch_ohlcv(symbol, timeframe=timeframe, since=cursor)
+        except Exception:
+            if page == 0:
+                raise
+            break
+        new = [b for b in batch if b and b[0] >= cursor]
+        if not new:
+            if out:
+                break                # walked off the end of the history
+            cursor += probe_step     # pre-listing gap: probe forward
+            if cursor >= until:
+                break
+            continue
+        out.extend(new)
+        last = int(new[-1][0])
+        if last >= until or len(new) == 1:
+            break
+        cursor = last + 1
+    return out
+
+
 def prices_to_long(payload, resolve: Callable[[str], str | None]) -> pd.DataFrame:
     """Vendor OHLCV -> canonical long [obs_date, instrument_id, close, volume,
     dollar_volume, asset_class]. Accepts either a dict {symbol: OHLCV frame} or a
@@ -267,7 +337,22 @@ class BaseLoader(ABC):
 
         raw = self.fetch(start, end)
         ingest_ts = pd.Timestamp.now(tz="UTC")
-        raw_path = self.lake.write_raw(_to_raw_frame(raw), self.vendor, self.dataset, ingest_ts)
+        # The raw zone is an audit convenience; a snapshot-serialization failure must
+        # never discard a completed (possibly 25-minute, rate-limited) vendor fetch.
+        # Degrade to a key-index snapshot with a LOUD warning instead of raising.
+        try:
+            raw_path = self.lake.write_raw(_to_raw_frame(raw), self.vendor,
+                                           self.dataset, ingest_ts)
+        except Exception as exc:
+            self.warnings.append(f"raw snapshot failed ({exc!r:.200}); "
+                                 "wrote key-index fallback only")
+            keys = (list(raw.keys()) if isinstance(raw, dict)
+                    else list(range(len(raw))) if isinstance(raw, (list, tuple))
+                    else [])
+            fallback = pd.DataFrame({"__key__": [str(k) for k in keys]}) if keys \
+                else pd.DataFrame([{"__key__": "<unserializable payload>"}])
+            raw_path = self.lake.write_raw(fallback, self.vendor, self.dataset,
+                                           ingest_ts)
 
         df = self.transform(raw)
         df = df.copy() if df is not None else pd.DataFrame()

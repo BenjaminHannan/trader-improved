@@ -84,6 +84,19 @@ def test_fred_stage2_default_series_and_vintage_rule():
 
 
 # ============================================================= (2) ADS ingest_time
+def test_ads_parses_colon_separated_vintage_dates(tmp_lake):
+    """Regression (live-ingest 2026-07-07): the Philadelphia Fed vintage workbook
+    writes dates as '1960:03:01'; naive to_datetime coerces every row to NaT and the
+    loader emits an empty frame that fails the schema audit."""
+    payload = pd.DataFrame({"Date": ["2020:01:02", "2020:01:03", "2020:01:06"],
+                            "ADS_Index": [-0.1, 0.0, 0.1], "RECBARS": [0, 0, 0]})
+    out = AdsLoader(tmp_lake).transform(payload)
+    assert len(out) == 3
+    assert out["obs_date"].tolist() == [pd.Timestamp("2020-01-02"),
+                                        pd.Timestamp("2020-01-03"),
+                                        pd.Timestamp("2020-01-06")]
+
+
 def test_ads_transform_and_ingest_time_rule(tmp_lake, monkeypatch):
     loader = AdsLoader(tmp_lake)
     monkeypatch.setattr(loader, "fetch", lambda s, e: _ads_payload())

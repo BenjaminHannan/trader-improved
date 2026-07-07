@@ -55,7 +55,10 @@ class AdsLoader(BaseLoader):
         # First column is the observation date; the ADS value column contains "ads".
         date_col = df.columns[0]
         val_col = next((c for c in df.columns if "ads" in str(c).lower()), df.columns[-1])
-        obs = pd.to_datetime(df[date_col], errors="coerce").dt.normalize()
+        # The vintage workbook writes dates as "1960:03:01" (live payload 2026-07-07);
+        # normalize the colon separators before parsing.
+        raw_dates = df[date_col].astype(str).str.replace(":", "-", regex=False)
+        obs = pd.to_datetime(raw_dates, errors="coerce").dt.normalize()
         value = pd.to_numeric(df[val_col], errors="coerce")
         out = pd.DataFrame({"obs_date": obs, "series_id": SERIES_ID,
                             "value": value, "asset_class": "macro"})
