@@ -1,5 +1,22 @@
 # autoresearch log
 
+## [2026-07-07] autoresearch (research-only) | rejected-factor forensics (iteration 2/3)
+- Rounds: 2 (regime record + canonical constructions; plus read-only code check of
+  production/signals/{momentum,positioning,value}.py and alpha/ic.py)
+- Sources found: SG/CFM/Kpler trend record; COT-instability studies; AMP 2013;
+  MOP 2012; KRT JF 2020; hedging-pressure + industry-relative-value canon
+- Pages created: [[sources/trend-cot-value-2024-2026-regime]],
+  [[sources/canonical-factor-constructions]], [[questions/research-rejected-factor-forensics]]
+- Synthesis: [[questions/research-rejected-factor-forensics]]
+- Key finding: rejections replicate the industry record (SG Trend -12.5% rolling
+  12m in-window; megacap-AI value headwind) — the gate measured reality. But three
+  constructions genuinely diverge from canon: tsmom (cross-sectional sign() vs
+  MOP time-series vol-scaled), cot_positioning (3y z of noncomm LEVEL conflates
+  KRT's two opposite-signed premia), earnings_yield (no sector demean → static
+  short-tech bet). mom_12_1's pooled t=0.85 is partly an unweighted-pooling
+  artifact across sleeves with ~60x IC-variance differences. Three zero-trial-cost
+  falsifiable checks filed; any re-specification is a new trial and stays deferred.
+
 ## [2026-07-07] autoresearch (research-only) | OOS gate design (iteration 1/3)
 - Rounds: 3 (broad CPCV/HLZ/decay → primary-source fetch → sign-flip base rates)
 - Sources found: 4 usable (Bailey CSCV, Arian-Norouzi-Seco 2024, McLean-Pontiff, Chen-Zimmermann); ScienceDirect + PDF fetches blocked, abstracts verified via search

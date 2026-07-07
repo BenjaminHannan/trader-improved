@@ -17,6 +17,8 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[questions/research-crypto-carry]] — iteration 10, confirmed + backlog add
 - [[questions/research-oos-gate-design]] — 2026-07-07 research-only: keep 80/20 split,
   tighten boundary (purge+embargo), add within-train CPCV sign-stability diagnostic
+- [[questions/research-rejected-factor-forensics]] — 2026-07-07 research-only: per-factor
+  regime-vs-construction-vs-noise diagnosis of tonight's 5 headline rejections
 
 ## Concepts
 - [[concepts/ewma-shrinkage-combination]]
@@ -26,6 +28,8 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[sources/bailey-cscv-pbo-2015]] — CSCV/PBO: hold-out is the weakest OOS scheme
 - [[sources/arian-norouzi-seco-2024-oos-methods]] — controlled comparison: CPCV > walk-forward
 - [[sources/oos-decay-sign-flip-base-rates]] — McLean-Pontiff + Chen-Zimmermann decay/sign base rates
+- [[sources/trend-cot-value-2024-2026-regime]] — SG Trend/CTA + value regime record for the OOS window
+- [[sources/canonical-factor-constructions]] — AMP/MOP/KRT/industry-value canonical constructions vs ours
 - [[sources/practitioner-mechanism-scan-2026-07]] — 8 mechanism-backed niche ideas
   (prediction-market microstructure primary), pre-registered predictions, promotion
   protocol; top 2 need a Kalshi resolved-market backfill first
