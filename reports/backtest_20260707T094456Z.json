@@ -1,0 +1,213 @@
+{
+  "headline": {
+    "n_days": 2742,
+    "start": "2019-01-04",
+    "end": "2026-07-07",
+    "net_sharpe": 0.022056118260904343,
+    "gross_sharpe": 0.023269024388599693,
+    "net_information_ratio": 0.022056118260904343,
+    "gross_information_ratio": 0.023269024388599693,
+    "ann_return_net": 4.704618028483765e-09,
+    "ann_return_gross": 4.963386590617347e-09,
+    "ann_vol_net": 2.1330320800856925e-07,
+    "max_drawdown": 6.299128663123099e-07,
+    "hit_rate": 0.4474835886214442,
+    "avg_cost_drag_bps_per_day": 1.0268620339165257e-08,
+    "probabilistic_sharpe": 0.5289871059865375,
+    "deflated_sharpe": 8.535089599308282e-19,
+    "n_trials": 18,
+    "var_trials": 0.008314168531820078,
+    "sharpe_ci95": [
+      -0.5968363180724616,
+      0.6163150665863136
+    ]
+  },
+  "per_sleeve": {
+    "crypto": {
+      "sharpe": -0.030904065331977416,
+      "ann_return": -2.724154346545049e-09,
+      "ann_vol": 8.81485677440149e-08,
+      "max_drawdown": 2.358101242050381e-07,
+      "hit_rate": 0.312180889861415,
+      "turnover": 8.293139059925339e-08
+    },
+    "fx_etf": {
+      "sharpe": 0.0485480260880586,
+      "ann_return": 0.0001937791582797832,
+      "ann_vol": 0.004170169471931214,
+      "max_drawdown": 0.017992219024969502,
+      "hit_rate": 0.3464624361779723,
+      "turnover": 0.009183851044412574
+    }
+  },
+  "factor_attribution": {
+    "contributions": {
+      "market": -4.912703612916919e-10,
+      "size": 4.879531493302842e-09,
+      "momentum": -3.845451719688373e-09,
+      "vol": 1.70427556917219e-08,
+      "sector_Communication Services": -9.737719293287117e-09,
+      "sector_Consumer Discretionary": -1.021953657557231e-08,
+      "sector_Consumer Staples": -1.8672051473404434e-08,
+      "sector_Energy": 5.240161418778619e-09,
+      "sector_Financials": 3.039137020849826e-08,
+      "sector_Health Care": -2.1350296220541443e-08,
+      "sector_Industrials": 4.38328405018281e-08,
+      "sector_Information Technology": 2.111974690323961e-08,
+      "sector_Materials": -3.6067084387436875e-08,
+      "sector_Real Estate": -1.2528676401970968e-08,
+      "sector_Utilities": 7.943851648370374e-10
+    },
+    "betas": {
+      "market": 4.415181232864732e-09,
+      "size": -7.005938342858275e-08,
+      "momentum": 6.974491667989784e-09,
+      "vol": 1.2505229831965992e-08,
+      "sector_Communication Services": -5.319288994718218e-08,
+      "sector_Consumer Discretionary": -6.221614184052046e-08,
+      "sector_Consumer Staples": -9.69333736652288e-08,
+      "sector_Energy": 3.227011557412111e-08,
+      "sector_Financials": 1.9147494056788594e-07,
+      "sector_Health Care": -1.3689129717652788e-07,
+      "sector_Industrials": 2.522239191498142e-07,
+      "sector_Information Technology": 1.1593904469581334e-07,
+      "sector_Materials": -2.924897690036291e-07,
+      "sector_Real Estate": -1.364073978601555e-07,
+      "sector_Utilities": 5.357471785164453e-09
+    },
+    "specific": -5.684064167745992e-09,
+    "r_squared": 0.037438812781936726
+  },
+  "per_alpha_contribution": {
+    "carry_rate_diff": -0.009120072106654954,
+    "basis_carry": -0.004888401678753457
+  },
+  "ic_realized_vs_training": {
+    "carry_rate_diff": {
+      "realized": 0.05856953443588931,
+      "training": 0.031056281377624242
+    },
+    "basis_carry": {
+      "realized": -0.016743520721849585,
+      "training": -0.012082334397266898
+    }
+  },
+  "factors_used": [
+    "carry_rate_diff",
+    "basis_carry"
+  ],
+  "caveats": {
+    "gate_applied": true,
+    "borrow_cost_free": true,
+    "var_trials_source": "empirical trial variance from 11 gate records (recorded validation-slice Sharpes)",
+    "warnings": []
+  },
+  "config_echo": {
+    "walk_forward": {
+      "train_years": 3,
+      "step_months": 1,
+      "n_tranches": 5,
+      "rebalance": {
+        "default": "weekly",
+        "crypto": "twice_weekly"
+      },
+      "purge_days": 21,
+      "start": "2016-01-01",
+      "end": null
+    },
+    "optimizer": {
+      "risk_aversion_init": 10.0,
+      "lambda_bisect_iters": 5,
+      "tcost_weight": 1.0,
+      "robust_kappa": 0.0,
+      "solver": "CLARABEL",
+      "solver_fallback": "OSQP"
+    },
+    "sleeve_vol_target": 0.1,
+    "total_vol_target": 0.1,
+    "constraints": {
+      "position_cap": {
+        "equity": 0.02,
+        "crypto": 0.05,
+        "fx_etf": 0.1,
+        "commodity_etf": 0.1,
+        "rates_etf": 0.1,
+        "intl_etf": 0.1,
+        "sector_etf": 0.15,
+        "events": 0.02
+      },
+      "gross_cap": 2.0,
+      "net_band": 0.1,
+      "beta_neutral_band": 0.05,
+      "sector_band": 0.05,
+      "turnover_cap": 0.3
+    },
+    "allocation": {
+      "method": "erc",
+      "sleeve_cov_halflife_days": 63,
+      "risk_caps": {
+        "crypto": 0.2,
+        "rates_etf": 0.25,
+        "intl_etf": 0.25,
+        "sector_etf": 0.25,
+        "events": 0.1,
+        "max_any_sleeve": 0.4
+      },
+      "warmup_days": 126
+    },
+    "overlays": {
+      "vol_target": {
+        "target": 0.1,
+        "lookback_days": 21,
+        "clip": [
+          0.0,
+          1.5
+        ],
+        "ewma_halflife": 33,
+        "deadband": 0.1
+      },
+      "drawdown_control": {
+        "threshold": 0.08,
+        "scale": 0.5,
+        "mode": "ramp",
+        "recovery_frac": 0.75
+      },
+      "macro_derisk": {
+        "enabled": true,
+        "series": [
+          "BAMLH0A0HYM2"
+        ],
+        "ratio_pairs": [
+          [
+            "VIXCLS",
+            "VXVCLS"
+          ]
+        ],
+        "z_window_days": 252,
+        "z_trigger": 1.5,
+        "scale": 0.6
+      }
+    }
+  },
+  "cost_sensitivity": {
+    "realized_annual_drag_bps": 2.587692325469645e-06,
+    "levels": [
+      {
+        "multiplier": 1.0,
+        "ratio": 1.0,
+        "annual_drag_bps": 2.587692325469645e-06
+      },
+      {
+        "multiplier": 3.3333333333333335,
+        "ratio": 1.8701627914338304,
+        "annual_drag_bps": 4.8394059027722105e-06
+      },
+      {
+        "multiplier": 6.666666666666667,
+        "ratio": 3.3402355185600694,
+        "annual_drag_bps": 8.64350181663901e-06
+      }
+    ],
+    "caveat": "impact prefactor alpha=0.15 sits BELOW the 0.5-1.0 literature band; drag under x3.3 (alpha~0.5) / x6.7 (alpha~1.0) shows the optimism (research/wiki/questions/research-cost-model-calibration.md)"
+  }
+}
