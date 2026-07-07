@@ -1,5 +1,16 @@
 # autoresearch log
 
+## [2026-07-07] autoresearch (research-only) | OOS gate design (iteration 1/3)
+- Rounds: 3 (broad CPCV/HLZ/decay → primary-source fetch → sign-flip base rates)
+- Sources found: 4 usable (Bailey CSCV, Arian-Norouzi-Seco 2024, McLean-Pontiff, Chen-Zimmermann); ScienceDirect + PDF fetches blocked, abstracts verified via search
+- Pages created: [[sources/bailey-cscv-pbo-2015]], [[sources/arian-norouzi-seco-2024-oos-methods]], [[sources/oos-decay-sign-flip-base-rates]], [[questions/research-oos-gate-design]]
+- Synthesis: [[questions/research-oos-gate-design]]
+- Key finding: keep the 80/20 split as binding; tighten the criterion-2/4 boundary
+  with purge=horizon + ~26d embargo; add a within-train CPCV sign-stability
+  diagnostic (reject-only, zero trial cost). SE arithmetic: tonight's cot/tsmom
+  flips are compatible with sampling noise (29-39% flip prob at N=8-30, h=20);
+  earnings_yield's flip at N≈500 is >2 SE — construction/regime, not noise.
+
 ## [2026-07-06] edge-implementation goal | iterations 21-25 (all edges landed)
 - IC multipliers: signal purification (planted IC 0.53->0.83), factor-momentum tilt
   (Ehsani-Linnainmaa), both ON for structural sleeves

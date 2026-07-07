@@ -15,12 +15,17 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[questions/research-zscore-robustness]] — iteration 8, design confirmed
 - [[questions/research-sector-threading-gap]] — iteration 9 (internal audit), implemented
 - [[questions/research-crypto-carry]] — iteration 10, confirmed + backlog add
+- [[questions/research-oos-gate-design]] — 2026-07-07 research-only: keep 80/20 split,
+  tighten boundary (purge+embargo), add within-train CPCV sign-stability diagnostic
 
 ## Concepts
 - [[concepts/ewma-shrinkage-combination]]
 
 ## Sources
 - [[sources/ledoit-wolf-2003-honey]]
+- [[sources/bailey-cscv-pbo-2015]] — CSCV/PBO: hold-out is the weakest OOS scheme
+- [[sources/arian-norouzi-seco-2024-oos-methods]] — controlled comparison: CPCV > walk-forward
+- [[sources/oos-decay-sign-flip-base-rates]] — McLean-Pontiff + Chen-Zimmermann decay/sign base rates
 - [[sources/practitioner-mechanism-scan-2026-07]] — 8 mechanism-backed niche ideas
   (prediction-market microstructure primary), pre-registered predictions, promotion
   protocol; top 2 need a Kalshi resolved-market backfill first
