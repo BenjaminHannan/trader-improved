@@ -164,8 +164,9 @@ class YFinancePricesLoader(BaseLoader):
         clean, drops = apply_hygiene(long, symbol_col="symbol")
         clean = clean.drop(columns=["symbol"], errors="ignore")
         self.hygiene_drops = drops
-        if drops["backstop_dropped"] or drops["blocklist_dropped"]:
+        if any(drops.values()):
             self.warnings.append(
-                f"hygiene: dropped {drops['backstop_dropped']} sub-floor price row(s) "
+                f"hygiene: dropped {drops['backstop_dropped']} sub-floor price row(s), "
+                f"{drops.get('flap_dropped', 0)} flap-outlier row(s), "
                 f"and {drops['blocklist_dropped']} blocklisted-ticker row(s)")
         return clean

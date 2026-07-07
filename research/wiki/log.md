@@ -20,6 +20,8 @@
   returns); per-sleeve-vs-global and exposure-set questions are reduced to specific
   harness cells with pre-registered pass/fail directions. Zero n_trials impact.
 
+## [2026-07-07] FIRST LIVE-DATA RUN — full-history ingest, first real gate, first real backtest
+
 The gate and backtest ran on real vendor data for the first time. Headline: 2 of 12
 factors accepted (carry_rate_diff fx_etf, basis_carry crypto); backtest of the
 surviving book: net Sharpe +0.022, **deflated Sharpe 0.000 at n_trials=20**, 95% CI

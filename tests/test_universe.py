@@ -303,7 +303,8 @@ def test_apply_hygiene_drops_penny_and_blocklisted_rows():
         "close": [150.0, 0.05, 200.0, 250.0],
     })
     clean, counts = hygiene.apply_hygiene(df, symbol_col="symbol")
-    assert counts == {"backstop_dropped": 1, "blocklist_dropped": 1}
+    assert counts == {"backstop_dropped": 1, "blocklist_dropped": 1,
+                      "flap_dropped": 0, "corrupt_series": []}
     # Exactly the two legitimate rows survive, in order.
     assert list(clean["close"]) == [150.0, 250.0]
     assert list(clean["symbol"]) == ["AAPL", "FB"]
@@ -317,7 +318,8 @@ def test_apply_hygiene_counts_are_independent():
         "close": [10.0, 0.01],
     })
     clean, counts = hygiene.apply_hygiene(df, symbol_col="symbol")
-    assert counts == {"backstop_dropped": 1, "blocklist_dropped": 0}
+    assert counts == {"backstop_dropped": 1, "blocklist_dropped": 0,
+                      "flap_dropped": 0, "corrupt_series": []}
     assert list(clean["close"]) == [10.0]
 
     # Only a blocklisted row, no penny -> backstop counter stays 0.
@@ -327,7 +329,8 @@ def test_apply_hygiene_counts_are_independent():
         "close": [250.0, 200.0],
     })
     clean2, counts2 = hygiene.apply_hygiene(df2, symbol_col="symbol")
-    assert counts2 == {"backstop_dropped": 0, "blocklist_dropped": 1}
+    assert counts2 == {"backstop_dropped": 0, "blocklist_dropped": 1,
+                       "flap_dropped": 0, "corrupt_series": []}
     assert list(clean2["close"]) == [250.0]
 
 
@@ -339,7 +342,8 @@ def test_apply_hygiene_symbol_col_absent_skips_blocklist():
         "close": [200.0, 0.05],
     })
     clean, counts = hygiene.apply_hygiene(df, symbol_col="symbol")
-    assert counts == {"backstop_dropped": 1, "blocklist_dropped": 0}
+    assert counts == {"backstop_dropped": 1, "blocklist_dropped": 0,
+                      "flap_dropped": 0, "corrupt_series": []}
     # The blocklisted FB row survives because there was no symbol column to date it.
     assert list(clean["close"]) == [200.0]
 
@@ -347,4 +351,77 @@ def test_apply_hygiene_symbol_col_absent_skips_blocklist():
 def test_apply_hygiene_empty_frame():
     clean, counts = hygiene.apply_hygiene(pd.DataFrame(), symbol_col="symbol")
     assert clean.empty
-    assert counts == {"backstop_dropped": 0, "blocklist_dropped": 0}
+    assert counts == {"backstop_dropped": 0, "blocklist_dropped": 0,
+                      "flap_dropped": 0, "corrupt_series": []}
+
+
+def test_flap_screen_drops_regime_flapping_series():
+    """Regression (first live French validation, 2026-07-07): dead tickers' vendor
+    series flap between price regimes — EQ:TIE oscillated $2 <-> $15,600 day-to-day,
+    creating fake +810,000% returns that gave an equal-weight market 1,750% annualized
+    vol and ~0.02 correlation with Mkt-RF, and poisoned the equity factors' gate
+    validation books. Flap rows sit 20x+ from the rolling median; drop them."""
+    dates = pd.date_range("2016-03-01", periods=12, freq="B")
+    closes = [2.0, 1.99, 15600.0, 2.01, 2.0, 13400.0, 1.95, 2.02, 2.0, 14500.0, 2.0, 2.01]
+    df = pd.DataFrame({"obs_date": dates, "instrument_id": "EQ:TIE:1976-07-01",
+                       "close": closes})
+    out = hygiene.apply_flap_screen(df)
+    assert (out["close"] < 100).all()          # every flap row gone
+    assert len(out) == 9                       # the three spikes dropped
+
+
+def test_flap_screen_keeps_genuine_violent_repricings():
+    """GME-style squeeze: large but PERSISTENT moves drag the rolling median with
+    them within days, so ratios stay far under the 20x threshold. Real volatility
+    must survive; only reverting flaps die."""
+    dates = pd.date_range("2021-01-11", periods=12, freq="B")
+    closes = [20.0, 20.0, 31.0, 35.0, 39.0, 43.0, 65.0, 88.0, 148.0, 348.0, 194.0, 325.0]
+    df = pd.DataFrame({"obs_date": dates, "instrument_id": "EQ:GME:2007-12-13",
+                       "close": closes})
+    out = hygiene.apply_flap_screen(df)
+    assert len(out) == len(df)                 # nothing dropped
+
+
+def test_flap_screen_passes_short_series_and_counts_in_apply_hygiene():
+    dates = pd.date_range("2024-01-02", periods=3, freq="B")
+    short = pd.DataFrame({"obs_date": dates, "instrument_id": "EQ:NEW:2024-01-02",
+                          "close": [10.0, 10000.0, 10.0], "symbol": "NEW"})
+    out = hygiene.apply_flap_screen(short)
+    assert len(out) == 3                       # < window obs: nothing to compare against
+
+    dates = pd.date_range("2016-03-01", periods=8, freq="B")
+    flappy = pd.DataFrame({"obs_date": dates, "instrument_id": "EQ:TIE:1976-07-01",
+                           "close": [2.0, 2.0, 15600.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+                           "symbol": "TIE"})
+    clean, counts = hygiene.apply_hygiene(flappy)
+    assert counts["flap_dropped"] == 1
+    assert (clean["close"] < 100).all()
+
+
+def test_corrupt_series_run_alternator_dropped_wholesale():
+    """Regression (2026-07-07): EQ:TIE alternates price regimes in multi-day RUNS
+    ($2 stretches <-> $13,400 stretches), so run interiors survive any row-level
+    median screen. A series with >5 catastrophic (>400%) day-over-day moves is
+    corrupt end-to-end and must be dropped wholesale."""
+    dates = pd.date_range("2016-03-01", periods=20, freq="B")
+    closes = ([2.0] * 3 + [13400.0] * 3 + [2.0] * 2 + [13400.0] * 4
+              + [2.0] * 3 + [13400.0] * 2 + [2.0] * 3)   # 6 regime flips
+    tie = pd.DataFrame({"obs_date": dates, "instrument_id": "EQ:TIE:1976-07-01",
+                        "close": closes, "symbol": "TIE"})
+    # A normal name alongside proves the drop is per-series, not global.
+    ok = pd.DataFrame({"obs_date": dates, "instrument_id": "EQ:AAA:2000-01-03",
+                       "close": 100.0 + pd.RangeIndex(20) * 0.5, "symbol": "AAA"})
+    clean, counts = hygiene.apply_hygiene(pd.concat([tie, ok], ignore_index=True))
+    assert counts["corrupt_series"] == ["EQ:TIE:1976-07-01"]
+    assert set(clean["instrument_id"]) == {"EQ:AAA:2000-01-03"}
+
+
+def test_corrupt_series_spares_squeeze_and_crash_names():
+    """GME-style squeeze (one +135% day) and a single -75% biotech crash are far
+    below both the 400% move size and the >5 repetition bar — never dropped."""
+    dates = pd.date_range("2021-01-11", periods=10, freq="B")
+    gme = pd.DataFrame({"obs_date": dates, "instrument_id": "EQ:GME:2007-12-13",
+                        "close": [20, 39, 43, 65, 88, 148, 348, 194, 325, 225.0]})
+    out, corrupt = hygiene.drop_corrupt_series(gme)
+    assert corrupt == []
+    assert len(out) == len(gme)

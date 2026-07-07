@@ -192,4 +192,4 @@ factors:
       net_validation_return: 0.09123719789962716
       n_dates: 2354
       val_sharpe: 0.5147030138184474
-n_trials: 18
+n_trials: 20
