@@ -1,5 +1,22 @@
 # autoresearch log
 
+## [2026-07-07] autoresearch (research-only) | data remediation (iteration 3/3)
+- Rounds: 3 (vendor sweep → CM/Sharadar/Cleveland/adjustment gap fill → Binance
+  delisted-retention check, unresolved)
+- Sources found: Coin Metrics community docs, Norgate/Sharadar/Polygon pricing +
+  delisted coverage, Cleveland Fed nowcasting page (403; EC 2023-06 confirms an
+  internal vintage archive), FirstRate/PortfolioOptimizer/Alvarez adjustment forensics
+- Pages created: [[sources/etf-adjustment-methodology]], [[questions/research-data-remediation]]
+- Synthesis: [[questions/research-data-remediation]]
+- Key finding: Coin Metrics community daily reference rates (free, full history,
+  documented methodology, dead-asset coverage) for pre-2021 crypto; Norgate Platinum
+  US$630/yr closes the 184-name delisted-equity gap AND adds a second PIT-membership
+  source; Cleveland Fed vintages have no public archive — start a forward archiver
+  now + request the EC-2023-06 vintage dataset; the FX/bond-ETF quarantine class is
+  a vendor adjusted-close artifact — cross-check unadjusted closes + event tables.
+  Backlog #16/#18 annotated. Sources went specific, not circular; stopping at 3
+  iterations per program.
+
 ## [2026-07-07] autoresearch (research-only) | rejected-factor forensics (iteration 2/3)
 - Rounds: 2 (regime record + canonical constructions; plus read-only code check of
   production/signals/{momentum,positioning,value}.py and alpha/ic.py)

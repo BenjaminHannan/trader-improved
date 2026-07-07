@@ -19,6 +19,9 @@ findings here, and (when the evidence survives) lands a verified implementation 
   tighten boundary (purge+embargo), add within-train CPCV sign-stability diagnostic
 - [[questions/research-rejected-factor-forensics]] — 2026-07-07 research-only: per-factor
   regime-vs-construction-vs-noise diagnosis of tonight's 5 headline rejections
+- [[questions/research-data-remediation]] — 2026-07-07 research-only: source/coverage/
+  price/effort matrix for the four data gaps (crypto pre-2021, delisted equities,
+  nowcast vintages, ETF adjustment normalization)
 
 ## Concepts
 - [[concepts/ewma-shrinkage-combination]]
@@ -30,6 +33,7 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[sources/oos-decay-sign-flip-base-rates]] — McLean-Pontiff + Chen-Zimmermann decay/sign base rates
 - [[sources/trend-cot-value-2024-2026-regime]] — SG Trend/CTA + value regime record for the OOS window
 - [[sources/canonical-factor-constructions]] — AMP/MOP/KRT/industry-value canonical constructions vs ours
+- [[sources/etf-adjustment-methodology]] — why cross-vendor adjusted closes disagree; the normalization fix
 - [[sources/practitioner-mechanism-scan-2026-07]] — 8 mechanism-backed niche ideas
   (prediction-market microstructure primary), pre-registered predictions, promotion
   protocol; top 2 need a Kalshi resolved-market backfill first
@@ -60,14 +64,19 @@ findings here, and (when the evidence survives) lands a verified implementation 
 16. Kalshi resolved-market historical backfill (free API: bucket prices + settlements,
     2023+) — unblocks the top-2 practitioner-scan mechanisms ([[sources/practitioner-mechanism-scan-2026-07]]:
     longshot-fade calibration test + nowcast-drift regression), both with
-    pre-registered falsifiable predictions
+    pre-registered falsifiable predictions. Nowcast-vintage access options researched
+    in [[questions/research-data-remediation]] (c): start forward archiver now, email
+    Cleveland Fed for the EC-2023-06 vintage dataset for backfill
 17. Turn-of-year tax-loss-rebound diagnostic (bottom-decile prior-year losers, last
     3 Dec days -> first 5 Jan days, incrementality vs plain reversal) — testable on
     the existing lake, no new ingest; n_trials-guarded if promoted
 18. Cross-check follow-ups from first live run: per-name verification of the 66
     quarantined instruments (ticker-reuse class -> blocklist extensions; FX-ETF
     distribution-adjustment class -> vendor-methodology doc); wire quarantine list
-    consumption into backtest universe filtering
+    consumption into backtest universe filtering. Distribution-adjustment class now
+    diagnosed in [[sources/etf-adjustment-methodology]]: cross-check UNADJUSTED
+    closes + event tables, not vendor adjusted closes — most of that class should
+    un-quarantine
 19. Events-sleeve maker-side execution: rest limit orders at model fair-value bands
     (extends edge-C1 passive execution to Kalshi) instead of crossing. Whelan caveat:
     makers ALSO lose ~10% on average — the maker seat needs the calibration model
