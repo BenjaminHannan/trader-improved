@@ -1,5 +1,40 @@
 # autoresearch log
 
+## [2026-07-10] autoresearch | Kalshi mechanism diagnostics (iteration 5) — both negatives, machine migration
+
+New machine (benja): lake was EMPTY (the 2026-07-07 lake lives on the PC machine).
+Rebuilt core lake here: universe 874 equities, prices equity 1.62M rows + all ETF
+sleeves + crypto 54.6k, french/fx/cot; macro via keyless fredgraph fallback
+(conservative obs+1d stamps — owner: set FRED_API_KEY, re-pull). ~213 delisted
+tickers skipped (the known Norgate gap). Also fixed 4 stale-fixture test failures
+vs the post-gate registry (same class as 33e0126's).
+
+- Rounds: 1 research (endpoint archaeology + full-text Whelan read) + build + 2
+  pre-registered experiments. Pre-registrations COMMITTED before data contact.
+- Backfill landed (backlog #16 done): 71,180 rows, 12 US macro series, 2021-07 →
+  2026-07, via external-api.kalshi.com /historical/* (legacy events aliased under
+  KX series names; trades-not-candles for archived markets; expiration_value = the
+  actual print). Live snapshot loader was doubly broken vendor-side (404 path +
+  cents→dollar-string schema) — fixed with canned tests.
+- Cleveland MONTHLY nowcast vintages ingested (nowcast_month.xlsx, target-month-
+  tagged series ids, 2013-07→now; macro rows 12,936 → 33,198).
+- **Diagnostic #1 (longshot fade): FAIL as a trade.** P1 replicates hugely (≤10c
+  YES: −76.9% post-fee, t=−9.7) but P2 (the tradeable NO-side fade) = −0.9%,
+  t=−0.4: the fee + calibration noise eat the complement's ~1-2% edge. Macro-only
+  MZ slope insignificant (ψ=0.018, t=1.3) — matches the paper's own noisy
+  Economics column. No promotion; maker-seat variant stays gated on #19.
+- **Diagnostic #2 (nowcast drift): INCONCLUSIVE → dead.** β=+0.0091, t=1.60. The
+  reason: the market's terminal MAE (0.066) BEATS the nowcast's (0.091) — market
+  leads nowcast (Jia et al. direction); nothing to fade. Anti-edge noted.
+- Trial accounting: n_trials unchanged at 24 (research diagnostics; registry
+  untouched). Synthesis: [[questions/research-kalshi-mechanism-diagnostics]].
+- Pages: [[sources/kalshi-historical-api]], [[sources/burgi-deng-whelan-makers-takers]],
+  synthesis above. Backlog: #16 closed; #20 added (live longshot_bias category
+  audit); #21 added (events calibration curve from resolved outcomes — zero new data).
+- Delegated builds in flight (Sonnet agents, per owner's orchestrator directive):
+  Coin Metrics pre-2021 crypto rates loader, risk-model validation harness
+  (iteration-4 spec), TOY rebound diagnostic (#17, pre-registered by orchestrator).
+
 ## [2026-07-07] Gate v2 + re-specification round — n_trials 20 -> 24
 
 Step-0 zero-trial diagnostics steered the round: momentum aggregation artifact

@@ -109,7 +109,7 @@ def build_event_panel(bars: pd.DataFrame, st: pd.DataFrame) -> pd.DataFrame:
         meta = st_idx[st_idx["event_key"] == event]
         if meta.empty:
             continue
-        close = pd.to_datetime(meta["close_time"].iloc[0], utc=True)
+        close = pd.to_datetime(meta["close_time"].iloc[0], utc=True, format="ISO8601")
         close_date = close.tz_localize(None).normalize()
         try:
             print_val = float(meta["expiration_value"].iloc[0])

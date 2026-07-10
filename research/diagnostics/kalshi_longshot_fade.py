@@ -69,7 +69,8 @@ def load_panel() -> tuple[pd.DataFrame, pd.DataFrame]:
 def build_entries(bars: pd.DataFrame, st: pd.DataFrame) -> pd.DataFrame:
     """One row per market: T-1 entry price, outcome, metadata."""
     st = st.set_index("instrument_id")
-    close_date = pd.to_datetime(st["close_time"], utc=True).dt.tz_localize(None).dt.normalize()
+    close_date = (pd.to_datetime(st["close_time"], utc=True, format="ISO8601")
+                  .dt.tz_localize(None).dt.normalize())
     life_vol = bars.groupby("instrument_id")["volume"].sum()
 
     rows = []

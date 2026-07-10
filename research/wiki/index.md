@@ -25,6 +25,9 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[questions/research-risk-model-validation]] — 2026-07-07 research-only (iteration 4):
   bias-stat + MVP-horse-race scoring harness spec; QIS not for our shapes; NW horizon
   check; per-sleeve-vs-global and exposure-set questions reduced to harness cells
+- [[questions/research-kalshi-mechanism-diagnostics]] — 2026-07-10 (iteration 5): both
+  pre-registered Kalshi tests negative (longshot fade fee-eaten; market beats nowcast);
+  backfill + monthly nowcast vintages permanent; zero trials burned
 
 ## Concepts
 - [[concepts/ewma-shrinkage-combination]]
@@ -42,6 +45,10 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[sources/practitioner-mechanism-scan-2026-07]] — 8 mechanism-backed niche ideas
   (prediction-market microstructure primary), pre-registered predictions, promotion
   protocol; top 2 need a Kalshi resolved-market backfill first
+- [[sources/kalshi-historical-api]] — endpoint archaeology for the settled-market
+  archive (external-api host, KX aliasing, trades-not-candles, fee formula)
+- [[sources/burgi-deng-whelan-makers-takers]] — the longshot-fade anchor paper, exact
+  MZ slopes by year/category recorded pre-replication
 
 ## Backlog (prioritized frontier)
 1. ~~Covariance shrinkage: LW analytic intensity + EWMA T_eff~~ (iteration 1)
@@ -66,12 +73,9 @@ findings here, and (when the evidence survives) lands a verified implementation 
     it yet; thread overrides_table through to the CostModel call)
 15. Accumulate per-run shortfall into the `shortfall_log` reference table from
     daily_run --live fills (feeds --calibrate-tca)
-16. Kalshi resolved-market historical backfill (free API: bucket prices + settlements,
-    2023+) — unblocks the top-2 practitioner-scan mechanisms ([[sources/practitioner-mechanism-scan-2026-07]]:
-    longshot-fade calibration test + nowcast-drift regression), both with
-    pre-registered falsifiable predictions. Nowcast-vintage access options researched
-    in [[questions/research-data-remediation]] (c): start forward archiver now, email
-    Cleveland Fed for the EC-2023-06 vintage dataset for backfill
+16. ~~Kalshi resolved-market historical backfill~~ (iteration 5, 2026-07-10: done —
+    `--dataset kalshi_hist`, 71k rows; both pre-registered mechanism tests ran and
+    FAILED, see [[questions/research-kalshi-mechanism-diagnostics]])
 17. Turn-of-year tax-loss-rebound diagnostic (bottom-decile prior-year losers, last
     3 Dec days -> first 5 Jan days, incrementality vs plain reversal) — testable on
     the existing lake, no new ingest; n_trials-guarded if promoted
@@ -85,7 +89,15 @@ findings here, and (when the evidence survives) lands a verified implementation 
 19. Events-sleeve maker-side execution: rest limit orders at model fair-value bands
     (extends edge-C1 passive execution to Kalshi) instead of crossing. Whelan caveat:
     makers ALSO lose ~10% on average — the maker seat needs the calibration model
-    (backlog #16) as the signal; seat alone is not an edge. Mandatory release-window
-    pull rule (cancel resting quotes before scheduled prints — otherwise we supply
-    the under-reaction edge to faster traders) + per-ladder inventory caps. Execution
-    layer, not signal: does not touch n_trials
+    (now buildable, see #21) as the signal; seat alone is not an edge. Mandatory
+    release-window pull rule (cancel resting quotes before scheduled prints —
+    otherwise we supply the under-reaction edge to faster traders) + per-ladder
+    inventory caps. Execution layer, not signal: does not touch n_trials
+20. Live `longshot_bias` events signal: category audit (zero-trial). Iteration 5
+    showed the macro-ladder slice of the taker-side fade nets ~0 post-fee; measure
+    the live signal's category mix from `event_markets` snapshots and decide whether
+    a category condition is warranted (any signal change = documented re-spec)
+21. Events-sleeve calibration curve from RESOLVED outcomes (score → realized
+    probability), buildable now from `event_markets_hist` settlements — closes the
+    iteration-25 documented approximation ("calibration is the first real-data
+    improvement"); also the prerequisite signal model for #19's maker seat
