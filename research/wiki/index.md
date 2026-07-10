@@ -76,9 +76,9 @@ findings here, and (when the evidence survives) lands a verified implementation 
 16. ~~Kalshi resolved-market historical backfill~~ (iteration 5, 2026-07-10: done —
     `--dataset kalshi_hist`, 71k rows; both pre-registered mechanism tests ran and
     FAILED, see [[questions/research-kalshi-mechanism-diagnostics]])
-17. Turn-of-year tax-loss-rebound diagnostic (bottom-decile prior-year losers, last
-    3 Dec days -> first 5 Jan days, incrementality vs plain reversal) — testable on
-    the existing lake, no new ingest; n_trials-guarded if promoted
+17. ~~Turn-of-year tax-loss-rebound diagnostic~~ (iteration 5, 2026-07-10: ran
+    pre-registered — FAIL on the placebo-concentration gate despite +249bp t=2.26
+    spread; near-miss details + re-spec observations in the 2026-07-10 log entry)
 18. Cross-check follow-ups from first live run: per-name verification of the 66
     quarantined instruments (ticker-reuse class -> blocklist extensions; FX-ETF
     distribution-adjustment class -> vendor-methodology doc); wire quarantine list

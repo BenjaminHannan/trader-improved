@@ -31,9 +31,22 @@ vs the post-gate registry (same class as 33e0126's).
 - Pages: [[sources/kalshi-historical-api]], [[sources/burgi-deng-whelan-makers-takers]],
   synthesis above. Backlog: #16 closed; #20 added (live longshot_bias category
   audit); #21 added (events calibration curve from resolved outcomes — zero new data).
+- **Diagnostic #3 (TOY rebound, backlog #17): FAIL — a near-miss worth recording.**
+  T1 PASS: mean 8-day loser-minus-winner spread **+248.6bp, t=2.26** across 10
+  year-events; T3 PASS (survives 20bp costs easily). T2 FAIL: pooled TOY loser
+  coefficient b1=−0.0234 (t=−2.07) is negative and significant but lands at ~the
+  12-15th percentile of the 400-window placebo b1 distribution — above the
+  pre-registered 10th-pct bar (−0.0282). Read: large-cap year-end loser rebound is
+  economically real but not sharply separable from generic Oct-Mar reversal under
+  our own rule. No promotion; verdict stands. Two observations FOR ANY FUTURE
+  RE-SPEC (new pre-registration required): (a) placebo windows drawn from Oct-Mar
+  can themselves sit adjacent to the year turn, contaminating the placebo left
+  tail toward the TOY effect; (b) per-year C1 percentiles were upper-tail in 8/10
+  years (median ~90th). Artifact: diagnostics/toy_rebound.json.
 - Delegated builds in flight (Sonnet agents, per owner's orchestrator directive):
   Coin Metrics pre-2021 crypto rates loader, risk-model validation harness
-  (iteration-4 spec), TOY rebound diagnostic (#17, pre-registered by orchestrator).
+  (iteration-4 spec). TOY diagnostic (above) was also a delegated build,
+  pre-registered by the orchestrator.
 
 ## [2026-07-07] Gate v2 + re-specification round — n_trials 20 -> 24
 
