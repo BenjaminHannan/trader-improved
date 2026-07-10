@@ -273,3 +273,34 @@ def tmp_lake(tmp_path) -> Lake:
 def sleeve_of(synthetic_instruments):
     """instrument_id -> sleeve lookup as a pd.Series."""
     return pd.Series(synthetic_instruments)
+
+
+@pytest.fixture()
+def pregate_engine_registry(tmp_path, monkeypatch):
+    """Pin the engine's factor selection to an all-candidate, no-gate-records registry.
+
+    Same rationale as test_backtest_engine._pregate_registry: tests that exercise
+    mechanics against synthetic bundles were authored pre-gate; the live registry's
+    accepted set (real verdicts since 2026-07-07) selects factors the synthetic
+    bundles cannot feed, so no sleeve produces weights. Hermetic input, identical
+    mechanics. Function-scoped so any test file can opt in.
+    """
+    import yaml
+
+    import production.backtest.engine as _eng
+    from production.alpha.registry import FactorRegistry
+    from production.core.config import CONFIG_DIR
+
+    cfg = yaml.safe_load(open(CONFIG_DIR / "factors.yaml"))
+    for spec in cfg["factors"].values():
+        spec["status"] = "candidate"
+        spec["gate_stats"] = {}
+    path = tmp_path / "factors.yaml"
+    yaml.safe_dump(cfg, open(path, "w"), sort_keys=False)
+
+    class _PinnedRegistry(FactorRegistry):  # a real class: engine isinstance()s it
+        def __init__(self, cfg_path=None):
+            super().__init__(cfg_path if cfg_path is not None else path)
+
+    monkeypatch.setattr(_eng, "FactorRegistry", _PinnedRegistry)
+    return path

@@ -273,6 +273,10 @@ def test_var_trials_empirical_path(result, tmp_path):
     dst = tmp_path / "factors.yaml"
     shutil.copy(src, dst)
     reg = FactorRegistry(dst)
+    # The live registry carries real gate records since 2026-07-07; scrub them so the
+    # test controls exactly which val_sharpes exist.
+    for spec in reg.cfg["factors"].values():
+        spec["gate_stats"] = {}
     names = list(reg.cfg["factors"])[:3]
     for nm, vs in zip(names, (0.6, 1.1, -0.4)):
         reg.cfg["factors"][nm]["gate_stats"] = {"val_sharpe": vs}
@@ -285,9 +289,16 @@ def test_var_trials_empirical_path(result, tmp_path):
     assert rep["headline"]["var_trials"] == pytest.approx(expected)
 
 
-def test_var_trials_proxy_path(result):
+def test_var_trials_proxy_path(result, tmp_path):
     """No recorded val_sharpes (empty gate_stats) -> the estimator-variance proxy path."""
-    reg = FactorRegistry()  # stock factors.yaml: gate_stats all empty
+    src = REPO_ROOT / "configs" / "factors.yaml"
+    dst = tmp_path / "factors.yaml"
+    shutil.copy(src, dst)
+    reg = FactorRegistry(dst)
+    # Live registry has real gate records since 2026-07-07 — scrub to the pre-gate shape
+    # this test was authored against (no recorded val_sharpes anywhere).
+    for spec in reg.cfg["factors"].values():
+        spec["gate_stats"] = {}
     rep = build_report(result, backtest_config(), reg)
     src_str = rep["caveats"]["var_trials_source"]
     assert "proxy" in src_str

@@ -413,8 +413,10 @@ def test_overrides_lake_roundtrip(tmp_path):
 
 
 # ------------------------------------------------------------------ daily_run
-def test_daily_run_dry_run_smoke(monkeypatch, capsys):
+def test_daily_run_dry_run_smoke(monkeypatch, capsys, pregate_engine_registry):
     # No network, no keys: dry-run must produce orders and never touch requests.
+    # pregate_engine_registry: the synthetic warmup bundle cannot feed the live
+    # registry's accepted-only factor set (fx carry + crypto basis) — pin all-candidate.
     monkeypatch.setattr(ap.requests, "request", _no_http)
     from scripts.daily_run import main
 
@@ -424,7 +426,8 @@ def test_daily_run_dry_run_smoke(monkeypatch, capsys):
     assert "DRY-RUN" in out
 
 
-def test_daily_run_dry_run_limit_prints_limit_column(monkeypatch, capsys):
+def test_daily_run_dry_run_limit_prints_limit_column(monkeypatch, capsys,
+                                                     pregate_engine_registry):
     # --order-type limit dry-run: prints the limit_price column, still zero HTTP.
     monkeypatch.setattr(ap.requests, "request", _no_http)
     from scripts.daily_run import main
