@@ -306,3 +306,39 @@ def test_cleveland_nowcast_parses_quarter_nodes_with_year_inference():
     assert by_date[pd.Timestamp("2013-12-30")] == 1.51
     assert by_date[pd.Timestamp("2014-01-02")] == 1.62
     assert len(df) == 2
+
+
+def test_cleveland_nowcast_monthly_nodes_tag_target_month():
+    """Monthly file (probe 2026-07-10): subcaption 'YYYY-M', one node per TARGET
+    month, series id carries the target-month tag so simultaneous vintages for two
+    months never collide; a January label on a December node is the NEXT year."""
+    from production.data.loaders.stage2.cleveland_nowcast import ClevelandNowcastLoader
+
+    raw = {
+        "quarter": [],
+        "month": [
+            {"chart": {"subcaption": "2025-12"},
+             "categories": [{"category": [{"label": "12/30"}, {"label": "01/12"}]}],
+             "dataset": [
+                 {"seriesname": "CPI Inflation",
+                  "data": [{"value": "0.31"}, {"value": "0.28"}]},
+                 {"seriesname": "Actual CPI Inflation",
+                  "data": [{"value": ""}, {"value": "0.30"}]},
+             ]},
+            {"chart": {"subcaption": "2026-1"},
+             "categories": [{"category": [{"label": "12/30"}]}],
+             "dataset": [
+                 {"seriesname": "Core PCE Inflation", "data": [{"value": "0.22"}]},
+             ]},
+        ],
+    }
+    df = ClevelandNowcastLoader().transform(raw)
+    assert set(df["series_id"]) == {"CLEV_NOWCAST_CPI_MOM:2025-12",
+                                    "CLEV_NOWCAST_COREPCE_MOM:2026-01"}
+    dec = df[df["series_id"] == "CLEV_NOWCAST_CPI_MOM:2025-12"].set_index("obs_date")
+    # 01/12 on the 2025-12 node -> 2026-01-12 (the pre-release tail of December)
+    assert dec.loc[pd.Timestamp("2026-01-12"), "value"] == 0.28
+    assert dec.loc[pd.Timestamp("2025-12-30"), "value"] == 0.31
+    # the 2026-1 node's 12/30 label stays in 2025 (ramp before the target month)
+    jan = df[df["series_id"] == "CLEV_NOWCAST_COREPCE_MOM:2026-01"]
+    assert list(jan["obs_date"]) == [pd.Timestamp("2025-12-30")]
