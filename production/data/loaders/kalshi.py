@@ -8,14 +8,18 @@ for market metadata or historical candlesticks:
         params: ``limit`` (<=1000), ``status`` (active/…​), ``cursor``
         -> {"markets": [ {ticker, event_ticker, title, close_time, status, ...}, ... ],
             "cursor": "<next|empty>"}
-  * daily candlesticks for one market:
-        GET https://api.elections.kalshi.com/trade-api/v2/markets/{ticker}/candlesticks
+  * daily candlesticks for one market (the series-scoped path — the old
+    ``/markets/{ticker}/candlesticks`` form 404s vendor-side since ~2026-07;
+    the series ticker is the event ticker's prefix before the first ``-``):
+        GET https://api.elections.kalshi.com/trade-api/v2/series/{series}/markets/{ticker}/candlesticks
         params: ``start_ts``, ``end_ts`` (epoch seconds), ``period_interval`` (1440=day)
-        -> {"candlesticks": [ {end_period_ts, price:{open,high,low,close}, volume,
-                               open_interest}, ... ]}
+        -> {"candlesticks": [ {end_period_ts, price:{...}, volume_fp,
+                               open_interest_fp}, ... ]}
 
-Prices are quoted in **cents** (an integer 0..100 = probability * 100), so YES price is
-normalized to a [0,1] probability by dividing by 100. A prediction-market snapshot has
+Prices historically came as **cents** (an integer 0..100 = probability * 100) and are
+normalized by dividing by 100; the current API generation instead quotes dollar
+strings (``price.close_dollars = "0.0300"``), already probabilities — both shapes are
+parsed. A prediction-market snapshot has
 no natural observation lag — the candle values are current as of the pull — so
 ``available_from = ingested_at`` (the ``ingest_time`` rule).
 
@@ -89,9 +93,11 @@ class KalshiLoader(BaseLoader):
             ticker = m.get("ticker")
             if not ticker:
                 continue
+            # Series-scoped candlestick path (the unscoped one 404s vendor-side).
+            series = str(m.get("event_ticker") or ticker).split("-", 1)[0]
             try:
                 cresp = requests.get(
-                    f"{KALSHI_BASE}/markets/{ticker}/candlesticks",
+                    f"{KALSHI_BASE}/series/{series}/markets/{ticker}/candlesticks",
                     params={"start_ts": start_ts, "end_ts": end_ts,
                             "period_interval": 1440},
                     timeout=30)
@@ -124,15 +130,20 @@ class KalshiLoader(BaseLoader):
                     obs_date = pd.Timestamp(int(ts), unit="s", tz="UTC").tz_localize(None).normalize()
                     price = candle.get("price") or {}
                     close_cents = price.get("close")
-                    if close_cents is None:
+                    if close_cents is not None:
+                        yes_price = float(close_cents) / 100.0  # cents -> probability
+                    elif price.get("close_dollars") is not None:
+                        yes_price = float(price["close_dollars"])  # already probability
+                    else:
                         continue
-                    yes_price = float(close_cents) / 100.0  # cents -> probability
                     rows.append({
                         "obs_date": obs_date,
                         "instrument_id": instrument_id,
                         "yes_price": yes_price,
-                        "volume": float(candle.get("volume") or 0.0),
-                        "open_interest": float(candle.get("open_interest") or 0.0),
+                        "volume": float(candle.get("volume")
+                                        or candle.get("volume_fp") or 0.0),
+                        "open_interest": float(candle.get("open_interest")
+                                               or candle.get("open_interest_fp") or 0.0),
                         "close_time": close_time,
                         "status": status,
                         "event_key": event_key,

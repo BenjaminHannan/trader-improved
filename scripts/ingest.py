@@ -198,6 +198,12 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
         # Daily-scheduled archiver: each pull re-captures the as-published vintage
         # history and today's value (see the loader docstring's vintage caveat).
         return ClevelandNowcastLoader(lake, instruments)
+    if dataset == "kalshi_hist":
+        from production.data.loaders.kalshi_history import KalshiHistoryLoader
+
+        # One-time settled-market backfill (archive host + live tail), feeding the
+        # two pre-registered event-market diagnostics. Re-runs are incremental.
+        return KalshiHistoryLoader(lake, instruments)
     if dataset == "crypto_meta":
         from production.data.loaders.coingecko import CoinGeckoLoader
 
@@ -212,8 +218,8 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
 
 
 DATASETS = ["prices", "stooq", "tiingo", "alpaca", "funding", "basis", "fx", "macro",
-            "french", "cot", "fundamentals", "nowcast", "crypto_meta", "defi_tvl",
-            "universe", "all"]
+            "french", "cot", "fundamentals", "nowcast", "kalshi_hist", "crypto_meta",
+            "defi_tvl", "universe", "all"]
 
 # Curated `source` values that identify the two independent price feeds we cross-check.
 _PRIMARY_SOURCES = ("yfinance",)

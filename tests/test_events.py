@@ -32,7 +32,9 @@ UTC = "UTC"
 def _kalshi_payload():
     """Minimal Kalshi shape: /markets list + per-ticker /candlesticks.
 
-    Two markets on one event (event_ticker "EVT-A"); prices in CENTS (10 -> 0.10).
+    Two markets on one event (event_ticker "EVT-A"). T1 uses the CURRENT API
+    generation (dollar-string prices + ``*_fp`` sizes); T2 the legacy CENTS shape
+    (integer 10 -> 0.10) — the loader must parse both.
     """
     markets = [
         {"ticker": "T1", "event_ticker": "EVT-A", "title": "Will A resolve YES?",
@@ -42,8 +44,8 @@ def _kalshi_payload():
     ]
     ts = int(pd.Timestamp("2026-07-01", tz=UTC).timestamp())
     candles = {
-        "T1": [{"end_period_ts": ts, "price": {"close": 10}, "volume": 5000,
-                "open_interest": 2000}],
+        "T1": [{"end_period_ts": ts, "price": {"close_dollars": "0.1000"},
+                "volume_fp": "5000.00", "open_interest_fp": "2000.00"}],
         "T2": [{"end_period_ts": ts, "price": {"close": 90}, "volume": 4000,
                 "open_interest": 1500}],
     }
