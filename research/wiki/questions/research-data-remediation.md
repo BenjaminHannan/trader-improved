@@ -25,6 +25,21 @@ pre-2014 BTC depth, keep Coinbase as the post-2021 tradable-venue series. The
 perp-basis start (2021-07) is a market-structure fact, not a vendor gap — perps
 barely existed cross-sectionally before ~2020; no remediation exists.
 
+> **CORRECTION (2026-07-10, live-probed during implementation)**: the community
+> REST API (`community-api.coinmetrics.io/v4`) now serves only a **~7-day
+> window** and silently returns `{"data": []}` when `start_time`/`end_time` are
+> passed — it cannot backfill anything. The GitHub CSVs
+> (`raw.githubusercontent.com/coinmetrics/data/master/csv/{asset}.csv`) are the
+> free full-history route (per-asset, gzip, updated with days-to-weeks lag —
+> fine for backfill, not a live feed). Also verified in-file:
+> `ReferenceRate(D+1) == PriceUSD(D)` — ReferenceRate rows stamp the 00:00 UTC
+> day START; use `PriceUSD(time=D)` for day-D-close alignment with the ccxt
+> convention. Implemented as `--dataset cm_rates`, **backfill-only by
+> construction** (emits strictly before each instrument's existing ccxt
+> coverage): the "stamp availability earlier so coinbase stays primary" idea in
+> the OPUS queue is impossible to do honestly under `asof_panel`'s
+> latest-visible-wins tie-break, so structural non-overlap replaces it.
+
 ## (b) Delisted US equity dailies (184/874 PIT names missing)
 
 | Source | Coverage | Price | Integration effort | Notes |
