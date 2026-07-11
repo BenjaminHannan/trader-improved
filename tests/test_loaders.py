@@ -1002,6 +1002,53 @@ def test_tiingo_requires_api_key_and_guards_quota(monkeypatch):
     assert any("rate-limited" in w for w in loader.warnings)
 
 
+def test_tiingo_fetches_uncovered_symbols_first(tmp_lake, monkeypatch):
+    """Frontier ordering: symbols already carrying tiingo-sourced lake rows are
+    deprioritized, so the ~50-request hourly quota EXTENDS coverage each run
+    instead of re-fetching the same head of the list forever (found 2026-07-11:
+    two successive runs pulled the same ~54 names)."""
+    import sys
+    import types
+
+    from production.data.loaders.tiingo_prices import TiingoPricesLoader
+
+    # AAA already covered by a prior tiingo pull
+    seed = pd.DataFrame({
+        "obs_date": [pd.Timestamp("2016-01-04")],
+        "instrument_id": ["EQ:AAA:2000-01-03"],
+        "close": [10.0], "volume": [1.0], "dollar_volume": [10.0],
+        "available_from": [pd.Timestamp("2016-01-04 21:15", tz="UTC")],
+        "source": ["tiingo:prices"],
+        "ingested_at": [pd.Timestamp("2026-01-01", tz="UTC")],
+    })
+    tmp_lake.write_curated(seed, "prices", "equity")
+
+    calls = []
+
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(url)
+        return _Resp()
+
+    mod = types.ModuleType("requests")
+    mod.get = fake_get
+    monkeypatch.setitem(sys.modules, "requests", mod)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    loader = TiingoPricesLoader(tmp_lake, instruments=_instruments(),
+                                symbols=["AAA", "BBB"], api_key="k", pause_s=0)
+    loader.fetch("2016-01-01", "2016-02-01")
+    # BBB (uncovered) must be requested before AAA (covered)
+    assert len(calls) == 2
+    assert "BBB" in calls[0] and "AAA" in calls[1]
+
+
 # ===================================================== (14) alpaca secondary feed
 def test_alpaca_bars_to_long_and_pagination(monkeypatch):
     """Canned payload of the REAL alpaca shape (live probe 2026-07-07): {bars:

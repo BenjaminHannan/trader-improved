@@ -62,7 +62,13 @@ class TiingoPricesLoader(BaseLoader):
                 "tiingo: TIINGO_API_KEY is not set. Export it in the environment "
                 "(never commit it) — free keys at https://www.tiingo.com/.")
 
-        todo = self.symbols[: self.max_symbols] if self.max_symbols else self.symbols
+        # Uncovered symbols first: the hourly free-tier cap 429s after ~50 requests,
+        # and a FIXED list order would re-fetch the same head every run — coverage
+        # would never extend (found 2026-07-11: two successive runs fetched the same
+        # ~54 names). Deprioritizing symbols that already have tiingo rows in the
+        # lake makes each quota window push the frontier instead.
+        ordered = self._frontier_order(self.symbols)
+        todo = ordered[: self.max_symbols] if self.max_symbols else ordered
         if self.max_symbols and len(self.symbols) > self.max_symbols:
             self.warnings.append(
                 f"tiingo: symbol list truncated to max_symbols={self.max_symbols} "
@@ -93,6 +99,29 @@ class TiingoPricesLoader(BaseLoader):
             if df is not None and not df.empty:
                 out[sym] = df
         return out
+
+    def _frontier_order(self, symbols: list[str]) -> list[str]:
+        """Stable-sort ``symbols`` so those WITHOUT existing tiingo-sourced lake rows
+        come first (see fetch: the hourly quota then extends coverage every run).
+        Stability preserves the ETF-sleeves-before-equities intent within each group.
+        Any lake/resolution hiccup degrades to the original order — never raises."""
+        try:
+            cur = self.lake.read_curated("prices")
+            covered_iids = set(
+                cur.loc[cur["source"].astype(str).str.contains("tiingo"),
+                        "instrument_id"].unique())
+        except Exception:
+            return list(symbols)
+        if not covered_iids:
+            return list(symbols)
+
+        def _is_covered(sym: str) -> bool:
+            try:
+                return self.resolve(sym, "yfinance") in covered_iids
+            except Exception:
+                return False
+
+        return sorted(symbols, key=_is_covered)
 
     @staticmethod
     def _to_ohlcv(rows) -> pd.DataFrame | None:
