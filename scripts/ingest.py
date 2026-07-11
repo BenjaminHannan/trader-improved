@@ -229,6 +229,15 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
         # scan idea #6). Thin series are dropped by the loader's own cost control
         # (min_settled_markets) before any trade fetching.
         return KalshiHistoryLoader(lake, instruments, category="Politics")
+    if dataset == "events":
+        from production.data.loaders.kalshi import KalshiLoader
+
+        # LIVE prediction-market snapshots (active markets, ingest-time
+        # availability) — the events sleeve's trading input. Run daily; history
+        # accumulates from the first pull. Polymarket has its own loader but the
+        # sleeve's primary venue (and the only category-stamped one) is Kalshi;
+        # add polymarket here if/when its signals need fresh snapshots too.
+        return KalshiLoader(lake, instruments)
     if dataset == "crypto_meta":
         from production.data.loaders.coingecko import CoinGeckoLoader
 
@@ -244,8 +253,8 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
 
 DATASETS = ["prices", "stooq", "tiingo", "alpaca", "cm_rates", "binance_hist", "funding",
             "basis", "fx", "macro", "french", "cot", "fundamentals", "nowcast",
-            "kalshi_hist", "kalshi_hist_politics", "crypto_meta", "defi_tvl", "universe",
-            "all"]
+            "kalshi_hist", "kalshi_hist_politics", "events", "crypto_meta", "defi_tvl",
+            "universe", "all"]
 
 # Curated `source` values that identify the two independent price feeds we cross-check.
 _PRIMARY_SOURCES = ("yfinance",)
