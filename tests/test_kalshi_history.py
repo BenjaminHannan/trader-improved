@@ -6,14 +6,22 @@ float-string sizes, taker sides — documented in the loader). We pin: daily-bar
 aggregation arithmetic (last/VWAP/volume/taker split), the settlement-row PIT
 contract (outcome knowable only at settlement_ts), the two-row-type schema, the
 [0,1] range audit, and the end-to-end curated write.
+
+A second group of tests below exercises ``fetch`` itself (not monkeypatched) against
+a fake ``requests`` module, HTTP-level, to pin the category-enumeration cost control
+and the trade-truncation direction — both probed live against the real API (module
+docstring) and reproduced here with canned pages so the tests never touch the network.
 """
 from __future__ import annotations
+
+import sys
+import types
 
 import pandas as pd
 import pytest
 
 from production.data.audit import audit
-from production.data.loaders.kalshi_history import KalshiHistoryLoader
+from production.data.loaders.kalshi_history import HIST_BASE, LIVE_BASE, KalshiHistoryLoader
 
 UTC = "UTC"
 
@@ -130,3 +138,166 @@ def test_bad_result_and_bad_trades_degrade_not_raise():
         long[long["row_type"] == "settlement"]["instrument_id"])
     assert any("unmapped result" in w for w in loader.warnings)
     assert long["yes_price"].between(0, 1).all()
+
+
+# ======================================================= fetch()-level, no network
+class _FakeResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def _install_fake_requests(monkeypatch, responder):
+    """Replace ``requests`` (imported inside ``fetch``) with a fake whose
+    ``Session().get`` routes through ``responder(url, params) -> dict``."""
+    calls: list[tuple[str, dict]] = []
+
+    class _FakeSession:
+        def get(self, url, params=None, timeout=None):
+            p = dict(params or {})
+            calls.append((url, p))
+            return _FakeResp(responder(url, p))
+
+    mod = types.ModuleType("requests")
+    mod.Session = _FakeSession
+    monkeypatch.setitem(sys.modules, "requests", mod)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    return calls
+
+
+def _market(ticker, event_ticker, close_time, result="yes"):
+    return {"ticker": ticker, "event_ticker": event_ticker, "title": ticker,
+            "result": result, "settlement_ts": close_time, "close_time": close_time}
+
+
+def test_category_enumeration_skips_thin_series_with_summary_warning(monkeypatch):
+    """Category mode enumerates via GET {LIVE_BASE}/series?category=... (probed live:
+    a single page, no ``cursor`` key at all), then drops any series whose settled
+    market count is below ``min_settled_markets`` BEFORE fetching any trades."""
+    series_listing = {"series": [       # no "cursor" key, matching the live probe
+        {"ticker": "KXTHIN1", "category": "Politics"},
+        {"ticker": "KXTHIN2", "category": "Politics"},
+        {"ticker": "KXBIG1", "category": "Politics"},
+    ]}
+    markets_by_series = {
+        "KXTHIN1": [_market("KXTHIN1-A", "KXTHIN1-EVT", "2024-01-05T00:00:00Z")],
+        "KXTHIN2": [],
+        "KXBIG1": [_market(f"KXBIG1-{i}", "KXBIG1-EVT", "2024-01-05T00:00:00Z")
+                  for i in range(3)],
+    }
+    trade_calls: list[str] = []
+
+    def responder(url, params):
+        if url == f"{LIVE_BASE}/series":
+            assert params.get("category") == "Politics"
+            return series_listing
+        if url == f"{HIST_BASE}/historical/markets":
+            return {"markets": markets_by_series.get(params.get("series_ticker"), []),
+                    "cursor": None}
+        if url == f"{LIVE_BASE}/markets":
+            return {"markets": [], "cursor": None}
+        if url in (f"{HIST_BASE}/historical/trades", f"{LIVE_BASE}/markets/trades"):
+            trade_calls.append(params.get("ticker"))
+            return {"trades": [], "cursor": None}
+        raise AssertionError(f"unexpected url {url}")
+
+    _install_fake_requests(monkeypatch, responder)
+
+    loader = KalshiHistoryLoader(category="Politics", min_settled_markets=2)
+    raw = loader.fetch("2024-01-01", "2024-01-31")
+
+    # KXTHIN1 (1 settled market) and KXTHIN2 (0) fall below min_settled_markets=2 and
+    # are skipped entirely; only KXBIG1 (3 settled markets) is fetched.
+    assert set(raw.keys()) == {"KXBIG1"}
+    assert len(raw["KXBIG1"]["markets"]) == 3
+    # the cost control: no trade fetch ever touched a skipped series' tickers
+    assert trade_calls and all(t.startswith("KXBIG1") for t in trade_calls)
+    assert any(
+        w == "category Politics: enumerated 3 series, fetched 1 with >= 2 settled markets"
+        for w in loader.warnings)
+
+
+def test_series_param_takes_precedence_over_category(monkeypatch):
+    """An explicit `series=` list must skip category enumeration entirely — no call
+    to the series-listing endpoint, no category summary warning."""
+    def responder(url, params):
+        if url == f"{LIVE_BASE}/series":
+            raise AssertionError("category enumeration must not run when series is explicit")
+        if url == f"{HIST_BASE}/historical/markets":
+            return {"markets": [_market("KXFOO-A", "KXFOO-EVT", "2024-01-05T00:00:00Z")],
+                    "cursor": None}
+        if url == f"{LIVE_BASE}/markets":
+            return {"markets": [], "cursor": None}
+        if url in (f"{HIST_BASE}/historical/trades", f"{LIVE_BASE}/markets/trades"):
+            return {"trades": [], "cursor": None}
+        raise AssertionError(f"unexpected url {url}")
+
+    calls = _install_fake_requests(monkeypatch, responder)
+    loader = KalshiHistoryLoader(series=["KXFOO"], category="Politics",
+                                 min_settled_markets=99)  # would skip everything if active
+    raw = loader.fetch("2024-01-01", "2024-01-31")
+
+    assert set(raw.keys()) == {"KXFOO"}
+    assert len(raw["KXFOO"]["markets"]) == 1     # not dropped by min_settled_markets
+    assert not any(url == f"{LIVE_BASE}/series" for url, _ in calls)
+    assert not any("category Politics" in w for w in loader.warnings)
+
+
+def test_trade_truncation_keeps_newest_survives_oldest_dropped(monkeypatch):
+    """Empirically (module docstring, live-probed on KXFEDDECISION-25SEP-C25),
+    /historical/trades pages NEWEST-first: page N+1's head continues just before
+    page N's tail. So capping at max_trades keeps the head of the sequence (the
+    trades nearest settlement) and the pages never fetched are the OLDEST ones.
+    Reuses the real probed timestamps for documentation fidelity.
+    """
+    ticker = "KXFOO-A"
+    market = _market(ticker, "KXFOO-EVT", "2025-09-17T17:55:00Z")
+    # 4 single-trade pages, strictly decreasing timestamps (newest first), exactly
+    # as observed live: 17:54:54 -> 16:23:22 -> 16:23:21 -> 14:27:28.
+    pages = {
+        None: {"trades": [{"created_time": "2025-09-17T17:54:54.988913Z",
+                           "yes_price_dollars": "0.9500", "count_fp": "500.00",
+                           "taker_side": "no"}], "cursor": "c1"},
+        "c1": {"trades": [{"created_time": "2025-09-17T16:23:22.504277Z",
+                           "yes_price_dollars": "0.9200", "count_fp": "300.00",
+                           "taker_side": "yes"}], "cursor": "c2"},
+        "c2": {"trades": [{"created_time": "2025-09-17T16:23:21.445338Z",
+                           "yes_price_dollars": "0.9100", "count_fp": "200.00",
+                           "taker_side": "yes"}], "cursor": "c3"},
+        "c3": {"trades": [{"created_time": "2025-09-17T14:27:28.176588Z",  # oldest
+                           "yes_price_dollars": "0.9000", "count_fp": "100.00",
+                           "taker_side": "no"}], "cursor": None},
+    }
+    trade_page_calls = {"n": 0}
+
+    def responder(url, params):
+        if url == f"{HIST_BASE}/historical/markets":
+            return {"markets": [market], "cursor": None}
+        if url == f"{LIVE_BASE}/markets":
+            return {"markets": [], "cursor": None}
+        if url == f"{HIST_BASE}/historical/trades":
+            trade_page_calls["n"] += 1
+            return pages[params.get("cursor")]
+        raise AssertionError(f"unexpected url {url}")
+
+    _install_fake_requests(monkeypatch, responder)
+
+    # page_limit=1, max_trade_pages_per_market=3 -> max_trades=3: stops once 3 of the
+    # 4 pages have been walked, i.e. exactly the oldest (4th) page is never fetched.
+    loader = KalshiHistoryLoader(series=["KXFOO"], page_limit=1,
+                                 max_trade_pages_per_market=3)
+    raw = loader.fetch("2025-09-01", "2025-09-30")
+
+    rows = raw["KXFOO"]["trades"][ticker]
+    assert trade_page_calls["n"] == 3        # oldest page never even requested
+    ts = sorted(pd.Timestamp(r["created_time"]) for r in rows)
+    assert len(rows) == 3
+    assert ts[0] == pd.Timestamp("2025-09-17T16:23:21.445338Z")   # oldest survivor
+    assert ts[-1] == pd.Timestamp("2025-09-17T17:54:54.988913Z")  # newest survivor
+    assert pd.Timestamp("2025-09-17T14:27:28.176588Z") not in set(ts)  # truncated
+    assert any("oldest trades truncated" in w for w in loader.warnings)

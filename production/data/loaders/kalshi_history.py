@@ -1,8 +1,11 @@
 """Kalshi resolved-market historical backfill (curated dataset ``event_markets_hist``).
 
-One-time (plus incremental top-up) backfill of SETTLED Kalshi markets for a fixed set
-of US macro-release series, feeding the two pre-registered research diagnostics from
-the 2026-07 practitioner mechanism scan (longshot-fade calibration; nowcast drift).
+One-time (plus incremental top-up) backfill of SETTLED Kalshi markets. By default this
+is a fixed set of US macro-release series, feeding the two pre-registered research
+diagnostics from the 2026-07 practitioner mechanism scan (longshot-fade calibration;
+nowcast drift). As of iteration 7 it can instead be pointed at a whole Kalshi
+``category`` (e.g. ``"Politics"``, ~2,083 series) to backfill the universe needed for
+the pre-registered political-underconfidence test (practitioner-scan idea #6).
 
 Endpoint archaeology (probed live 2026-07-10, no key needed for any of these):
 
@@ -31,6 +34,33 @@ Endpoint archaeology (probed live 2026-07-10, no key needed for any of these):
             params: series_ticker, status=settled, limit, cursor
         GET https://api.elections.kalshi.com/trade-api/v2/markets/trades
             params: ticker, limit, cursor
+
+  * series enumeration by category (used for the ``category=`` constructor arg, e.g.
+    the POLITICS backfill), probed live 2026-07-11::
+
+        GET https://api.elections.kalshi.com/trade-api/v2/series
+            params: category (e.g. "Politics", "Economics")
+
+    Returns the WHOLE category in a single response — Politics: 2,083 series, one
+    page; Economics: 607 series, one page. There is no ``cursor`` key in the body at
+    all (not even ``null``) and ``limit`` is accepted but appears to be ignored
+    server-side. ``_paginate``'s ``body.get("cursor")`` treats an absent key exactly
+    like an explicit null, so the shared paginator already terminates correctly after
+    one call — this is handled generically (both a present and an absent cursor work)
+    rather than assumed, in case the server starts paginating this endpoint later.
+
+Trade pagination direction (correctness-critical for the trade cap, probed live
+2026-07-11 on ``KXFEDDECISION-25SEP-C25``, a Fed-decision outcome market with 26,280
+total trades and ``close_time`` ``2025-09-17T17:55:00Z``): the FIRST record of the
+FIRST page was created at ``2025-09-17T17:54:54.988913Z`` — six seconds before close —
+and timestamps then decrease monotonically: page 1 runs 17:54:54 -> 16:23:22, page 2
+picks up at 16:23:21 and runs down to 14:27:28, and so on back to market open.
+``/historical/trades`` (and its live-host counterpart) page NEWEST-first, with no
+``order``/``sort`` param needed (none was probed for since the default is already the
+one we want). Consequently the existing ``_paginate`` truncation (``out[:max_items]``)
+already keeps the trades nearest settlement — exactly what the T-1 diagnostics need —
+and only ever drops the OLDEST tail on a hyper-liquid market that exceeds
+``max_trade_pages_per_market``; the cap-hit warning says so explicitly.
 
 PIT: two row types share the schema. ``row_type='bar'`` rows are daily trade
 aggregates whose ``knowable_at`` is the last trade timestamp of that UTC day —
@@ -95,11 +125,17 @@ class KalshiHistoryLoader(BaseLoader):
     # Settled markets never revise; a generous overlap only costs a few re-pulls.
     incremental_overlap = pd.Timedelta(days=10)
 
-    def __init__(self, lake=None, instruments=None, series=None, page_limit=1000,
+    def __init__(self, lake=None, instruments=None, series=None, category=None,
+                 min_settled_markets=5, page_limit=1000,
                  max_markets_per_series=5000, max_trade_pages_per_market=30,
                  pause_s=0.15):
         super().__init__(lake, instruments)
+        # `series` takes precedence over `category`: only run category enumeration
+        # when the caller did NOT also pin an explicit series list.
+        self._explicit_series = series is not None
         self.series = list(series) if series is not None else list(DEFAULT_SERIES)
+        self.category = category
+        self.min_settled_markets = min_settled_markets
         self.page_limit = page_limit
         self.max_markets_per_series = max_markets_per_series
         self.max_trade_pages_per_market = max_trade_pages_per_market
@@ -126,6 +162,26 @@ class KalshiHistoryLoader(BaseLoader):
                 break
         return out[:max_items]
 
+    def _enumerate_category(self, session, category: str) -> list[str]:
+        """Every series ticker in a Kalshi category (e.g. "Politics").
+
+        The listing endpoint returns the whole category in one response (2,083 for
+        Politics, 607 for Economics, probed live 2026-07-11) with no ``cursor`` key
+        at all; ``_paginate`` treats an absent cursor the same as an explicit null,
+        so it already terminates after one call. A listing failure degrades to an
+        empty series list (with a warning) rather than raising, matching the
+        per-series listing-failure degradation below.
+        """
+        try:
+            rows = self._paginate(
+                session, f"{LIVE_BASE}/series", {"category": category}, "series",
+                max_items=1_000_000)
+        except Exception as exc:
+            self.warnings.append(
+                f"kalshi-hist category listing failed for {category!r}: {exc!r}")
+            return []
+        return [r["ticker"] for r in rows if r.get("ticker")]
+
     def fetch(self, start, end) -> dict:
         """Return ``{series: {"markets": [...], "trades": {ticker: [...]}}}``.
 
@@ -134,6 +190,15 @@ class KalshiHistoryLoader(BaseLoader):
         has not caught up to a recently settled market. Per-market trade failures
         degrade with a warning; a whole-series listing failure also degrades so one
         renamed series never sinks the backfill.
+
+        When ``category`` is set (and no explicit ``series`` was pinned), the series
+        list is enumerated from the category first, and any series whose settled
+        market count — after the ``close_time`` window filter, before any trade
+        fetching — is below ``min_settled_markets`` is skipped entirely. This is the
+        cost control for wide categories: most of e.g. Politics' 2,083 series are
+        one-off micro series with a handful of settled markets, and paging their
+        trades would dominate the run for no research value. Skips are silent except
+        for one summary warning at the end (no per-series spam).
         """
         import requests
 
@@ -142,8 +207,15 @@ class KalshiHistoryLoader(BaseLoader):
         end = pd.Timestamp(end).tz_localize("UTC") if pd.Timestamp(end).tzinfo is None \
             else pd.Timestamp(end)
         session = requests.Session()
+
+        category_mode = bool(self.category) and not self._explicit_series
+        series_list = (self._enumerate_category(session, self.category)
+                       if category_mode else self.series)
+
         out: dict[str, dict] = {}
-        for series in self.series:
+        n_enumerated = len(series_list)
+        n_fetched = 0
+        for series in series_list:
             markets: dict[str, dict] = {}
             try:
                 archived = self._paginate(
@@ -165,6 +237,9 @@ class KalshiHistoryLoader(BaseLoader):
                     continue
                 markets[ticker] = m
 
+            if category_mode and len(markets) < self.min_settled_markets:
+                continue          # cost control: skip thin series before any trade fetch
+
             trades: dict[str, list] = {}
             for ticker in markets:
                 max_trades = self.max_trade_pages_per_market * self.page_limit
@@ -177,15 +252,25 @@ class KalshiHistoryLoader(BaseLoader):
                             session, f"{LIVE_BASE}/markets/trades",
                             {"ticker": ticker}, "trades", max_trades)
                     if len(rows) >= max_trades:
+                        # /historical/trades pages NEWEST-first (module docstring,
+                        # probed live 2026-07-11): out[:max_items] keeps the head of
+                        # the page sequence, i.e. the trades nearest settlement, so
+                        # it is the OLDEST tail that gets dropped here.
                         self.warnings.append(
                             f"kalshi-hist trade cap hit for {ticker} "
-                            f"({max_trades} rows) — history truncated")
+                            f"({max_trades} rows) — oldest trades truncated")
                     trades[ticker] = rows
                 except Exception as exc:
                     self.warnings.append(
                         f"kalshi-hist trades failed for {ticker}: {exc!r}")
                     continue
             out[series] = {"markets": list(markets.values()), "trades": trades}
+            n_fetched += 1
+
+        if category_mode:
+            self.warnings.append(
+                f"category {self.category}: enumerated {n_enumerated} series, "
+                f"fetched {n_fetched} with >= {self.min_settled_markets} settled markets")
         return out
 
     # -------------------------------------------------------------- transform

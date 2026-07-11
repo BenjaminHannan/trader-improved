@@ -221,6 +221,14 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
         # One-time settled-market backfill (archive host + live tail), feeding the
         # two pre-registered event-market diagnostics. Re-runs are incremental.
         return KalshiHistoryLoader(lake, instruments)
+    if dataset == "kalshi_hist_politics":
+        from production.data.loaders.kalshi_history import KalshiHistoryLoader
+
+        # Iteration 7: the whole POLITICS category (~2,083 series, live-probed),
+        # feeding the pre-registered political-underconfidence test (practitioner-
+        # scan idea #6). Thin series are dropped by the loader's own cost control
+        # (min_settled_markets) before any trade fetching.
+        return KalshiHistoryLoader(lake, instruments, category="Politics")
     if dataset == "crypto_meta":
         from production.data.loaders.coingecko import CoinGeckoLoader
 
@@ -236,7 +244,8 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
 
 DATASETS = ["prices", "stooq", "tiingo", "alpaca", "cm_rates", "binance_hist", "funding",
             "basis", "fx", "macro", "french", "cot", "fundamentals", "nowcast",
-            "kalshi_hist", "crypto_meta", "defi_tvl", "universe", "all"]
+            "kalshi_hist", "kalshi_hist_politics", "crypto_meta", "defi_tvl", "universe",
+            "all"]
 
 # Curated `source` values that identify the two independent price feeds we cross-check.
 _PRIMARY_SOURCES = ("yfinance",)
