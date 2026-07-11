@@ -105,6 +105,102 @@ def test_factor_returns_refit_pit(price_panel, sleeve_of):
     pd.testing.assert_frame_equal(fr_base.loc[safe], fr_corr.loc[safe])
 
 
+# ------------------------------------------------ estimation-quality floor
+def _mature_and_fragment_close(n_mature=6, n_days=300, frag_start_idx=60, seed=1):
+    """``n_mature`` names with full history from day 0, plus one ``FRAG`` name
+    whose price history only starts at row ``frag_start_idx`` — a stand-in for
+    the alpaca-only delisted-name fragments (research/wiki/log.md 2026-07-11)
+    that motivate ``min_history_days``."""
+    rng = np.random.default_rng(seed)
+    dates = pd.bdate_range("2018-01-02", periods=n_days)
+    ids = [f"EQ:M{i:02d}:2000-01-03" for i in range(n_mature)]
+    frag_id = "EQ:FRAG:2000-01-03"
+    closes = {}
+    for iid in ids:
+        r = rng.normal(0.0003, 0.01, n_days)
+        closes[iid] = 100.0 * np.exp(np.cumsum(r))
+    frag_r = rng.normal(0.0003, 0.01, n_days - frag_start_idx)
+    frag_close = np.full(n_days, np.nan)
+    frag_close[frag_start_idx:] = 100.0 * np.exp(np.cumsum(frag_r))
+    closes[frag_id] = frag_close
+    close_wide = pd.DataFrame(closes, index=dates)
+    return close_wide, ids, frag_id, dates
+
+
+def test_min_history_days_exact_inclusion_date():
+    """A fragment name is excluded from the cross-section until it has exactly
+    ``min_history_days`` prior price observations, then included from that date
+    on. ``refit='D'`` isolates the floor from the (separate, pre-existing)
+    monthly-refit staleness of the vol weight / exposures."""
+    n_mature, frag_start_idx, min_h = 6, 60, 40
+    close_wide, ids, frag_id, dates = _mature_and_fragment_close(
+        n_mature=n_mature, n_days=300, frag_start_idx=frag_start_idx)
+    prices = _panel_from_close(close_wide)
+
+    _fr, resid = estimate_factor_returns(
+        prices, "equity", dates[0], dates[-1], None,
+        min_history_days=min_h, refit="D")
+
+    inclusion_idx = frag_start_idx + min_h  # prior_obs(d) == min_h exactly here
+    before, on, after = dates[inclusion_idx - 1], dates[inclusion_idx], dates[inclusion_idx + 1]
+
+    assert before in resid.index and pd.isna(resid.loc[before, frag_id])
+    assert on in resid.index and np.isfinite(resid.loc[on, frag_id])
+    assert after in resid.index and np.isfinite(resid.loc[after, frag_id])
+
+    # Every date before the fragment starts trading at all is also excluded.
+    for d in dates[:frag_start_idx]:
+        if d in resid.index:
+            assert pd.isna(resid.loc[d, frag_id])
+
+
+def test_min_history_days_off_bit_identical_when_all_names_mature(price_panel, sleeve_of):
+    """With every name already well past the floor by ``start`` (the fixture panel
+    begins 2018-01-02; the window here starts a full year later), the floor only
+    ever excludes names that were already excluded for other reasons -- so
+    turning it off changes nothing. Matches the existing PIT test's window."""
+    ids = _ids(sleeve_of, "equity")
+    sp = price_panel[price_panel["instrument_id"].isin(ids)].reset_index(drop=True)
+    start, end = pd.Timestamp("2019-01-01"), pd.Timestamp("2021-12-31")
+
+    fr_default, resid_default = estimate_factor_returns(sp, "equity", start, end, None)
+    fr_off, resid_off = estimate_factor_returns(
+        sp, "equity", start, end, None, min_history_days=0)
+
+    pd.testing.assert_frame_equal(fr_default, fr_off)
+    pd.testing.assert_frame_equal(resid_default, resid_off)
+
+
+def test_min_history_days_interacts_with_min_names_guard():
+    """Flooring can push a date's valid-name count at/under the number of
+    exposure columns; when that happens the existing under-determined-day guard
+    (``valid.sum() <= Bvals.shape[1]``) fires exactly as it already does for any
+    other cause of a thin cross-section -- the day is simply skipped."""
+    n_mature, frag_start_idx = 4, 30  # 4 exposure columns (no sectors): market,
+    # size, momentum, vol -- 4 mature names alone are exactly at the guard's
+    # threshold (valid.sum() == 4 <= 4, i.e. under-determined on their own).
+    close_wide, ids, frag_id, dates = _mature_and_fragment_close(
+        n_mature=n_mature, n_days=200, frag_start_idx=frag_start_idx)
+    prices = _panel_from_close(close_wide)
+
+    # Far enough past frag_start_idx for the fragment's own trailing-vol weight
+    # to be finite (min_periods=31), but far short of a 150-day floor.
+    check_day = dates[frag_start_idx + 40]
+
+    fr_nofloor, _ = estimate_factor_returns(
+        prices, "equity", dates[0], dates[-1], None, min_history_days=0, refit="D")
+    fr_floor, _ = estimate_factor_returns(
+        prices, "equity", dates[0], dates[-1], None, min_history_days=150, refit="D")
+
+    # Without the floor the fragment's 5th valid name pushes the cross-section
+    # over the guard threshold -> the day runs.
+    assert check_day in fr_nofloor.index
+    # With the floor the fragment doesn't count yet, so valid.sum() falls back
+    # to 4 (<= 4 columns) -> the pre-existing guard skips the day, same as it
+    # would for any other under-determined cross-section.
+    assert check_day not in fr_floor.index
+
+
 # ---------------------------------------------------- known-structure recovery
 def _simulate_market_model(n_names=12, n_days=520, seed=0):
     """r_i = beta_i * f + eps_i with a known beta spread and factor vol."""
