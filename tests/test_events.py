@@ -9,15 +9,22 @@ Kelly / book-sizing math.
 """
 from __future__ import annotations
 
+import sys
+import types
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from production.data.audit import audit
-from production.data.loaders.kalshi import KalshiLoader
+from production.data.loaders.kalshi import KALSHI_BASE, KalshiLoader
 from production.data.loaders.polymarket import PolymarketLoader
 from production.events.markets import EventMarket, dedupe_related, liquid_universe
-from production.events.signals import longshot_bias, resolution_convergence
+from production.events.signals import (
+    longshot_bias,
+    political_favorite_tilt,
+    resolution_convergence,
+)
 from production.events.sizing import (
     FEE_BPS,
     bernoulli_variance,
@@ -129,6 +136,96 @@ def test_kalshi_run_end_to_end_writes_curated(tmp_lake, monkeypatch):
     assert (cur["available_from"] == cur["ingested_at"]).all()
 
 
+# ================================================== (2b) kalshi category stamping
+# T1/T2 (from _kalshi_payload) both carry event_ticker "EVT-A" -> series "EVT".
+def test_kalshi_transform_stamps_category_politics_when_series_matches():
+    raw = dict(_kalshi_payload(), politics_series=frozenset({"EVT"}))
+    long = KalshiLoader().transform(raw)
+    assert set(long["category"]) == {"politics"}
+
+
+def test_kalshi_transform_stamps_category_other_when_series_not_listed():
+    raw = dict(_kalshi_payload(), politics_series=frozenset({"SOMEOTHERSERIES"}))
+    long = KalshiLoader().transform(raw)
+    assert set(long["category"]) == {"other"}
+
+
+def test_kalshi_transform_stamps_category_unknown_when_listing_absent():
+    # No "politics_series" key at all (e.g. a payload from before this feature, or a
+    # caller that never ran fetch()) -> fail-CLOSED "unknown", not "other".
+    long = KalshiLoader().transform(_kalshi_payload())
+    assert set(long["category"]) == {"unknown"}
+
+
+class _FakeResp:
+    def __init__(self, body):
+        self._body = body
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._body
+
+
+def test_kalshi_fetch_politics_listing_failure_degrades_to_unknown_with_warning(monkeypatch):
+    """The politics-series-listing call is additive: if it fails, markets and
+    candlesticks still come back (the batch is not sunk), ``politics_series``
+    degrades to ``None`` with a recorded warning, and transform() then stamps every
+    row "unknown" (fail-closed) rather than guessing "other"."""
+    payload = _kalshi_payload()
+
+    def fake_get(url, params=None, timeout=None):
+        if url == f"{KALSHI_BASE}/series/":
+            raise RuntimeError("boom: series listing unreachable")
+        if url == f"{KALSHI_BASE}/markets":
+            return _FakeResp({"markets": payload["markets"], "cursor": None})
+        for ticker, candles in payload["candles"].items():
+            if url.endswith(f"/markets/{ticker}/candlesticks"):
+                return _FakeResp({"candlesticks": candles})
+        raise AssertionError(f"unexpected url {url}")
+
+    fake_requests = types.ModuleType("requests")
+    fake_requests.get = fake_get
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    loader = KalshiLoader()
+    raw = loader.fetch("2026-06-01", "2026-07-31")
+    assert raw["politics_series"] is None
+    assert any("politics series listing failed" in w for w in loader.warnings)
+
+    long = loader.transform(raw)
+    assert set(long["category"]) == {"unknown"}
+
+
+def test_kalshi_fetch_politics_listing_success_is_wired_into_transform(monkeypatch):
+    """End-to-end fetch() -> transform(): a successful (single-page, no cursor)
+    politics listing correctly separates politics vs. other series."""
+    payload = _kalshi_payload()
+
+    def fake_get(url, params=None, timeout=None):
+        if url == f"{KALSHI_BASE}/series/":
+            assert params.get("category") == "Politics"
+            return _FakeResp({"series": [{"ticker": "EVT"}]})   # no "cursor" key
+        if url == f"{KALSHI_BASE}/markets":
+            return _FakeResp({"markets": payload["markets"], "cursor": None})
+        for ticker, candles in payload["candles"].items():
+            if url.endswith(f"/markets/{ticker}/candlesticks"):
+                return _FakeResp({"candlesticks": candles})
+        raise AssertionError(f"unexpected url {url}")
+
+    fake_requests = types.ModuleType("requests")
+    fake_requests.get = fake_get
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    loader = KalshiLoader()
+    raw = loader.fetch("2026-06-01", "2026-07-31")
+    assert raw["politics_series"] == frozenset({"EVT"})
+
+    long = loader.transform(raw)
+    assert set(long["category"]) == {"politics"}   # both T1, T2 are series "EVT"
+
+
 # ===================================================== helpers: curated-shape panel
 def _panel(rows) -> pd.DataFrame:
     """Build an event_markets-shaped panel from (obs_date, iid, yes, vol, oi, close,
@@ -163,6 +260,24 @@ def test_liquid_universe_filters_volume_and_nearness():
     assert isinstance(universe[0], EventMarket)
 
 
+def test_liquid_universe_carries_category_into_eventmarket():
+    obs = "2026-07-01"
+    df = _panel([(obs, "EV:kalshi:POL", 0.5, 5000, 100, "2026-08-01", "E1")])
+    df["category"] = "politics"
+    universe = liquid_universe(df, min_volume_usd=1000, min_days_to_close=1,
+                               max_days_to_close=120)
+    assert universe[0].category == "politics"
+
+
+def test_liquid_universe_category_absent_defaults_to_none():
+    # _panel() rows carry no "category" column at all (e.g. a Polymarket-only slice).
+    obs = "2026-07-01"
+    rows = [(obs, "EV:kalshi:OK", 0.5, 5000, 100, "2026-08-01", "E1")]
+    universe = liquid_universe(_panel(rows), min_volume_usd=1000,
+                               min_days_to_close=1, max_days_to_close=120)
+    assert universe[0].category is None
+
+
 # ================================================================ (4) dedupe_related
 def test_dedupe_by_event_key_groups_related():
     m1 = EventMarket("EV:kalshi:T1", "Will A?", pd.Timestamp("2026-08-01", tz=UTC),
@@ -184,6 +299,61 @@ def test_dedupe_fallback_question_prefix():
     c = EventMarket("EV:x:3", "Bitcoin above 200k", None, 0.2, 1, 1, "x")
     groups = dedupe_related([a, b, c], prefix_len=20)
     assert sorted(len(g) for g in groups) == [1, 2]
+
+
+# ============================================== (4b) political same-close-date grouping
+def test_dedupe_political_same_close_date_unions_across_event_keys():
+    # Two DIFFERENT political events (different event_key) closing the same UTC date
+    # -> one correlated group (election-night co-resolution).
+    m1 = EventMarket("EV:kalshi:P1", "Will X win state A?",
+                     pd.Timestamp("2024-11-05T23:00:00Z"), 0.80, 5000, 100, "kalshi",
+                     event_key="EVT-A", category="politics")
+    m2 = EventMarket("EV:kalshi:P2", "Will Y win state B?",
+                     pd.Timestamp("2024-11-05T23:30:00Z"), 0.75, 5000, 100, "kalshi",
+                     event_key="EVT-B", category="politics")
+    groups = dedupe_related([m1, m2])
+    assert len(groups) == 1
+    assert {m.id for m in groups[0]} == {"EV:kalshi:P1", "EV:kalshi:P2"}
+
+
+def test_dedupe_political_different_close_dates_stay_separate():
+    m1 = EventMarket("EV:kalshi:P1", "Will X win?", pd.Timestamp("2024-11-05T23:00:00Z"),
+                     0.80, 5000, 100, "kalshi", event_key="EVT-A", category="politics")
+    m2 = EventMarket("EV:kalshi:P3", "Will Z win runoff?", pd.Timestamp("2024-12-06T23:00:00Z"),
+                     0.60, 5000, 100, "kalshi", event_key="EVT-C", category="politics")
+    groups = dedupe_related([m1, m2])
+    assert sorted(len(g) for g in groups) == [1, 1]
+
+
+def test_dedupe_political_grouping_does_not_sweep_in_non_political():
+    # A non-political market closing on the SAME date as two political ones must
+    # stay out of the politics group entirely -- behavior for non-political markets
+    # is unchanged (ordinary event_key/question-prefix grouping).
+    m1 = EventMarket("EV:kalshi:P1", "Will X win state A?",
+                     pd.Timestamp("2024-11-05T23:00:00Z"), 0.80, 5000, 100, "kalshi",
+                     event_key="EVT-A", category="politics")
+    m2 = EventMarket("EV:kalshi:P2", "Will Y win state B?",
+                     pd.Timestamp("2024-11-05T23:30:00Z"), 0.75, 5000, 100, "kalshi",
+                     event_key="EVT-B", category="politics")
+    m3 = EventMarket("EV:kalshi:N1", "Will it rain in NYC?",
+                     pd.Timestamp("2024-11-05T12:00:00Z"), 0.50, 5000, 100, "kalshi",
+                     event_key="EVT-D", category="other")
+    groups = dedupe_related([m1, m2, m3])
+    sizes = sorted(len(g) for g in groups)
+    assert sizes == [1, 2]
+    political_group = next(g for g in groups if len(g) == 2)
+    assert {m.id for m in political_group} == {"EV:kalshi:P1", "EV:kalshi:P2"}
+
+
+def test_dedupe_political_without_category_falls_back_to_event_key():
+    # category=None (e.g. Polymarket, or a pre-feature panel) -> ordinary grouping,
+    # unaffected by same close date.
+    m1 = EventMarket("EV:poly:P1", "Will X win?", pd.Timestamp("2024-11-05T23:00:00Z"),
+                     0.80, 5000, 100, "polymarket", event_key="0xaaa")
+    m2 = EventMarket("EV:poly:P2", "Will Y win?", pd.Timestamp("2024-11-05T23:30:00Z"),
+                     0.75, 5000, 100, "polymarket", event_key="0xbbb")
+    groups = dedupe_related([m1, m2])
+    assert sorted(len(g) for g in groups) == [1, 1]
 
 
 # ================================================================ (5) longshot_bias
@@ -268,6 +438,81 @@ def test_resolution_convergence_unaffected_by_macro_exclusion():
     plain_out = resolution_convergence(_venue_panel(plain_rows), window=5)
     assert not macro_out.empty
     pd.testing.assert_frame_equal(macro_out, plain_out)
+
+
+# ========================================== (5c) political_favorite_tilt (promotion)
+def _political_panel(rows) -> pd.DataFrame:
+    """Panel builder with explicit per-row ``venue`` and ``category`` (rows carry
+    (obs_date, iid, yes, vol, oi, close, event_key, venue, category))."""
+    df = pd.DataFrame(rows, columns=[
+        "obs_date", "instrument_id", "yes_price", "volume", "open_interest",
+        "close_time", "event_key", "venue", "category"])
+    df["obs_date"] = pd.to_datetime(df["obs_date"])
+    df["close_time"] = pd.to_datetime(df["close_time"], utc=True)
+    df["question"] = df["instrument_id"]
+    df["status"] = "active"
+    return df
+
+
+def test_political_tilt_emits_only_in_bucket_for_politics_kalshi_rows():
+    rows = [
+        # politics + in-bucket (closed interval) -> p_hat = yes + 0.03
+        ("2026-07-01", "EV:kalshi:P1", 0.80, 1, 1, "2026-08-01", "E1", "kalshi", "politics"),
+        # inclusive lower boundary
+        ("2026-07-01", "EV:kalshi:P2", 0.70, 1, 1, "2026-08-01", "E2", "kalshi", "politics"),
+        # inclusive upper boundary
+        ("2026-07-01", "EV:kalshi:P3", 0.95, 1, 1, "2026-08-01", "E3", "kalshi", "politics"),
+        # below bucket -> no emission
+        ("2026-07-01", "EV:kalshi:P4", 0.50, 1, 1, "2026-08-01", "E4", "kalshi", "politics"),
+        # above bucket -> no emission
+        ("2026-07-01", "EV:kalshi:P5", 0.97, 1, 1, "2026-08-01", "E5", "kalshi", "politics"),
+        # non-political kalshi, in bucket -> no emission
+        ("2026-07-01", "EV:kalshi:M1", 0.80, 1, 1, "2026-08-01", "E6", "kalshi", "macro"),
+        # unknown category (loader listing-failure degrade), in bucket -> no emission
+        ("2026-07-01", "EV:kalshi:U1", 0.80, 1, 1, "2026-08-01", "E7", "kalshi", "unknown"),
+        # politics on Polymarket (venue guard), in bucket -> no emission
+        ("2026-07-01", "EV:polymarket:P6", 0.80, 1, 1, "2026-08-01", "E8", "polymarket", "politics"),
+    ]
+    out = political_favorite_tilt(_political_panel(rows))
+    got = dict(zip(out["instrument_id"], out["value"]))
+    assert set(got) == {"EV:kalshi:P1", "EV:kalshi:P2", "EV:kalshi:P3"}
+    # value is the EDGE (p_hat - p): the haircut constant everywhere the 0.99
+    # cap doesn't bind — the contract size_event_book sums across signals.
+    assert got["EV:kalshi:P1"] == pytest.approx(0.03)
+    assert got["EV:kalshi:P2"] == pytest.approx(0.03)
+    assert got["EV:kalshi:P3"] == pytest.approx(0.03)
+
+
+def test_political_tilt_edge_shrinks_where_cap_binds():
+    rows = [("2026-07-01", "EV:kalshi:P7", 0.98, 1, 1, "2026-08-01", "E1", "kalshi", "politics")]
+    # widen `high` so a price whose +haircut would exceed the cap is reachable
+    out = political_favorite_tilt(_political_panel(rows), high=0.99)
+    # 0.98 + 0.03 = 1.01 -> p_hat clipped to 0.99 -> edge 0.01, not 0.03
+    assert out.iloc[0]["value"] == pytest.approx(0.01)
+
+
+def test_political_tilt_missing_category_column_is_empty():
+    # A Polymarket-only panel: the loader never stamps "category" at all -> the
+    # whole column is absent (not just NaN) -> fail-closed, no emission anywhere.
+    rows = [("2026-07-01", "EV:polymarket:X", 0.80, 1, 1, "2026-08-01", "E1")]
+    df = pd.DataFrame(rows, columns=[
+        "obs_date", "instrument_id", "yes_price", "volume", "open_interest",
+        "close_time", "event_key"])
+    df["obs_date"] = pd.to_datetime(df["obs_date"])
+    df["close_time"] = pd.to_datetime(df["close_time"], utc=True)
+    df["venue"] = "polymarket"
+    assert political_favorite_tilt(df).empty
+
+
+def test_political_tilt_missing_venue_column_is_empty():
+    df = _political_panel(
+        [("2026-07-01", "EV:kalshi:P1", 0.80, 1, 1, "2026-08-01", "E1", "kalshi", "politics")]
+    ).drop(columns=["venue"])
+    assert political_favorite_tilt(df).empty
+
+
+def test_political_tilt_empty_panel_returns_empty_frame():
+    assert political_favorite_tilt(pd.DataFrame()).empty
 
 
 # ==================================================== (6) convergence signal + PIT

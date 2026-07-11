@@ -1,14 +1,17 @@
-"""Event-market alpha signals — two documented, point-in-time edges.
+"""Event-market alpha signals — documented, point-in-time edges.
 
-Both take the curated ``event_markets`` panel and emit a long ``[obs_date,
-instrument_id, value]`` frame, exactly like the price-sleeve signals. ``value`` is a
-signed directional score: positive = buy YES, negative = buy NO (sell YES).
+All three take the curated ``event_markets`` panel and emit a long ``[obs_date,
+instrument_id, value]`` frame, exactly like the price-sleeve signals. For
+:func:`longshot_bias` and :func:`resolution_convergence`, ``value`` is a signed
+directional score: positive = buy YES, negative = buy NO (sell YES).
+:func:`political_favorite_tilt` deviates from that convention — see its docstring
+for why, and for the resulting downstream contract awkwardness.
 
 PIT discipline: every value at date D is a function only of rows knowable by end of day
-D. :func:`longshot_bias` is pointwise (uses only that row's own price).
-:func:`resolution_convergence` uses each market's *trailing* price history via a
-positional ``shift`` on the obs_date-sorted series — a corrupted future price can never
-move an earlier value.
+D. :func:`longshot_bias` and :func:`political_favorite_tilt` are pointwise (use only
+that row's own price/category). :func:`resolution_convergence` uses each market's
+*trailing* price history via a positional ``shift`` on the obs_date-sorted series — a
+corrupted future price can never move an earlier value.
 """
 from __future__ import annotations
 
@@ -173,6 +176,80 @@ def resolution_convergence(panel: pd.DataFrame, window: int = 5,
     out = pd.DataFrame({
         "obs_date": df["obs_date"], "instrument_id": df["instrument_id"], "value": value,
     })[keep]
+    return (out[OUTPUT_COLUMNS]
+            .sort_values(["obs_date", "instrument_id"], kind="stable")
+            .reset_index(drop=True))
+
+
+def political_favorite_tilt(panel: pd.DataFrame, low: float = 0.70, high: float = 0.95,
+                            haircut: float = 0.03, cap: float = 0.99) -> pd.DataFrame:
+    """Tilt toward Kalshi political favorites: the opposite sign of the longshot bias.
+
+    Practitioner-scan idea #6 (Le, arXiv 2602.19520; see
+    ``research/wiki/questions/research-political-underconfidence.md``): political
+    prediction markets show calibration slope > 1 — favorites are *underpriced* —
+    the OPPOSITE domain-conditional sign to the favorite-longshot bias
+    :func:`longshot_bias` fades. This passed pre-registration (Q1 MZ slope
+    psi=+0.0371, t=5.64; Q2 tradeable +4.82%, t=2.93) AND both promotion-study
+    checks in ``diagnostics/political_promotion_checks.json``: date-clustered SEs
+    (t=2.94, n=575, 332 settle-date clusters — election-night co-resolution makes
+    event-level clusters understate the true correlation) and the liquid subset
+    (>=10k-contract markets, point estimate +4.1%). Category purity (check 3) is
+    enforced upstream by :mod:`production.data.loaders.kalshi` stamping a
+    series-enumeration-based ``category`` column; grouping (check 4) is enforced by
+    :func:`production.events.markets.dedupe_related` unioning same-close-date
+    political markets into one correlated group.
+
+    Rule: Kalshi rows with ``category == "politics"`` and ``yes_price`` in the
+    CLOSED interval ``[low, high]`` (default ``[0.70, 0.95]``) emit the EDGE
+
+        value = min(yes_price + haircut, cap) - yes_price
+
+    i.e. ``haircut`` (0.03) except where the ``cap`` clip binds near 0.99. The
+    measured liquid-sample edge is ~0.034 probability units at a mean entry of
+    0.83 (check 2); ``haircut`` is the pre-committed, deliberately conservative
+    fraction of that measured edge actually traded — never the full measured
+    number. Every other row (out-of-bucket price, non-"politics" category —
+    including the loader's "unknown" listing-failure degrade — or non-Kalshi
+    venue) emits nothing.
+
+    **Contract**: ``value`` is a signed edge (``p_model - p_market``), the SAME
+    convention :func:`longshot_bias` and :func:`resolution_convergence` share and
+    exactly what ``production.events.sizing.size_event_book`` and
+    ``production.events.backtest._combined_signals`` sum across signals. (The
+    first implementation emitted the believed probability ``p_hat`` itself per
+    the original spec; that would have been misread as a ~0.7-0.99 "edge" by the
+    consumers — converted to the edge form at review before any consumer ran.)
+
+    Column guards are FAIL-CLOSED — the opposite polarity of
+    :func:`longshot_bias`'s fail-open macro exclusion: a missing ``category`` or
+    ``venue`` column (e.g. a Polymarket-only panel, whose loader never stamps
+    ``category``), or ``venue`` != ``"kalshi"``, or ``category`` != ``"politics"``,
+    all suppress the tilt rather than let it fire. Deliberate: longshot_bias's
+    exclusion protects a signal that defaults to *trading* (fail open = keep
+    fading elsewhere), while this is a new, narrowly-scoped edge whose default
+    must be *not trading* on ambiguous data (fail closed = no tilt).
+    """
+    if panel is None or panel.empty:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+    if "venue" not in panel.columns or "category" not in panel.columns:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+
+    venue = panel["venue"].astype(str).str.lower()
+    category = panel["category"].astype(str).str.lower()
+    price = pd.to_numeric(panel["yes_price"], errors="coerce")
+
+    eligible = (venue == "kalshi") & (category == "politics") & price.between(
+        low, high, inclusive="both")
+    edge = (price + haircut).clip(upper=cap) - price
+
+    value = pd.Series(np.nan, index=panel.index)
+    value[eligible] = edge[eligible]
+
+    out = pd.DataFrame({
+        "obs_date": panel["obs_date"], "instrument_id": panel["instrument_id"],
+        "value": value,
+    }).dropna(subset=["value"])
     return (out[OUTPUT_COLUMNS]
             .sort_values(["obs_date", "instrument_id"], kind="stable")
             .reset_index(drop=True))

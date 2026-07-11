@@ -12,6 +12,11 @@ venue``):
   * :func:`dedupe_related` — collapse markets that resolve on the *same* underlying
     event into groups. This is the correlated-resolution point from the research: two
     contracts on one event are one bet, not two, and must not each draw a full position.
+    Political markets get one extra rule on top: markets closing on the *same UTC
+    calendar date* are unioned into one group even across different ``event_key``s
+    (election nights co-resolve — state ladders across many separate events are not
+    independent bets; see ``research/wiki/questions/research-political-underconfidence.md``,
+    promotion check 4).
 """
 from __future__ import annotations
 
@@ -28,6 +33,10 @@ class EventMarket:
     YES probability in [0,1]; ``oi`` is open interest / on-book depth. ``event_key`` is
     the venue's shared-event identifier (Kalshi ``event_ticker`` / Polymarket
     ``conditionId``) used for de-duplication; ``None`` falls back to a question-prefix match.
+    ``category`` is the loader-stamped label (currently only Kalshi rows carry one —
+    ``"politics"``/``"other"``/``"unknown"``); ``None`` when the source loader doesn't
+    stamp it (e.g. Polymarket) or the panel row has no value. It drives the same-UTC-date
+    political grouping rule in :func:`dedupe_related`.
     """
 
     id: str
@@ -38,6 +47,7 @@ class EventMarket:
     oi: float
     venue: str
     event_key: str | None = None
+    category: str | None = None
 
 
 def _latest_per_market(df: pd.DataFrame) -> pd.DataFrame:
@@ -85,6 +95,7 @@ def liquid_universe(df: pd.DataFrame, min_volume_usd: float = 1000.0,
             oi=float(row.get("open_interest") or 0.0),
             venue=str(row.get("venue") or str(row["instrument_id"]).split(":")[1]),
             event_key=(None if pd.isna(row.get("event_key")) else row.get("event_key")),
+            category=(None if pd.isna(row.get("category")) else row.get("category")),
         ))
     return out
 
@@ -93,14 +104,48 @@ def _question_prefix(question: str, prefix_len: int) -> str:
     return str(question or "").strip().lower()[:prefix_len]
 
 
+def _political_same_date_key(m) -> tuple | None:
+    """Synthetic grouping key unioning political markets by same-UTC-close-date.
+
+    Election nights co-resolve: many separately-ticketed state/race markets
+    (different ``event_key``s) settle within hours of each other and are, in risk
+    terms, one correlated bet — not N independent ones. Returns a key like
+    ``("politics_date", "2024-11-05")`` (synthetic group key, e.g.
+    ``"politics:2024-11-05"``, in string form) for any market whose ``category`` is
+    ``"politics"`` (case-insensitive) and has a resolvable ``close_time``; returns
+    ``None`` otherwise so the caller falls through to the ordinary
+    event_key/question-prefix grouping. This runs BEFORE the event_key check, so it
+    intentionally overrides — unions across — different event_key groups; it never
+    fires for non-political markets, leaving their behavior unchanged.
+    """
+    if str(getattr(m, "category", None) or "").strip().lower() != "politics":
+        return None
+    close = getattr(m, "close_time", None)
+    if close is None:
+        return None
+    close_ts = pd.Timestamp(close)
+    if pd.isna(close_ts):
+        return None
+    close_utc = close_ts.tz_convert("UTC") if close_ts.tzinfo is not None else close_ts
+    return ("politics_date", close_utc.date().isoformat())
+
+
 def dedupe_related(markets: list, prefix_len: int = 40) -> list:
     """Group markets that resolve on the same underlying event.
 
     Grouping key, in priority order:
-      1. ``event_key`` when present (Kalshi ``event_ticker`` / Polymarket ``conditionId``)
-         — the authoritative shared-event identifier from the raw payload;
+      0. political same-UTC-date union (:func:`_political_same_date_key`) — ANY
+         market stamped ``category="politics"`` joins the single group for its
+         close date, regardless of ``event_key`` (election-night co-resolution;
+         promotion check 4 of the political-favorite-tilt study);
+      1. otherwise ``event_key`` when present (Kalshi ``event_ticker`` / Polymarket
+         ``conditionId``) — the authoritative shared-event identifier from the raw
+         payload;
       2. otherwise an **exact question-string prefix** (first ``prefix_len`` chars,
          normalized) — a heuristic fallback when no venue event key is available.
+
+    Non-political markets are entirely unaffected — rule 0 only ever matches rows
+    the loader stamped ``category="politics"``.
 
     Returns a list of groups (each a ``list[EventMarket]``). One group == one independent
     bet: sizing takes a single net position per group so correlated contracts never
@@ -108,9 +153,11 @@ def dedupe_related(markets: list, prefix_len: int = 40) -> list:
     """
     groups: dict[tuple, list] = {}
     for m in markets:
-        if getattr(m, "event_key", None):
-            key = ("evt", m.event_key)
-        else:
-            key = ("q", _question_prefix(m.question, prefix_len))
+        key = _political_same_date_key(m)
+        if key is None:
+            if getattr(m, "event_key", None):
+                key = ("evt", m.event_key)
+            else:
+                key = ("q", _question_prefix(m.question, prefix_len))
         groups.setdefault(key, []).append(m)
     return list(groups.values())

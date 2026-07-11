@@ -27,6 +27,30 @@ Every market is fetched independently and degrades on its own: a candlestick pul
 raises or returns garbage is skipped with a recorded warning rather than aborting the
 whole ingest. The BaseLoader machinery gives us watermark-incremental pulls for free
 (``run`` trims the fetch start to the lake watermark minus the overlap window).
+
+Category stamping (promotion check 3 of the political-favorite-tilt study, see
+``research/wiki/questions/research-political-underconfidence.md``): one extra
+paginated call enumerates the Politics category::
+
+    GET https://api.elections.kalshi.com/trade-api/v2/series/?category=Politics
+        -> {"series": [{ticker, category, ...}, ...], "cursor": "<next|empty>"}
+
+matching the single-page-in-practice behavior documented on this same endpoint by
+``kalshi_history.py``'s ``_enumerate_category`` (Politics: ~2,083 series, one page,
+no ``cursor`` key at all — but pagination is still driven generically off ``cursor``
+in case that changes). Each market's series (its ``event_ticker`` prefix before the
+first ``-``) is checked against the resulting frozenset and every row is stamped
+``category="politics"`` or ``category="other"``.
+
+This category label gates :func:`production.events.signals.political_favorite_tilt`.
+Degrade path: if the series listing itself fails, every row is stamped
+``category="unknown"`` (with a recorded warning) rather than guessing — and the
+signal treats anything other than ``"politics"`` as *no tilt*. This is
+**fail-CLOSED**: an ambiguous category suppresses a new, narrowly-scoped edge. It is
+the opposite polarity of :func:`production.events.signals.longshot_bias`'s macro
+exclusion, which is fail-OPEN (a missing/ambiguous column there leaves the older,
+already-validated fade active elsewhere) — deliberately so, since that signal's
+default state is "trade" and this one's default state is "don't".
 """
 from __future__ import annotations
 
@@ -60,12 +84,52 @@ class KalshiLoader(BaseLoader):
         self.page_limit = page_limit
 
     # ------------------------------------------------------------------ fetch
+    def _fetch_politics_series(self) -> frozenset | None:
+        """Enumerate every series ticker in Kalshi's Politics category.
+
+        One extra paginated call: ``GET {KALSHI_BASE}/series/?category=Politics``.
+        Probed live to return the whole category in a single page (~2,083 series;
+        see ``kalshi_history.py``'s ``_enumerate_category`` docstring for the same
+        finding on this exact endpoint — no ``cursor`` key at all), but pagination
+        is still driven generically off ``cursor`` in case the vendor starts
+        paginating it later.
+
+        Returns ``None`` — never an empty set — on any failure, so the caller can
+        tell "listing failed, category is unknown for every row" apart from
+        "listing succeeded, this series legitimately isn't Politics". Only the
+        ``None`` case degrades to ``category="unknown"`` in :meth:`transform`.
+        """
+        import requests
+
+        tickers: list[str] = []
+        cursor = None
+        try:
+            while True:
+                params = {"category": "Politics"}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = requests.get(f"{KALSHI_BASE}/series/", params=params, timeout=30)
+                resp.raise_for_status()
+                body = resp.json()
+                page = body.get("series") or []
+                tickers.extend(s.get("ticker") for s in page if s.get("ticker"))
+                cursor = body.get("cursor")
+                if not cursor or not page:
+                    break
+        except Exception as exc:  # network / shape / rate-limit — degrade, don't guess
+            self.warnings.append(f"kalshi politics series listing failed: {exc!r}")
+            return None
+        return frozenset(tickers)
+
     def fetch(self, start, end) -> dict:
-        """Return ``{"markets": [...], "candles": {ticker: [candle, ...]}}``.
+        """Return ``{"markets": [...], "candles": {ticker: [candle, ...]},
+        "politics_series": frozenset[str] | None}``.
 
         Market metadata is paginated via the opaque ``cursor``; each listed market's
         daily candlesticks are pulled between ``start`` and ``end``. Per-market failures
-        are swallowed with a warning so one bad ticker never sinks the batch.
+        are swallowed with a warning so one bad ticker never sinks the batch. One extra
+        call (:meth:`_fetch_politics_series`) enumerates the Politics category for the
+        category stamp applied in :meth:`transform`.
         """
         import requests
 
@@ -88,6 +152,8 @@ class KalshiLoader(BaseLoader):
                 break
         markets = markets[: self.max_markets]
 
+        politics_series = self._fetch_politics_series()
+
         candles: dict[str, list] = {}
         for m in markets:
             ticker = m.get("ticker")
@@ -106,14 +172,17 @@ class KalshiLoader(BaseLoader):
             except Exception as exc:  # network / shape / rate-limit — degrade this market
                 self.warnings.append(f"kalshi candlesticks failed for {ticker}: {exc!r}")
                 continue
-        return {"markets": markets, "candles": candles}
+        return {"markets": markets, "candles": candles, "politics_series": politics_series}
 
     # -------------------------------------------------------------- transform
     def transform(self, raw) -> pd.DataFrame:
         markets = {m.get("ticker"): m for m in raw.get("markets", []) if m.get("ticker")}
         candles = raw.get("candles", {})
+        # None (listing failed upstream, or the payload predates this key entirely)
+        # -> every row degrades to "unknown", never guessed as "other".
+        politics_series = raw.get("politics_series")
         rows: list[dict] = []
-        for ticker, series in candles.items():
+        for ticker, candle_series in candles.items():
             meta = markets.get(ticker, {})
             # Stored as an ISO string (not a tz-aware Timestamp): the curated audit's
             # numeric summary cannot introspect tz-aware datetime columns. Downstream
@@ -124,7 +193,16 @@ class KalshiLoader(BaseLoader):
             event_key = meta.get("event_ticker") or ticker
             question = meta.get("title") or meta.get("subtitle") or ticker
             instrument_id = f"EV:kalshi:{ticker}"
-            for candle in series or []:
+            # Market's series = the event_ticker's own prefix before the first "-"
+            # (same rule the candlestick fetch and signals._series_of use).
+            market_series = str(event_key).split("-", 1)[0]
+            if politics_series is None:
+                category = "unknown"
+            elif market_series in politics_series:
+                category = "politics"
+            else:
+                category = "other"
+            for candle in candle_series or []:
                 try:
                     ts = candle.get("end_period_ts")
                     obs_date = pd.Timestamp(int(ts), unit="s", tz="UTC").tz_localize(None).normalize()
@@ -149,6 +227,7 @@ class KalshiLoader(BaseLoader):
                         "event_key": event_key,
                         "question": question,
                         "venue": "kalshi",
+                        "category": category,
                     })
                 except (TypeError, ValueError) as exc:
                     self.warnings.append(f"kalshi candle parse failed for {ticker}: {exc!r}")
@@ -163,7 +242,7 @@ def _object_cast(df: pd.DataFrame) -> pd.DataFrame:
     audit's numeric summary (``np.issubdtype``) cannot introspect. object dtype keeps
     the audit happy while remaining fully round-trippable through parquet.
     """
-    for col in ("close_time", "status", "event_key", "question", "venue"):
+    for col in ("close_time", "status", "event_key", "question", "venue", "category"):
         if col in df.columns:
             df[col] = df[col].astype(object)
     return df
