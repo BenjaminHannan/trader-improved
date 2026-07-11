@@ -947,6 +947,66 @@ def test_crypto_prices_fallback_wins_when_primary_truncates(monkeypatch):
     assert len(bars) == 3800
 
 
+class _VariantDepthVenue:
+    """okx-style: a venue can list more than one quote-currency pair for the same
+    base asset with very different depth (okx added direct SYM/USD spot markets
+    across most alts on 2025-01-15, ~500 daily bars, while the long-standing
+    SYM/USDT pair reaches back to ~2020, ~2300+ bars). Each variant still honors
+    `since` correctly (ascending) — the two symbols just have different true depth."""
+    def __init__(self, series: dict):
+        self.series = series  # {vendor_symbol: bars}
+
+    def fetch_ohlcv(self, sym, timeframe="1d", since=None):
+        bars = self.series.get(sym, [])
+        return [b for b in bars if since is None or b[0] >= since]
+
+
+def test_basis_try_ohlcv_prefers_deepest_quote_variant(monkeypatch):
+    """Regression (live-probe 2026-07-11): _try_ohlcv accepted the FIRST non-empty
+    candidate ("SYM/USD" is tried before "SYM/USDT"), so once bybit — the venue with
+    genuinely deep listings — became geo-blocked (Amazon CloudFront country block,
+    confirmed live) and every symbol fell through to okx, the loader silently locked
+    onto okx's shallow SYM/USD listing for nearly every symbol: basis fell from
+    33,567 to 11,347 rows with NO warning, because each symbol still "succeeded",
+    just on a few hundred days of history instead of the ~2020+ SYM/USDT depth.
+    Live-probed on okx: BTC/USD only reaches back to 2024-12-06 (583 bars) while
+    BTC/USDT reaches 2018-01-11 (3104 bars); same 543-vs-2384 pattern reproduced
+    for DOGE and LINK. _try_ohlcv must keep the DEEPEST candidate, not the first."""
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    from production.data.loaders.ccxt_perp_basis import CcxtPerpBasisLoader
+
+    deep = _mk_daily_bars("2020-01-01", 2000)      # BTC/USDT-style: reaches back to 2020
+    shallow = _mk_daily_bars("2025-01-15", 500)    # BTC/USD-style: only ~500 recent bars
+    venue = _VariantDepthVenue({"BTC/USD": shallow, "BTC/USDT": deep})
+
+    got = CcxtPerpBasisLoader._try_ohlcv(venue, ["BTC/USD", "BTC/USDT"], since=deep[0][0])
+    assert got is not None
+    assert got[0][0] == deep[0][0]                 # the deep series won, not the shallow first hit
+    assert len(got) == len(deep)
+
+
+def test_basis_try_ohlcv_early_exits_when_first_candidate_is_already_deep(monkeypatch):
+    """When the first-tried candidate already reaches (near) the requested start,
+    a second full pagination of the next candidate is skipped (matches
+    CcxtPricesLoader's depth-slack early-exit) — asserted via call count, not just
+    depth, so a regression that always tries every candidate doesn't slip by."""
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    from production.data.loaders.ccxt_perp_basis import CcxtPerpBasisLoader
+
+    deep = _mk_daily_bars("2020-01-01", 2000)
+    calls = []
+
+    class _CountingVenue(_VariantDepthVenue):
+        def fetch_ohlcv(self, sym, timeframe="1d", since=None):
+            calls.append(sym)
+            return super().fetch_ohlcv(sym, timeframe, since)
+
+    venue = _CountingVenue({"BTC/USD": deep, "BTC/USDT": deep})
+    got = CcxtPerpBasisLoader._try_ohlcv(venue, ["BTC/USD", "BTC/USDT"], since=deep[0][0])
+    assert got[0][0] == deep[0][0]
+    assert "BTC/USDT" not in calls                 # never consulted — BTC/USD was deep enough
+
+
 # ==================================================== (13) tiingo secondary feed
 def test_tiingo_rows_to_long_uses_adjusted_fields():
     """Canned payload of the REAL tiingo shape (live probe 2026-07-07): adjClose /

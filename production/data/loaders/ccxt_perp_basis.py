@@ -20,6 +20,11 @@ import pandas as pd
 
 from production.data.base import AvailabilityRule, BaseLoader, asset_class_from_instrument_id
 
+# A candidate quote-symbol whose earliest returned bar is this far after the
+# requested start is deep enough to stop trying further candidates (mirrors
+# ccxt_prices.CcxtPricesLoader's _DEPTH_SLACK_MS early-exit).
+_DEPTH_SLACK_MS = 90 * 24 * 3600 * 1000
+
 
 class CcxtPerpBasisLoader(BaseLoader):
     dataset = "basis"
@@ -72,8 +77,25 @@ class CcxtPerpBasisLoader(BaseLoader):
 
     @staticmethod
     def _try_ohlcv(ex, symbols, since) -> list | None:
+        """Return the DEEPEST bar series across the candidate vendor symbols.
+
+        A venue can list more than one quote-currency pair for the same base asset
+        with very different depth — e.g. okx added direct SYM/USD spot markets across
+        most alts on 2025-01-15 (~500 daily bars), while the long-standing SYM/USDT
+        pair reaches back to ~2020 (~2300+ bars). Live-probed 2026-07-11: taking
+        whichever candidate answers FIRST (as this used to) silently locked onto the
+        shallow SYM/USD listing for nearly every symbol once bybit (this venue's
+        deep-history primary) became geo-blocked and okx carried the whole pull —
+        basis fell from 33,567 to 11,347 rows with no warning, because each symbol
+        still "succeeded", just on a few hundred days of history. Try every
+        candidate and keep the one whose first bar reaches furthest back; stop early
+        once a candidate is already deep enough (mirrors CcxtPricesLoader's
+        depth-slack early-exit) so a genuinely deep first hit doesn't pay for a
+        second full pagination for nothing.
+        """
         from production.data.base import fetch_ohlcv_paginated
 
+        best: list | None = None
         for s in symbols:
             try:
                 # One fetch_ohlcv call returns a single venue page (~500-1000 bars,
@@ -82,9 +104,11 @@ class CcxtPerpBasisLoader(BaseLoader):
                 bars = fetch_ohlcv_paginated(ex, s, since)
             except Exception:
                 continue  # not listed on this venue
-            if bars:
-                return bars
-        return None
+            if bars and (best is None or bars[0][0] < best[0][0]):
+                best = bars
+            if best is not None and best[0][0] <= since + _DEPTH_SLACK_MS:
+                break  # already reaches (near) the requested start — good enough
+        return best
 
     # -------------------------------------------------------------- transform
     @staticmethod
