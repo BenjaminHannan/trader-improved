@@ -1,118 +1,81 @@
-# OPUS.md — session handoff (2026-07-07, written by Fable at plan exhaustion)
+# OPUS.md — session handoff (2026-07-11, rewritten by Fable mid-iteration-6/7)
 
-You are Opus 4.8 picking up mid-stride. The working tree contains UNCOMMITTED
-in-flight work with ONE known failing test. Finish it, then work the queue.
-Read first: CLAUDE.md (hard rules), research/wiki/log.md (top two entries),
-research/wiki/questions/research-oos-gate-design.md and
-research-rejected-factor-forensics.md.
+You are picking up an autonomous research loop mid-stride on the BENJA machine
+(C:\Users\benja\...; the pre-2026-07-10 history ran on a different machine).
+Read first: CLAUDE.md (hard rules), research/wiki/log.md (top entry),
+research/wiki/index.md (backlog), memory dir MEMORY.md (owner directives:
+Sonnet-for-implementation orchestration, fill-wait-time-with-work,
+token-efficiency practices).
 
-## Non-negotiables (compressed from CLAUDE.md — full text governs)
-- Every commit gated on `uv run pytest -q` green. Never weaken tests/thresholds/
-  cost floors. PIT via available_from everywhere. No reports in data/.
-- `configs/factors.yaml` n_trials is machine-written ONLY. Statuses may be flipped
-  candidate<->rejected only as a documented re-specification decision (commit msg
-  must say why). Every gate --apply run charges trials — that's the point.
-- If a factor fails the gate, it fails. Record it. Diagnose with zero-trial checks
-  before funding a re-spec (see Step-0 pattern in the wiki log).
+## Non-negotiables (compressed — CLAUDE.md governs)
+- `uv run pytest -q` green before any commit. Never weaken tests/thresholds/floors.
+- configs/factors.yaml n_trials (=24) is machine-written; research diagnostics are
+  zero-trial; any re-spec after seeing results = NEW pre-registration (the
+  pre-register-then-commit-then-run pattern is established practice — see
+  c23ed9e, and the political one committed before its data existed).
+- Push to claude/intelligent-davinci-fiplrq (never main; PR #1 exists).
 
-## State
-- Committed through `0e61b20` + research-session wiki commits. Pushed to
-  claude/intelligent-davinci-fiplrq (never push main; PR #1 exists).
-- First live gate ran: 2/12 accepted (carry_rate_diff, basis_carry), n_trials=20.
-  Backtest artifact committed: deflated Sharpe 0.000 (honest near-empty book).
-- UNCOMMITTED in working tree (all mine, all intentional):
-  1. Gate infra (scripts/build_factors.py): precision-weighted per-date IC
-     aggregation (weight by n_names-1), purge+embargo at the 80/20 boundary,
-     SE(OOS IC) + within-train CPCV sign-stability (reject-only, `_cpcv_sign_stability`).
-     Tests in tests/test_signal_bundle.py — GREEN.
-  2. Canonical vol-scaled tsmom (production/signals/momentum.py, MOP 2012 form,
-     trailing vol shift(1)) replacing the near-degenerate sign() version — tests
-     mostly green, ONE failure remains (next section).
-  3. Cleveland Fed nowcast loader (production/data/loaders/stage2/cleveland_nowcast.py)
-     — DONE, tested, wired as `--dataset nowcast` + stage-2 batch; 12,908 as-published
-     vintage rows already ingested (2013-07→now). This falsified the research page's
-     "no public vintage archive" claim; caveat re believed-as-published is in the
-     loader docstring.
-  4. tests/test_alpha_refine.py fixed (stale live-registry fixture assumption).
+## State (all committed & pushed through 'Tiingo negative-result memory')
+- Lake REBUILT on this machine + extended well beyond the old one:
+  prices equity 1.62M (yfinance) + alpaca secondary 1.07M + tiingo trickle
+  (~150/924 symbols, frontier-ordered, 404 negative-cache NEW), crypto 75.3k
+  across ccxt + coinmetrics CSVs (BTC 2010+) + binance vision bulk (SOL/AVAX/
+  NEAR/MATIC-incl-dead), french/fx/cot, macro = ALFRED VINTAGED (owner's FRED
+  key; the fredgraph-fallback contamination was purged with an audit record),
+  nowcast quarterly+monthly vintages, event_markets_hist 71k (12 macro series;
+  POLITICS category ingest RUNNING in background right now).
+- Iteration 5 (closed): three pre-registered negatives — longshot fade (P1
+  replicates -77% t=-9.7; tradeable P2 ~0 net), nowcast drift (market BEATS
+  nowcast, MAE 0.066 vs 0.091), TOY rebound (+249bp t=2.26 but fails placebo
+  concentration). Wiki synthesis: research-kalshi-mechanism-diagnostics.
+- Iteration 6 (open): risk-harness baseline vs the live model. First partial run:
+  families 1/3 in-band everywhere scored; family-2 misses in 3/6 ETF sleeves
+  (mixed directions); fx family-4 B=0.591. Probe evidence (commit 3bbf01d): MVP
+  fc/realized = 2.19 lw_cc vs 1.15 raw; ALL shrinkage variants inflate the
+  spectrum bottom; degeneracy is FX-basket structure (not just UDN/UUP).
+  CANDIDATE staged: `--instrument-cov fixed:0.0 --sleeves <covariance sleeves>`
+  one-command run + production/risk/validation.py adoption_verdict (4 criteria).
+  BLOCKED ON: the full baseline (background python PID was ~15276, running since
+  06:14, unmemoized code — if it died, re-run scripts/score_risk_model.py
+  --start 2016-01-01; the committed CLI now memoizes Sigma (4x faster) and
+  coverage-cores the panels).
+- Iteration 7 (staged): political underconfidence, pre-registration COMMITTED
+  (research/diagnostics/kalshi_political_underconfidence.py) BEFORE data; run it
+  once the kalshi_hist_politics ingest lands.
+- Execution/infra closed today: #14 cost-overrides in backtest + live path,
+  #15 shortfall_log accrual (TCA loop closed end-to-end), #18 quarantine
+  consumption (equity drop / ETF keep+warn), #20 longshot_bias macro exclusion
+  (documented re-spec with evidence block in signals.py), #21 events calibration
+  (FAIL — prices already calibrated mid-range; #19 demoted, prerequisite gone).
+- Events sleeve: live snapshot loader FIXED (endpoint + dollar-schema breaks).
 
-## Finish line — COMPLETED by Fable before handoff (kept for context)
-(All steps below are DONE and committed: gate v2 ran, n_trials=24, mom_12_1
-failed net-validation, tsmom-canonical failed train-t; suite green. Start at
-the "Queue after that" section.)
-1. Fix `tests/test_sleeves.py::test_factors_config_parses_and_carry_curve_resolves`:
-   it asserts `spec["status"] == "candidate"` against the LIVE registry — stale
-   fixture assumption now that the real gate has run (status is 'rejected'). Fix the
-   ASSERTION to accept any valid status in {candidate, accepted, rejected} or compare
-   against the loaded file itself — same pattern I used in test_alpha_refine.py
-   (see its "unrelated factors untouched" comment). Do NOT touch the registry.
-   Then scan for any OTHER test hardcoding pre-gate statuses: `grep -rn "candidate"
-   tests/` and judge each.
-2. Flip statuses to candidate for exactly two factors in configs/factors.yaml, as a
-   documented re-specification decision (commit message must carry the evidence):
-   - tsmom: construction replaced with canonical vol-scaled form (old sign() verdict
-     stands in history).
-   - mom_12_1: rejection shown to be an aggregation artifact (per-sleeve train t:
-     equity +3.26, commodity +2.34; pooled unweighted 0.85 reproduced exactly; the
-     new precision-weighted estimator is the fix). Leave gate_stats blocks as-is;
-     --apply will overwrite them.
-   Do NOT re-candidate earnings_yield or cot_positioning: their pre-registered
-   diagnostics FAILED (sector-tilt R²=0.000; COT components both same-sign positive
-   full-window, not the KRT opposite-sign pattern). Zero-trial checks said no.
-3. `uv run python scripts/build_factors.py --ic-report --start 2016-01-01` — INSPECT
-   (new columns OOS_SE + CPCV should print; expect ~4 factors gated: 2 accepted
-   re-scored under the new estimator + the 2 re-candidates). Then `--apply`.
-   n_trials will rise by the number gated — correct and intended.
-4. If mom_12_1 or tsmom pass: re-run the backtest
-   (`uv run python scripts/run_backtest.py --start 2016-01-01`, ~50-90 min,
-   background it), force-add the new reports/*.json, commit.
-5. Full suite green → commit everything in logical chunks (gate infra + tests;
-   tsmom re-spec + status flips + gate results; cleveland loader; backtest artifact)
-   → push → append a wiki log entry (follow the top entry's format: numbers, deltas,
-   decisions, trial accounting).
+## In flight at handoff (check TaskList / background shells)
+1. Harness baseline (equity leg) -> then: candidate run + adoption_verdict +
+   consolidated iteration-6 wiki entry (family-2 heterogeneity analysis mine).
+2. kalshi_hist_politics ingest -> then run the pre-registered diagnostic #4.
+3. Sonnet agents: daily_run smoke-test consolidation (tests/test_execution.py);
+   French-validation wiring+run (scripts/validate_french.py NEW) — the
+   TIE-detector has NEVER run on this machine's rebuilt lake; interpret its
+   correlations when it reports (market ~0.9 healthy, size negative expected).
+4. Tiingo: re-run `--dataset tiingo --full` (keys in user env; export inline for
+   background shells) roughly hourly; the 404 cache makes each run advance.
 
-## Queue after that (specs already exist)
-- Kalshi resolved-market backfill loader (wiki backlog #16; free API; schema like
-  form-style loaders; then run the TWO pre-registered tests in
-  research/wiki/sources/practitioner-mechanism-scan-2026-07.md ideas 1-2 as
-  research diagnostics — they only touch the ledger if promoted). The nowcast-drift
-  test's Cleveland data is ALREADY ingested (series CLEV_NOWCAST_*).
-- Coin Metrics community-rates loader for pre-2021 crypto depth
-  (research-data-remediation.md has the endpoint/format; stamp availability earlier
-  than ccxt's 24h rule so coinbase stays primary).
-- Risk-model scoring harness per research-risk-model-validation.md (bias stats +
-  MVP horse race). Zero trial cost; build once, use forever.
-- Turn-of-year diagnostic (backlog #17) — cheap, zero new data.
+## Traps (new ones since the 07-07 list — old list still applies)
+- Kalshi: query series by KX-prefixed name only; /historical/trades pages
+  NEWEST-first (truncation keeps the right end); market records for legacy
+  events exist ONLY on external-api host; community CM API + newer-asset CSVs
+  are gutted to ~7 days.
+- asof_panel ties break to LATEST visible available_from — backfill feeds must
+  be non-overlapping BY CONSTRUCTION (see coinmetrics/binance loaders), never
+  by stamp games.
+- The sub-$0.10 hygiene floor is EQUITY-only; never apply to crypto loaders.
+- Agents pause on their own background pytest — pick their work up directly
+  (git status; run their tests yourself) instead of waiting.
+- PowerShell mangles inline quotes/regex — scratchpad script files.
 
-## Traps learned tonight (do not relearn them expensively)
-- Background Bash shells do NOT inherit user-scope env vars set mid-session: export
-  TIINGO_API_KEY / APCA_* inline in the command. Keys live in Windows user env.
-- Secondary price feeds share the `prices` watermark: their backfills need `--full`.
-- bybit/okx IP-ban aggressive callers (~1h). Loader pacing now handles it; never
-  probe venues in tight loops.
-- SEC ~8 req/s; one process at a time. Tiingo free ≈ 50 symbols/hr (429 guard stops
-  cleanly; re-run to extend). Alpaca IEX history starts ~2021.
-- Vendor series for DEAD tickers can be wrong-entity garbage that cross-vendor
-  checks cannot see (no overlap). hygiene.drop_corrupt_series +
-  apply_flap_screen now guard ingest; the French-benchmark check
-  (production/risk/model.py:validate_against_french — needs FF_* renames and
-  monthly compounding at the call site, see wiki log) is the detector. Re-run it
-  after any big equity re-ingest.
-- write_curated never DELETES rows a re-ingest no longer emits — lake remediation
-  is a separate explicit step with an audit record (see
-  data/audit/*remediation*.json for the pattern).
-- schtasks /Create is blocked by the permission classifier — the daily nowcast
-  archiver task is on the OWNER's action list, not yours.
-- A second research-only session may be running: it writes ONLY research/wiki/.
-  pull --rebase before pushing; if log.md conflicts, both entries survive, order
-  newest-first.
-
-## Owner action list (remind them if unaddressed)
-1. Approve/register the daily nowcast archiver:
-   `schtasks /Create /TN trader-improved-nowcast-archiver /TR "cmd /c cd /d C:\Users\PC\Downloads\trader-improved && uv run python scripts/ingest.py --dataset nowcast" /SC DAILY /ST 10:20`
-   (time = shortly after 10:00 ET publication, adjust for machine TZ; machine must be on).
-2. Norgate Platinum decision ($630/yr) — closes the 184-name delisted-equity gap AND
-   provides an independent PIT-membership cross-check.
-3. Optional: email Cleveland Fed research for the EC-2023-06 vintage dataset to
-   verify our believed-as-published caveat (draft on request).
-4. Tiingo stays free-tier (equity depth accrues ~50 symbols/hr when run); no
-   multi-key workarounds — ToS.
+## Owner action list
+1. Norgate Platinum decision ($630/yr) — delisted-equity gap (~213 names) +
+   independent PIT membership.
+2. Daily nowcast archiver scheduled task (schtasks blocked for agents).
+3. Optional: CryptoCompare free key if the sol/avax-class pre-Binance-listing
+   crypto tail ever matters (Binance vision covered most of it).
