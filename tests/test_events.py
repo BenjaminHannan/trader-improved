@@ -200,6 +200,76 @@ def test_longshot_known_answers_and_boundaries():
     assert vals == {"EV:k:LOW": -1.0, "EV:k:HIGH": 1.0}
 
 
+# ============================================ (5b) longshot macro re-spec (backlog #20)
+def _venue_panel(rows) -> pd.DataFrame:
+    """Panel builder like ``_panel`` but with an explicit per-row ``venue`` (rows carry
+    (obs_date, iid, yes, vol, oi, close, event_key, venue))."""
+    df = pd.DataFrame(rows, columns=[
+        "obs_date", "instrument_id", "yes_price", "volume", "open_interest",
+        "close_time", "event_key", "venue"])
+    df["obs_date"] = pd.to_datetime(df["obs_date"])
+    df["close_time"] = pd.to_datetime(df["close_time"], utc=True)
+    df["question"] = df["instrument_id"]
+    df["status"] = "active"
+    return df
+
+
+def test_longshot_excludes_measured_macro_series_on_kalshi_only():
+    # yes_price=0.05 is squarely in the (0.03, 0.15) longshot band -> would score -1
+    # everywhere if not for the macro exclusion.
+    rows = [
+        ("2026-07-01", "EV:kalshi:KXCPIYOY-26MAY-T1", 0.05, 1, 1, "2026-08-01",
+         "KXCPIYOY-26MAY", "kalshi"),                                     # measured macro -> excluded
+        ("2026-07-01", "EV:kalshi:NFLSB-26-T1", 0.05, 1, 1, "2026-08-01",
+         "NFLSB-26", "kalshi"),                                           # non-macro kalshi -> scored
+        ("2026-07-01", "EV:polymarket:1", 0.05, 1, 1, "2026-08-01",
+         "KXCPIYOY-26MAY", "polymarket"),                                 # same series, not kalshi -> scored
+    ]
+    out = longshot_bias(_venue_panel(rows))
+    ids = set(out["instrument_id"])
+    assert "EV:kalshi:KXCPIYOY-26MAY-T1" not in ids
+    assert ids == {"EV:kalshi:NFLSB-26-T1", "EV:polymarket:1"}
+
+
+def test_longshot_excludes_legacy_unprefixed_macro_series():
+    rows = [
+        ("2026-07-01", "EV:kalshi:CPIYOY-23JUN-T1", 0.05, 1, 1, "2026-08-01",
+         "CPIYOY-23JUN", "kalshi"),
+    ]
+    out = longshot_bias(_venue_panel(rows))
+    assert out.empty
+
+
+def test_longshot_unmeasured_macro_ish_prefix_is_not_excluded():
+    # "CPIDELAY" and "GDPUSMIN" merely start with measured names; exact-match must NOT
+    # treat them as excluded.
+    rows = [
+        ("2026-07-01", "EV:kalshi:CPIDELAY-24X-T1", 0.05, 1, 1, "2026-08-01",
+         "CPIDELAY-24X", "kalshi"),
+        ("2026-07-01", "EV:kalshi:GDPUSMIN-24-T1", 0.05, 1, 1, "2026-08-01",
+         "GDPUSMIN-24", "kalshi"),
+    ]
+    out = longshot_bias(_venue_panel(rows))
+    assert set(out["instrument_id"]) == {"EV:kalshi:CPIDELAY-24X-T1", "EV:kalshi:GDPUSMIN-24-T1"}
+
+
+def test_resolution_convergence_unaffected_by_macro_exclusion():
+    # Same price path, only the series differs (one measured-macro, one not): the
+    # convergence signal must be byte-identical either way -- the re-spec only touches
+    # longshot_bias.
+    prices = [0.40, 0.42, 0.44, 0.46, 0.48, 0.50, 0.53, 0.56, 0.60, 0.63, 0.66, 0.70]
+    dates = pd.date_range("2026-07-01", periods=len(prices), freq="D")
+    close = dates[-1] + pd.Timedelta(days=8)
+    macro_rows = [(d, "EV:kalshi:M", p, 1, 1, close, "KXCPIYOY-26MAY", "kalshi")
+                  for d, p in zip(dates, prices)]
+    plain_rows = [(d, "EV:kalshi:M", p, 1, 1, close, "NOTMACRO-26MAY", "kalshi")
+                  for d, p in zip(dates, prices)]
+    macro_out = resolution_convergence(_venue_panel(macro_rows), window=5)
+    plain_out = resolution_convergence(_venue_panel(plain_rows), window=5)
+    assert not macro_out.empty
+    pd.testing.assert_frame_equal(macro_out, plain_out)
+
+
 # ==================================================== (6) convergence signal + PIT
 def _convergence_panel(prices):
     dates = pd.date_range("2026-07-01", periods=len(prices), freq="D")

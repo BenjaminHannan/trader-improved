@@ -18,6 +18,79 @@ import pandas as pd
 OUTPUT_COLUMNS = ["obs_date", "instrument_id", "value"]
 
 
+# ----------------------------------------------------------------------------------------
+# Documented re-specification (backlog #20, 2026-07-10/11): the taker-side longshot fade
+# has NO measured net edge on Kalshi US-macro-release "economics" ladders at daily
+# granularity. Three independent pre-registered diagnostics on 71k resolved-market rows
+# (settlements 2021-07-15 through 2026-07-02) concur:
+#
+#   1. diagnostics/kalshi_longshot_fade.json, P2 — the tradeable NO-side fade of 5-20c
+#      longshots nets -0.91% post-fee (t=-0.40, n=352); the pre-registered bar was
+#      t >= +1.645 -> FAIL. (P1's -76.9%, t=-9.7 confirms the raw <=10c tail bias is real
+#      but is the *fee-eaten* longshot side itself, not a tradeable NO-side edge.)
+#   2. diagnostics/events_calibration.json — an isotonic recalibration of macro entry
+#      prices fails to beat the raw price on held-out Brier score (A1: brier_price=0.0781
+#      vs brier_g=0.0778, paired bootstrap p=0.41 -> FAIL); prices in this sample are
+#      already calibrated outside the <=5c tail, and that tail is exactly what (1) shows is
+#      fee-eaten.
+#   3. the pooled Mincer-Zarnowitz slope on the macro-only sample is insignificant
+#      (psi=0.0176, t=1.30, n=2180) even though Burgi-Deng-Whelan's cross-category slope is
+#      significant; Whelan's Table 8 shows the favorite-longshot bias concentrates in OTHER
+#      categories (sports, entertainment, ...), not economics.
+#
+# Evidence-granularity caveat: measured at T-1 daily bars on Kalshi economics ladders only.
+# This does NOT bear on :func:`resolution_convergence` (no evidence against it), on
+# non-Kalshi venues (Polymarket was not sampled), or on non-macro Kalshi series.
+#
+# The 12 measured series (current-generation ``KX``-prefixed tickers) plus their legacy
+# unprefixed aliases (older Kalshi markets used the bare series name before the ``KX``
+# rebrand). Exact-match only — NOT a prefix/substring check, so an unmeasured series that
+# merely *starts with* a measured name (e.g. "GDPUSMIN", "CPIDELAY") is not caught by this
+# set and defaults to tradeable.
+_EXCLUDED_MACRO_SERIES = frozenset({
+    "KXCPI", "KXCPIYOY", "KXCPICORE", "KXCPICOREYOY", "KXPCECORE",
+    "KXPAYROLLS", "KXUSNFP", "KXU3", "KXJOBLESS", "KXFED", "KXFEDDECISION", "KXGDP",
+    "CPI", "CPIYOY", "CPICORE", "CPICOREYOY", "PCECORE",
+    "PAYROLLS", "USNFP", "U3", "JOBLESS", "FED", "FEDDECISION", "GDP",
+})
+
+
+def _series_of(event_key, instrument_id: str) -> str:
+    """The series prefix of a market: the token before the first ``-``.
+
+    Prefers ``event_key`` (the venue's shared-event ticker, e.g. ``"KXCPIYOY-26MAY"`` ->
+    ``"KXCPIYOY"``). Falls back to the ticker embedded in ``instrument_id``
+    (``"EV:kalshi:KXCPIYOY-26MAY-T4.2"`` -> ``"KXCPIYOY"``) when ``event_key`` is missing —
+    the Kalshi series ticker is always the event ticker's own prefix before its first
+    ``-``, so the same split works on either string.
+    """
+    key = event_key
+    if pd.isna(key) or str(key) == "":
+        parts = str(instrument_id).split(":", 2)
+        key = parts[2] if len(parts) == 3 else str(instrument_id)
+    return str(key).split("-", 1)[0]
+
+
+def _excluded_macro_kalshi_mask(panel: pd.DataFrame) -> pd.Series:
+    """Rows on a Kalshi market whose series is one of the 12 excluded macro series.
+
+    Venue-gated: only ``venue == "kalshi"`` rows are eligible, so a Polymarket market
+    sharing the same series text is never excluded. Missing ``venue``/``event_key``
+    columns default to *not excluded* (tradeable), matching the exact-match-only,
+    fail-open design of :data:`_EXCLUDED_MACRO_SERIES`.
+    """
+    if "venue" in panel.columns:
+        is_kalshi = panel["venue"].astype(str).str.lower() == "kalshi"
+    else:
+        is_kalshi = pd.Series(False, index=panel.index)
+    event_key = panel["event_key"] if "event_key" in panel.columns else pd.Series(None, index=panel.index)
+    series = pd.Series(
+        [_series_of(ek, iid) for ek, iid in zip(event_key, panel["instrument_id"])],
+        index=panel.index,
+    )
+    return is_kalshi & series.isin(_EXCLUDED_MACRO_SERIES)
+
+
 def longshot_bias(panel: pd.DataFrame, low: float = 0.03, high: float = 0.15) -> pd.DataFrame:
     """Fade the favorite-longshot bias.
 
@@ -34,6 +107,13 @@ def longshot_bias(panel: pd.DataFrame, low: float = 0.03, high: float = 0.15) ->
         row is absent from the output).
 
     Pointwise in ``yes_price`` -> trivially point-in-time.
+
+    **Re-specification (backlog #20)**: on Kalshi markets (``venue == "kalshi"``) whose
+    series is one of the 12 measured US-macro-release series in
+    :data:`_EXCLUDED_MACRO_SERIES` (or a legacy unprefixed alias), this signal never
+    fires — see that frozenset's docstring for the three diagnostics that established no
+    net edge there. Every other market — other Kalshi series, and all Polymarket markets
+    regardless of series text — is unaffected.
     """
     if panel is None or panel.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
@@ -41,6 +121,7 @@ def longshot_bias(panel: pd.DataFrame, low: float = 0.03, high: float = 0.15) ->
     value = pd.Series(np.nan, index=panel.index)
     value[(p > low) & (p < high)] = -1.0          # overpriced longshot -> sell YES
     value[(p > 1 - high) & (p < 1 - low)] = 1.0    # underpriced favorite -> buy YES
+    value[_excluded_macro_kalshi_mask(panel)] = np.nan  # re-spec: no macro-release fade on Kalshi
     out = pd.DataFrame({
         "obs_date": panel["obs_date"], "instrument_id": panel["instrument_id"],
         "value": value,
