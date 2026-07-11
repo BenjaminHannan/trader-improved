@@ -129,6 +129,15 @@ def _wide_returns(prices: pd.DataFrame, ids: list[str],
     documented follow-up for measuring the model on the exact PIT book.
     """
     df = prices[prices["instrument_id"].isin(ids)]
+    # Vendor-dedupe BEFORE pivoting, using the lake's own latest-visible-vintage
+    # rule (asof_panel's tie-break at as_of=now). aggfunc="last" alone picks an
+    # arbitrary vendor per cell: on reused tickers whose vendors serve DIFFERENT
+    # entities (the 2026-07-11 KG/MI/SBNY finding — each vendor smooth, the mix a
+    # run-alternator) that manufactured fake +-40,000% daily returns and broke the
+    # equity bias-stat cells.
+    if "available_from" in df.columns:
+        df = (df.sort_values(["available_from", "ingested_at"])
+                .drop_duplicates(subset=["obs_date", "instrument_id"], keep="last"))
     close = df.pivot_table(index="obs_date", columns="instrument_id",
                            values="close", aggfunc="last").sort_index()
     coverage = close.notna().mean()

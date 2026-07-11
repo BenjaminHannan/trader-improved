@@ -1,0 +1,38 @@
+{
+  "generated_at": "2026-07-11T18:32:58.745547+00:00",
+  "lake_root": "data",
+  "min_abs_corr": 0.6,
+  "n_equity_ids": 751,
+  "n_months": 125,
+  "factor_return_span": [
+    "2016-03-01",
+    "2026-07-10"
+  ],
+  "series_id_map": {
+    "Mkt-RF": "FF_MKT_RF",
+    "SMB": "FF_SMB",
+    "HML": "FF_HML",
+    "RF": "FF_RF",
+    "Mom": "FF_MOM"
+  },
+  "verdict": {
+    "market": {
+      "vendor_series": "Mkt-RF",
+      "corr": 0.9477590259231498,
+      "gated": true,
+      "passed": true
+    },
+    "momentum": {
+      "vendor_series": "Mom",
+      "corr": 0.5653296531687716,
+      "gated": true,
+      "passed": false
+    },
+    "size": {
+      "vendor_series": "SMB",
+      "corr": -0.27228266672354906,
+      "gated": false,
+      "passed": null
+    }
+  }
+}
