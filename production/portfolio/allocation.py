@@ -8,8 +8,24 @@ sleeves that lack enough history to trust their covariance. Everything is traili
 """
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
+
+# Daily-return variance floor below which a sleeve is treated as "degenerate" (dead) rather
+# than genuinely low-risk, for purposes of the ERC solve in `erc_weights`.
+#
+# Why 1e-8 (= (1bp daily vol)^2): the smallest per-sleeve cost floor in configs/costs.yaml is
+# 5bp (equities/fx_etf/rates_etf/intl_etf/sector_etf; crypto is 30bp). A sleeve whose optimizer
+# is actually clearing that floor and trading carries daily return vol at LEAST comparable to
+# it -- in practice real sleeves run tens to hundreds of bp/day of vol, i.e. variance >= 1e-6,
+# two-plus orders of magnitude above this floor. A sleeve whose alpha never clears its cost
+# floor is correctly left untraded by the optimizer, and its return series is then pure
+# solver residual (~1e-9-scale weights on ~1e-2-scale price moves -> variance around 1e-20 to
+# 1e-11) -- two-plus orders of magnitude BELOW this floor. 1e-8 sits in the wide gap between
+# the two regimes, so it cleanly separates "dead" sleeves from any sleeve actually trading.
+_MIN_SLEEVE_VARIANCE = 1e-8
 
 
 def _ewma_cov(returns: pd.DataFrame, halflife: float) -> pd.DataFrame:
@@ -47,11 +63,46 @@ def erc_weights(cov: pd.DataFrame, tol: float = 1e-8, max_iter: int = 200) -> pd
     oscillation of the raw x_i ∝ 1/(Sigma x)_i map. For a diagonal covariance this
     collapses to inverse-vol weights. Converges when the dispersion of normalized risk
     contributions (max - min) falls below `tol`.
+
+    Sleeves whose covariance diagonal is below `_MIN_SLEEVE_VARIANCE` are "degenerate" --
+    typically a sleeve whose optimizer correctly refused to trade (alpha below its cost
+    floor), leaving a return series that is pure solver residual rather than real risk. The
+    raw fixed point above treats near-zero variance as near-zero risk and explosively levers
+    such a sleeve toward weight 1 (the `1e-16` floor on `Sigma @ x` exists only to avoid a
+    divide-by-zero, not to express a risk view). Degenerate sleeves are therefore excluded
+    from the solve entirely and assigned weight 0 -- a dead sleeve has no positions to fund
+    anyway -- with the live sleeves' ERC weights renormalized over just themselves. If every
+    sleeve is degenerate there is nothing to solve; fall back to equal weight across all of
+    them and warn loudly (this should never happen with real, differentiated sleeves).
     """
     idx = cov.index
-    Sigma = cov.to_numpy(dtype=float)
-    n = Sigma.shape[0]
-    x = np.full(n, 1.0 / n)
+    Sigma_full = cov.to_numpy(dtype=float)
+    n = Sigma_full.shape[0]
+    diag = np.diag(Sigma_full)
+    live = diag >= _MIN_SLEEVE_VARIANCE
+
+    if not live.any():
+        warnings.warn(
+            f"erc_weights: all {n} sleeve(s) {list(idx)} have variance below the degenerate "
+            f"floor ({_MIN_SLEEVE_VARIANCE:g}) -- diag={np.array2string(diag, precision=3)}. "
+            "Falling back to equal weight across all sleeves.",
+            stacklevel=2,
+        )
+        return pd.Series(np.full(n, 1.0 / n), index=idx)
+
+    if not live.all():
+        dead = [s for s, ok in zip(idx, live) if not ok]
+        warnings.warn(
+            f"erc_weights: excluding degenerate sleeve(s) {dead} (variance below "
+            f"{_MIN_SLEEVE_VARIANCE:g} -- solver residual, not real risk) from the ERC solve; "
+            "assigning them weight 0 and renormalizing over the remaining live sleeves.",
+            stacklevel=2,
+        )
+
+    live_idx = [s for s, ok in zip(idx, live) if ok]
+    Sigma = cov.loc[live_idx, live_idx].to_numpy(dtype=float)
+    n_live = Sigma.shape[0]
+    x = np.full(n_live, 1.0 / n_live)
     for _ in range(max_iter):
         m = np.maximum(Sigma @ x, 1e-16)
         x = np.sqrt(x / m)
@@ -59,7 +110,10 @@ def erc_weights(cov: pd.DataFrame, tol: float = 1e-8, max_iter: int = 200) -> pd
         shares = _risk_contrib_shares(x, Sigma)
         if shares.max() - shares.min() < tol:
             break
-    return pd.Series(x, index=idx)
+
+    out = pd.Series(0.0, index=idx)
+    out.loc[live_idx] = x
+    return out
 
 
 def apply_risk_caps(w, cov, crypto_cap: float | None = None,

@@ -11,6 +11,7 @@ import copy
 import shutil
 import subprocess
 import sys
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -614,7 +615,8 @@ from production.events.backtest import event_sleeve_returns
 from production.events.sizing import size_event_book, taker_fee_fraction
 from production.events.markets import dedupe_related, liquid_universe
 from production.events.backtest import _combined_signals
-from production.portfolio.allocation import _ewma_cov, _risk_contrib_shares, sleeve_allocation
+from production.portfolio.allocation import (_ewma_cov, _risk_contrib_shares, erc_weights,
+                                              sleeve_allocation)
 from production.core.calendar import rebalance_grid
 
 
@@ -945,6 +947,63 @@ def test_degenerate_sleeve_sharpe_matches_ann_vol_not_solver_noise(_degenerate_s
         assert h["ann_return_net"] != 0.0
     else:
         assert h["ann_vol_net"] < 1e-4
+
+
+# ============================= allocation: dead-sleeve ERC exclusion (2026-07-11 incident)
+def test_degenerate_sleeve_allocation_excludes_dead_sleeve_from_erc(_degenerate_sleeve_result):
+    """The 2026-07-11 incident's actual capital-misallocation bug, at the allocation layer:
+    the unfixed erc_weights fixed point treated crypto's ~0 variance (a correct "never trade"
+    decision, cost floor never cleared) as ~0 risk and levered it to 99.994% of the book next
+    to fx_etf's 0.006%. With the fix, at every rebalance date where both sleeves have cleared
+    warmup_days (so the ERC/warm code path -- not the cold inverse-vol fallback -- is what's
+    under test), crypto must get ~0 and the healthy fx_etf control ~1, and the exclusion must
+    warn loudly rather than silently clip."""
+    sr = _degenerate_sleeve_result.sleeve_returns
+    cfg = backtest_config()
+    warmup = int(cfg["allocation"]["warmup_days"])
+    months = pd.DatetimeIndex(sorted({pd.Timestamp(t.year, t.month, 1) for t in sr.index}))
+    checked = False
+    for t in months:
+        r = sr[sr.index < t]
+        counts = r.notna().sum()
+        warm = [s for s in sr.columns if counts.get(s, 0) >= warmup]
+        if "crypto" not in warm or "fx_etf" not in warm or len(warm) < 2:
+            continue
+        checked = True
+        with pytest.warns(UserWarning, match="degenerate"):
+            w = sleeve_allocation(sr, t, cfg)
+        assert w["crypto"] == pytest.approx(0.0, abs=1e-9)
+        assert w["fx_etf"] == pytest.approx(1.0, abs=1e-9)
+    assert checked, "fixture never reaches a rebalance date where both sleeves are warm"
+
+
+def test_erc_weights_all_degenerate_falls_back_to_equal_weight_with_warning():
+    """If every sleeve in the ERC block is variance-degenerate (the pathological case where
+    every sleeve's optimizer refuses to trade) there is no live risk left to equalize --
+    erc_weights must fall back to equal weight across the block rather than dividing
+    near-zero by near-zero, and must warn loudly rather than silently clipping."""
+    idx = ["crypto", "events"]
+    cov = pd.DataFrame(np.diag([1e-14, 1e-15]), index=idx, columns=idx)
+    with pytest.warns(UserWarning, match="degenerate floor"):
+        w = erc_weights(cov)
+    assert w.to_numpy() == pytest.approx([0.5, 0.5])
+    assert w.sum() == pytest.approx(1.0)
+
+
+def test_erc_weights_normal_two_sleeve_case_unchanged():
+    """Regression guard: with two genuinely healthy (non-degenerate) sleeve variances, the
+    dead-sleeve exclusion must never fire, and erc_weights must reproduce the exact analytic
+    diagonal-cov result (inverse-vol weights) exactly as it did before the fix."""
+    idx = ["equity", "crypto"]
+    # Realistic daily vols: 1.5% equity, 4% crypto -- both many orders of magnitude above the
+    # 1e-8 degenerate-variance floor, so this must behave identically to the pre-fix code.
+    vols = np.array([0.015, 0.04])
+    cov = pd.DataFrame(np.diag(vols ** 2), index=idx, columns=idx)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning here would mean the exclusion mis-fired
+        w = erc_weights(cov)
+    assert w["equity"] / w["crypto"] == pytest.approx(vols[1] / vols[0], rel=1e-4)
+    assert w.sum() == pytest.approx(1.0)
 
 
 # ============================================================ CLI smoke (subprocess)
