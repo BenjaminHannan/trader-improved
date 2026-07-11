@@ -76,7 +76,11 @@ class KalshiLoader(BaseLoader):
         "min_rows": 1,
     }
 
-    def __init__(self, lake=None, instruments=None, status="active", max_markets=500,
+    # status="open" — the live-market enum value. "active" 400s as of 2026-07-11
+    # ("invalid status filter"; probed: open/unopened/settled accepted) — the
+    # third vendor-side drift on this API this week (candlestick path, dollar
+    # schema, now the status enum).
+    def __init__(self, lake=None, instruments=None, status="open", max_markets=500,
                  page_limit=1000):
         super().__init__(lake, instruments)
         self.status = status
