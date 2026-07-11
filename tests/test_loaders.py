@@ -1007,6 +1007,35 @@ def test_basis_try_ohlcv_early_exits_when_first_candidate_is_already_deep(monkey
     assert "BTC/USDT" not in calls                 # never consulted — BTC/USD was deep enough
 
 
+def test_basis_transform_drops_dislocation_rows_loudly():
+    """One |basis| > 0.5 flash-crash bar in okx's deep 2020 alt history sank a
+    50,313-row re-pull via the fatal ranges audit (2026-07-11). transform must
+    drop such rows with a warning instead of letting one bar sink the ingest;
+    the expectations range stays as the systemic backstop."""
+    from production.data.loaders.ccxt_perp_basis import CcxtPerpBasisLoader
+
+    day = pd.Timestamp("2020-03-12")
+    ms = int(day.timestamp() * 1000)
+    ms2 = ms + 86_400_000
+    instruments = pd.DataFrame([{
+        "instrument_id": "CR:BTC:2015-01-01", "asset_class": "crypto",
+        "sleeve": "crypto", "symbol": "BTC",
+        "vendor_symbols": json.dumps({"ccxt": "BTC/USD"}),
+        "currency": "USD", "valid_from": "1990-01-01", "valid_to": "2099-01-01",
+        "proxy_of": None, "sector": None, "meta": "{}",
+    }])
+    raw = {"BTC": {
+        # day 1: swap 2x spot (garbage bar, basis = +1.0); day 2: sane +0.5% basis
+        "spot": [[ms, 0, 0, 0, 5000.0, 1], [ms2, 0, 0, 0, 5000.0, 1]],
+        "swap": [[ms, 0, 0, 0, 10000.0, 1], [ms2, 0, 0, 0, 5025.0, 1]],
+    }}
+    loader = CcxtPerpBasisLoader(instruments=instruments)
+    out = loader.transform(raw)
+    assert len(out) == 1                                # garbage bar dropped
+    assert out.iloc[0]["basis"] == pytest.approx(0.005)
+    assert any("dislocation" in w for w in loader.warnings)
+
+
 # ==================================================== (13) tiingo secondary feed
 def test_tiingo_rows_to_long_uses_adjusted_fields():
     """Canned payload of the REAL tiingo shape (live probe 2026-07-07): adjClose /

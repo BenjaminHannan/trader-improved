@@ -273,6 +273,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "= raw EWMA). Structural sleeves are untouched. The config "
                         "file is never modified — this exists so candidate-vs-"
                         "incumbent adjudication runs are one command each.")
+    p.add_argument("--ewma-halflife", type=float, default=None,
+                   help="CANDIDATE override for ewma_halflife_days in "
+                        "factor_covariance AND instrument_covariance (structural "
+                        "cov + its small-sleeve fallback; specific_risk untouched). "
+                        "Combine with --sleeves to scope the run to the sleeve the "
+                        "candidate targets — the config file is never modified.")
     p.add_argument("--sleeves", default=None,
                    help="comma-separated sleeve subset (default: all present); a "
                         "candidate that only changes instrument_covariance only "
@@ -295,6 +301,15 @@ def main(argv: list[str] | None = None) -> int:
         cfg = {**cfg, "instrument_covariance": icov}
         print(f"CANDIDATE instrument_covariance override: {icov} "
               "(config file untouched)")
+    if args.ewma_halflife:
+        hl = float(args.ewma_halflife)
+        cfg = {**cfg,
+               "factor_covariance": {**(cfg.get("factor_covariance") or {}),
+                                     "ewma_halflife_days": hl},
+               "instrument_covariance": {**(cfg.get("instrument_covariance") or {}),
+                                         "ewma_halflife_days": hl}}
+        print(f"CANDIDATE ewma_halflife_days override: {hl} "
+              "(factor + instrument covariance; config file untouched)")
 
     if args.synthetic:
         print("synthetic run: GBM bundle, no lake")

@@ -139,4 +139,16 @@ class CcxtPerpBasisLoader(BaseLoader):
             frames.append(f)
         if not frames:
             return pd.DataFrame(columns=["obs_date", "instrument_id", "basis", "asset_class"])
-        return pd.concat(frames, ignore_index=True).dropna(subset=["basis"]).reset_index(drop=True)
+        out = pd.concat(frames, ignore_index=True).dropna(subset=["basis"]).reset_index(drop=True)
+        # Row-level dislocation guard: a |basis| > 0.5 bar is a flash-crash /
+        # garbage quote (one such bar in okx's deep 2020 alt history sank a
+        # 50,313-row re-pull on 2026-07-11 via the fatal ranges audit). Drop the
+        # rows LOUDLY; the expectations range stays as the systemic backstop —
+        # if garbage ever dominates, min_rows/nulls still catch it.
+        bad = out["basis"].abs() > 0.5
+        if bad.any():
+            self.warnings.append(
+                f"basis: dropped {int(bad.sum())} dislocation row(s) (|basis|>0.5 — "
+                "flash-crash/garbage bars)")
+            out = out.loc[~bad].reset_index(drop=True)
+        return out
