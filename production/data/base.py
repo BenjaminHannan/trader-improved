@@ -76,7 +76,12 @@ def stamp_availability(df: pd.DataFrame, rule: AvailabilityRule) -> pd.DataFrame
     elif rule.kind == "ingest_time":
         avail = pd.to_datetime(df["ingested_at"], utc=True)
     elif rule.kind == "explicit":
-        avail = pd.to_datetime(df[p["column"]], utc=True)
+        # format="ISO8601": explicit columns carry vendor timestamps of MIXED
+        # sub-second precision (Kalshi politics settlements sometimes lack .%f
+        # entirely — found 2026-07-11 when it killed a 4h backfill at stamp time);
+        # pandas' single-format inference chokes on the mix, the ISO8601 parser
+        # does not.
+        avail = pd.to_datetime(df[p["column"]], utc=True, format="ISO8601")
     else:
         raise ValueError(f"unknown availability rule kind: {rule.kind!r}")
 

@@ -124,6 +124,20 @@ def test_explicit_rule():
     assert out["available_from"].iloc[0] == pd.Timestamp("2021-06-03", tz=UTC)
 
 
+def test_explicit_rule_mixed_iso_precision():
+    """Vendor timestamps of MIXED sub-second precision in one column (Kalshi
+    politics settlements sometimes lack .%f — killed a 4h backfill at stamp time
+    2026-07-11): the ISO8601 parser must accept the mix."""
+    df = pd.DataFrame({
+        "obs_date": pd.to_datetime(["2025-11-14", "2025-11-15"]),
+        "knowable_at": ["2025-11-14T16:32:24+00:00",             # no fraction
+                        "2025-11-15T13:36:24.520345Z"],          # microseconds
+    })
+    out = stamp_availability(df, AvailabilityRule("explicit", {"column": "knowable_at"}))
+    assert out["available_from"].iloc[0] == pd.Timestamp("2025-11-14T16:32:24", tz=UTC)
+    assert out["available_from"].iloc[1] == pd.Timestamp("2025-11-15T13:36:24.520345", tz=UTC)
+
+
 # ================================================= (4) yfinance transform shape
 def test_yfinance_multiindex_to_long_and_dollar_volume():
     dates = pd.date_range("2020-01-02", periods=3, freq="B")
