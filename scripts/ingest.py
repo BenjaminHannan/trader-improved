@@ -168,6 +168,15 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
         # sleeve symbols lowercased; the loader does that internally too, so the
         # plain uppercase sleeve list is passed straight through.
         return CoinMetricsRatesLoader(lake, instruments, assets=_sleeve_symbols("crypto"))
+    if dataset == "binance_hist":
+        from production.data.loaders.binance_vision import BinanceVisionLoader
+
+        # Third crypto price feed (secondary, backfill-only like cm_rates): closes
+        # the pre-coinbase depth gap Coin Metrics' community CSVs cannot reach
+        # (sol/avax/atom/fil/near/grt/matic/shib have no PriceUSD there) and adds
+        # delisted-pair coverage from Binance's bulk archive. Same crypto sleeve
+        # symbol list as ccxt/cm_rates.
+        return BinanceVisionLoader(lake, instruments, assets=_sleeve_symbols("crypto"))
     if dataset == "funding":
         from production.data.loaders.ccxt_funding import CcxtFundingLoader
 
@@ -225,9 +234,9 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
     raise ValueError(f"no loader for dataset {dataset!r}")
 
 
-DATASETS = ["prices", "stooq", "tiingo", "alpaca", "cm_rates", "funding", "basis", "fx",
-            "macro", "french", "cot", "fundamentals", "nowcast", "kalshi_hist",
-            "crypto_meta", "defi_tvl", "universe", "all"]
+DATASETS = ["prices", "stooq", "tiingo", "alpaca", "cm_rates", "binance_hist", "funding",
+            "basis", "fx", "macro", "french", "cot", "fundamentals", "nowcast",
+            "kalshi_hist", "crypto_meta", "defi_tvl", "universe", "all"]
 
 # Curated `source` values that identify the two independent price feeds we cross-check.
 _PRIMARY_SOURCES = ("yfinance",)
