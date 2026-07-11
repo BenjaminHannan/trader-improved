@@ -14,10 +14,11 @@ import pandas.testing as pdt
 
 from production.execution import alpaca_paper as ap
 from production.execution.alpaca_paper import AlpacaPaperClient, ExecutionError
-from production.core.lake import Lake
+from production.core.lake import Lake, LakeError
 from production.execution.orders import ORDER_COLUMNS, target_weights_to_orders
 from production.execution.shortfall import implementation_shortfall
-from production.execution.tca import calibrate_overrides, read_overrides, write_overrides
+from production.execution.tca import (SHORTFALL_LOG_COLUMNS, append_shortfall_log,
+                                      calibrate_overrides, read_overrides, write_overrides)
 from production.backtest.cost_model import CostModel
 from production.core.config import costs_config
 from production.reference.instruments import build_instrument_master
@@ -480,3 +481,222 @@ def test_daily_run_dry_run_limit_prints_limit_column(monkeypatch, capsys,
     out = capsys.readouterr().out
     assert "DRY-RUN" in out
     assert "limit_price" in out
+
+
+# ---------------------------------------------------- shortfall_log accumulation (#15)
+def test_append_shortfall_log_preserves_prior_rows_and_noop_on_empty(tmp_path):
+    """lake.write_reference REPLACES the parquet wholesale (no native append) —
+    append_shortfall_log must read the prior table back and concatenate ahead of it so
+    earlier fills are never lost. An empty frame is a no-op: no table gets created."""
+    lake = Lake(tmp_path)
+    assert append_shortfall_log(pd.DataFrame(columns=SHORTFALL_LOG_COLUMNS), lake) is None
+    with pytest.raises(LakeError):
+        lake.read_reference("shortfall_log")
+
+    first = pd.DataFrame([{
+        "instrument_id": "EQ:AAA:2000-01-03", "side": "buy", "qty": 1.0,
+        "decision_price": 10.0, "fill_price": 10.1, "shortfall_bps": 100.0,
+        "filled_at": pd.Timestamp("2026-07-01T00:00:00Z"),
+        "run_id": pd.Timestamp("2026-07-01T00:00:00Z"),
+    }], columns=SHORTFALL_LOG_COLUMNS)
+    append_shortfall_log(first, lake)
+    second = pd.DataFrame([{
+        "instrument_id": "EQ:BBB:2000-01-03", "side": "sell", "qty": 2.0,
+        "decision_price": 20.0, "fill_price": 19.8, "shortfall_bps": 100.0,
+        "filled_at": pd.Timestamp("2026-07-02T00:00:00Z"),
+        "run_id": pd.Timestamp("2026-07-02T00:00:00Z"),
+    }], columns=SHORTFALL_LOG_COLUMNS)
+    append_shortfall_log(second, lake)
+
+    table = lake.read_reference("shortfall_log")
+    assert len(table) == 2
+    assert set(table["instrument_id"]) == {"EQ:AAA:2000-01-03", "EQ:BBB:2000-01-03"}
+
+
+def test_accumulate_shortfall_appends_correctly_and_preserves_prior_rows(monkeypatch, tmp_path):
+    """A fake --live run's fill fetch produces correctly-computed shortfall rows (known-
+    answer arithmetic, cross-checked against implementation_shortfall's own known-answer
+    tests) and appends onto whatever the shortfall_log table already held."""
+    from scripts.daily_run import _accumulate_shortfall
+
+    lake = Lake(tmp_path)
+    prior = pd.DataFrame([{
+        "instrument_id": "EQ:ZZZ:2000-01-03", "side": "buy", "qty": 1.0,
+        "decision_price": 10.0, "fill_price": 10.1, "shortfall_bps": 100.0,
+        "filled_at": pd.Timestamp("2026-07-01T00:00:00Z"),
+        "run_id": pd.Timestamp("2026-07-01T00:00:00Z"),
+    }], columns=SHORTFALL_LOG_COLUMNS)
+    lake.write_reference(prior, "shortfall_log")
+
+    canned = {"order-aaa": "101.00", "order-bbb": "49.50"}
+
+    def fake_request(method, url, **kw):
+        assert method == "GET"
+        order_id = url.rsplit("/", 1)[-1]
+        return _FakeResponse(200, payload={"id": order_id, "status": "filled",
+                                           "filled_avg_price": canned[order_id]})
+
+    monkeypatch.setattr(ap.requests, "request", fake_request)
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+
+    submit_result = pd.DataFrame({
+        "instrument_id": ["EQ:AAA:2000-01-03", "EQ:BBB:2000-01-03"],
+        "alpaca_symbol": ["AAA", "BBB"], "side": ["buy", "sell"],
+        "qty": [10.0, 5.0], "order_type": ["market", "market"],
+        "limit_price": [None, None], "status": ["accepted", "accepted"],
+        "broker_order_id": ["order-aaa", "order-bbb"],
+    })
+    decision_prices = pd.Series({"EQ:AAA:2000-01-03": 100.0, "EQ:BBB:2000-01-03": 50.0})
+    run_id = pd.Timestamp("2026-07-11T12:00:00Z")
+
+    _accumulate_shortfall(client, lake, submit_result, decision_prices, run_id)
+
+    table = lake.read_reference("shortfall_log")
+    assert len(table) == 3
+    assert "EQ:ZZZ:2000-01-03" in set(table["instrument_id"])   # prior row preserved
+
+    new_rows = table[table["instrument_id"] != "EQ:ZZZ:2000-01-03"].set_index("instrument_id")
+    # buy @ decision 100, fill 101 -> +100 bps (known-answer, matches shortfall.py tests).
+    assert new_rows.loc["EQ:AAA:2000-01-03", "shortfall_bps"] == pytest.approx(100.0)
+    assert new_rows.loc["EQ:AAA:2000-01-03", "side"] == "buy"
+    assert new_rows.loc["EQ:AAA:2000-01-03", "qty"] == pytest.approx(10.0)
+    assert new_rows.loc["EQ:AAA:2000-01-03", "decision_price"] == pytest.approx(100.0)
+    assert new_rows.loc["EQ:AAA:2000-01-03", "fill_price"] == pytest.approx(101.0)
+    # sell @ decision 50, fill 49.5 -> +100 bps.
+    assert new_rows.loc["EQ:BBB:2000-01-03", "shortfall_bps"] == pytest.approx(100.0)
+    assert (table["run_id"] == run_id).sum() == 2
+    assert table["filled_at"].notna().all()
+
+
+def test_accumulate_shortfall_skips_unfilled_orders(monkeypatch, tmp_path):
+    """An order the broker hasn't filled yet (no filled_avg_price) is not logged as a
+    garbage/zero shortfall row — it's simply absent until a later run observes the fill."""
+    from scripts.daily_run import _accumulate_shortfall
+
+    lake = Lake(tmp_path)
+
+    def fake_request(method, url, **kw):
+        return _FakeResponse(200, payload={"id": "order-aaa", "status": "new",
+                                           "filled_avg_price": None})
+
+    monkeypatch.setattr(ap.requests, "request", fake_request)
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+
+    submit_result = pd.DataFrame({
+        "instrument_id": ["EQ:AAA:2000-01-03"], "alpaca_symbol": ["AAA"],
+        "side": ["buy"], "qty": [10.0], "order_type": ["market"],
+        "limit_price": [None], "status": ["accepted"],
+        "broker_order_id": ["order-aaa"],
+    })
+    decision_prices = pd.Series({"EQ:AAA:2000-01-03": 100.0})
+    _accumulate_shortfall(client, lake, submit_result, decision_prices,
+                          pd.Timestamp("2026-07-11T12:00:00Z"))
+
+    with pytest.raises(LakeError):
+        lake.read_reference("shortfall_log")   # nothing filled -> nothing written
+
+
+def test_accumulate_shortfall_fetch_failure_warns_and_completes(monkeypatch, capsys, tmp_path):
+    """A fill-fetch failure (broker read error, retries exhausted) must degrade to a
+    printed warning and return — never raise, never block the run that already
+    submitted real orders to the broker."""
+    from scripts.daily_run import _accumulate_shortfall
+
+    lake = Lake(tmp_path)
+    monkeypatch.setattr(ap.requests, "request",
+                        lambda *a, **k: _FakeResponse(503, text="down"))
+    monkeypatch.setattr(ap.time, "sleep", lambda *_: None)
+    client = AlpacaPaperClient(key_id="k", secret="s", max_retries=2, backoff=0.0)
+
+    submit_result = pd.DataFrame({
+        "instrument_id": ["EQ:AAA:2000-01-03"], "alpaca_symbol": ["AAA"],
+        "side": ["buy"], "qty": [10.0], "order_type": ["market"],
+        "limit_price": [None], "status": ["accepted"],
+        "broker_order_id": ["order-aaa"],
+    })
+    decision_prices = pd.Series({"EQ:AAA:2000-01-03": 100.0})
+
+    _accumulate_shortfall(client, lake, submit_result, decision_prices,
+                          pd.Timestamp("2026-07-11T12:00:00Z"))   # must not raise
+
+    assert "WARNING" in capsys.readouterr().err
+    with pytest.raises(LakeError):
+        lake.read_reference("shortfall_log")
+
+
+def test_daily_run_dry_run_writes_no_shortfall_log(monkeypatch, pregate_engine_registry,
+                                                    tmp_path):
+    # --dry-run must touch the lake for nothing — no reference dir even gets created.
+    monkeypatch.setattr(ap.requests, "request", _no_http)
+    from scripts.daily_run import main
+
+    lake_root = tmp_path / "lake"
+    rc = main(["--synthetic", "--dry-run", "--lake-root", str(lake_root),
+               "--start", "2019-01-01", "--end", "2019-09-30"])
+    assert rc == 0
+    assert not lake_root.exists()
+
+
+# ------------------------------------------------ live path consumes cost overrides (#14)
+def test_daily_run_live_path_threads_cost_overrides_into_engine(monkeypatch,
+                                                                 pregate_engine_registry,
+                                                                 tmp_path):
+    """Backlog #14 follow-up: daily_run must thread the lake's TCA-calibrated
+    cost_overrides table into the SAME CostModel construction run_backtest performs for
+    the backtest path — previously the live runner never passed `lake=` through at all.
+    Narrowest seam: a CostModel spy pins the EXACT overrides_table argument the engine
+    is constructed with (mirrors test_backtest_engine.
+    test_run_backtest_reads_lake_cost_overrides), and the identical loud UserWarning
+    ("cost overrides ACTIVE") must fire — a live run never silently changes cost regime."""
+    monkeypatch.setattr(ap.requests, "request", _no_http)   # dry-run: still zero HTTP
+    import production.backtest.engine as _eng
+    from scripts.daily_run import main
+
+    lake_root = tmp_path / "lake"
+    lake = Lake(lake_root)
+    override = {"EQ:SYN00:2000-01-03": {"half_spread_bps": 50.0, "n_fills": 30,
+                                        "median_abs_shortfall_bps": 40.0}}
+    write_overrides(override, lake)
+
+    captured = {}
+    real_cls = _eng.CostModel
+
+    class _SpyCostModel(real_cls):
+        def __init__(self, cfg=None, overrides_table=None):
+            captured["overrides_table"] = overrides_table
+            super().__init__(cfg, overrides_table=overrides_table)
+
+    monkeypatch.setattr(_eng, "CostModel", _SpyCostModel)
+
+    with pytest.warns(UserWarning, match="cost overrides ACTIVE"):
+        rc = main(["--synthetic", "--dry-run", "--lake-root", str(lake_root),
+                   "--start", "2019-01-01", "--end", "2019-09-30"])
+    assert rc == 0
+    assert captured["overrides_table"] == override
+
+
+def test_daily_run_lake_without_cost_overrides_table_unchanged(monkeypatch,
+                                                                pregate_engine_registry,
+                                                                tmp_path):
+    """A lake-root that was never TCA-calibrated (no cost_overrides table) must leave the
+    engine's CostModel construction — and therefore the run — unchanged (overrides_table
+    None, no warning)."""
+    monkeypatch.setattr(ap.requests, "request", _no_http)
+    import production.backtest.engine as _eng
+    from scripts.daily_run import main
+
+    lake_root = tmp_path / "lake"   # never written to -> absent cost_overrides table
+    captured = []
+    real_cls = _eng.CostModel
+
+    class _SpyCostModel(real_cls):
+        def __init__(self, cfg=None, overrides_table=None):
+            captured.append(overrides_table)
+            super().__init__(cfg, overrides_table=overrides_table)
+
+    monkeypatch.setattr(_eng, "CostModel", _SpyCostModel)
+
+    rc = main(["--synthetic", "--dry-run", "--lake-root", str(lake_root),
+               "--start", "2019-01-01", "--end", "2019-09-30"])
+    assert rc == 0
+    assert captured == [None]

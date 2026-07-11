@@ -25,7 +25,7 @@ import sys
 
 import pandas as pd
 
-from production.backtest.engine import latest_target_weights
+from production.backtest.engine import latest_target_weights, run_backtest
 from production.core.config import CONFIG_DIR, REPO_ROOT, backtest_config
 
 if str(REPO_ROOT) not in sys.path:
@@ -34,7 +34,9 @@ if str(REPO_ROOT) not in sys.path:
 from production.core.lake import Lake, LakeError
 from production.execution.alpaca_paper import AlpacaPaperClient, ExecutionError
 from production.execution.orders import target_weights_to_orders
-from production.execution.tca import calibrate_overrides, write_overrides
+from production.execution.shortfall import implementation_shortfall
+from production.execution.tca import (SHORTFALL_LOG_COLUMNS, append_shortfall_log,
+                                      calibrate_overrides, write_overrides)
 from production.reference.instruments import build_instrument_master, vendor_symbol
 from production.signals.base import sleeve_from_id
 
@@ -76,6 +78,57 @@ def _current_weights(client: AlpacaPaperClient | None, master: pd.DataFrame,
         if iid is not None and equity_usd > 0:
             w.loc[iid] = float(p.market_value) / float(equity_usd)
     return w
+
+
+def _fetch_fills(client: AlpacaPaperClient, submitted: pd.DataFrame) -> pd.Series:
+    """GET each submitted order's realized fill price, keyed by instrument_id.
+
+    ``submitted`` is the ``client.submit_orders`` result filtered to rows that actually
+    carry a ``broker_order_id`` (i.e. were really POSTed). Raises :class:`ExecutionError`
+    on any broker-read failure — the caller (:func:`_accumulate_shortfall`) treats that as
+    a warning, never a run-blocking failure: the orders are already live at the broker,
+    so failing to read them back must not fail the run.
+    """
+    fills: dict[str, float] = {}
+    for o in submitted.itertuples(index=False):
+        order = client.get_order(o.broker_order_id)
+        fp = (order or {}).get("filled_avg_price")
+        fills[o.instrument_id] = float(fp) if fp is not None else float("nan")
+    return pd.Series(fills, dtype=float)
+
+
+def _accumulate_shortfall(client: AlpacaPaperClient, lake: Lake, submit_result: pd.DataFrame,
+                          decision_prices: pd.Series, run_id: pd.Timestamp) -> None:
+    """Backlog #15: append realized --live implementation shortfall to the lake's
+    ``shortfall_log`` reference table so ``--calibrate-tca`` has something to learn from.
+
+    Only reachable from the --live path AFTER a real (non-dry-run) submission — --dry-run
+    never calls this, so it never writes. A fill-fetch failure (broker read error) degrades
+    to a printed warning and returns without writing: the orders already executed at the
+    broker, so a shortfall-accounting hiccup must never fail an otherwise-successful run.
+    Orders not yet filled (no ``filled_avg_price``) are skipped, not logged as zero/garbage.
+    """
+    submitted = submit_result[submit_result["broker_order_id"].notna()].reset_index(drop=True)
+    if submitted.empty:
+        return
+    try:
+        fill_prices = _fetch_fills(client, submitted)
+    except ExecutionError as exc:
+        print(f"  WARNING: could not fetch fills for shortfall accounting — {exc} "
+              "(shortfall_log not updated this run)", file=sys.stderr)
+        return
+
+    shortfall_df, _ = implementation_shortfall(
+        submitted[["instrument_id", "side", "qty"]], decision_prices, fill_prices)
+    shortfall_df["qty"] = submitted["qty"]
+    shortfall_df = shortfall_df[shortfall_df["fill_price"].notna()].copy()
+    if shortfall_df.empty:
+        print("  shortfall_log: no fills yet this run — nothing appended")
+        return
+    shortfall_df["filled_at"] = pd.Timestamp.utcnow()
+    shortfall_df["run_id"] = run_id
+    out = append_shortfall_log(shortfall_df[SHORTFALL_LOG_COLUMNS], lake)
+    print(f"  shortfall_log: appended {len(shortfall_df)} fill(s) -> {out}")
 
 
 def _print_orders(orders: pd.DataFrame, target: pd.Series, equity_usd: float,
@@ -189,6 +242,11 @@ def main(argv: list[str] | None = None) -> int:
         return _calibrate_tca(args)
 
     cfg = backtest_config()
+    run_id = pd.Timestamp.utcnow()   # stamps every shortfall_log row this invocation appends
+    # Always constructed — used for the side-channel reference tables (cost_overrides
+    # read, shortfall_log append) regardless of whether the PRICE data below comes from
+    # the lake or --synthetic. Cheap: no disk I/O happens until a read/write call.
+    lake = Lake(args.lake_root)
 
     if args.synthetic:
         start = args.start or "2019-01-01"
@@ -197,7 +255,6 @@ def main(argv: list[str] | None = None) -> int:
         data, instruments, sectors = _synthetic_bundle(start, end)
         master = build_instrument_master()
     else:
-        lake = Lake(args.lake_root)
         data = _load_lake_bundle(lake, args.start, args.end)
         if "prices" not in data:
             print("FATAL: no curated 'prices' — nothing to trade", file=sys.stderr)
@@ -210,7 +267,21 @@ def main(argv: list[str] | None = None) -> int:
             master = build_instrument_master()
 
     # --- latest target book via the validated engine path ---
-    target = latest_target_weights(data, instruments, cfg=cfg, sectors=sectors)
+    # backlog #14 follow-up: thread the lake's TCA-calibrated cost_overrides table into
+    # the SAME CostModel construction run_backtest already performs for
+    # scripts/run_backtest.py (production/backtest/engine.py:_load_cost_overrides /
+    # run_backtest(lake=...)) — previously only the backtest path consumed it, not the
+    # live runner. An absent/never-calibrated table reproduces lake=None behavior
+    # bit-identically (read_overrides -> {}); an active table fires the identical loud
+    # UserWarning ("cost overrides ACTIVE: ..."), which we also surface on stdout here so
+    # a live run never silently changes cost regime (CLAUDE.md). Running run_backtest
+    # directly and handing the result to latest_target_weights (its `result=` parameter)
+    # avoids a second walk-forward pass — no production/backtest/engine.py changes needed.
+    bt_result = run_backtest(data, instruments, cfg=cfg, sectors=sectors, lake=lake)
+    for w in bt_result.report["caveats"]["warnings"]:
+        print(f"  WARNING: {w}")
+    target = latest_target_weights(data, instruments, cfg=cfg, result=bt_result,
+                                   sectors=sectors)
     if target.empty:
         print("no target weights produced — check data coverage / warmup", file=sys.stderr)
         return 1
@@ -237,9 +308,13 @@ def main(argv: list[str] | None = None) -> int:
     _print_orders(orders, target, equity_usd, args.dry_run)
 
     if not args.dry_run and client is not None and not orders.empty:
-        result = client.submit_orders(orders, master, dry_run=False)
-        submitted = int((result["status"] != "no_alpaca_symbol").sum())
-        print(f"\nsubmitted {submitted}/{len(result)} orders to Alpaca paper")
+        # backlog #15: --live fills accumulate into the lake's shortfall_log reference
+        # table (production/execution/tca.py:append_shortfall_log), feeding
+        # --calibrate-tca. --dry-run never reaches this branch, so it writes nothing.
+        submit_result = client.submit_orders(orders, master, dry_run=False)
+        submitted = int((submit_result["status"] != "no_alpaca_symbol").sum())
+        print(f"\nsubmitted {submitted}/{len(submit_result)} orders to Alpaca paper")
+        _accumulate_shortfall(client, lake, submit_result, prices, run_id)
     return 0
 
 

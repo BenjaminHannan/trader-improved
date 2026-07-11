@@ -85,6 +85,15 @@ class AlpacaPaperClient:
         """Return the account object (equity, buying power, status, ...)."""
         return self._request("GET", "/v2/account")
 
+    def get_order(self, order_id: str) -> dict:
+        """Fetch a single order's current broker-side state.
+
+        Used post-submission to read back ``filled_avg_price`` / ``status`` for
+        implementation-shortfall accounting (:mod:`production.execution.shortfall`);
+        same retry/4xx semantics as every other read.
+        """
+        return self._request("GET", f"/v2/orders/{order_id}")
+
     def positions(self) -> pd.DataFrame:
         """Current open positions as a DataFrame [symbol, qty, market_value, side].
 

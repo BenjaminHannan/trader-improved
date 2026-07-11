@@ -33,6 +33,14 @@ _OVERRIDES_TABLE = "cost_overrides"
 _OVERRIDE_COLUMNS = ["instrument_id", "half_spread_bps", "n_fills",
                      "median_abs_shortfall_bps", "calibrated_at"]
 
+# Per-run accumulation target for --live fills (backlog #15). Columns per order: the
+# realized fill alongside the decision it was measured against, plus enough provenance
+# (``filled_at``, ``run_id``) to audit which daily_run invocation produced the row. This
+# is the table --calibrate-tca reads by default (see scripts/daily_run.py:_calibrate_tca).
+SHORTFALL_LOG_TABLE = "shortfall_log"
+SHORTFALL_LOG_COLUMNS = ["instrument_id", "side", "qty", "decision_price", "fill_price",
+                         "shortfall_bps", "filled_at", "run_id"]
+
 
 def calibrate_overrides(shortfall_df: pd.DataFrame, min_fills: int = 20,
                         safety: float = 1.25, cfg: dict | None = None) -> dict[str, dict]:
@@ -126,3 +134,29 @@ def read_overrides(lake: Lake) -> dict[str, dict]:
             "median_abs_shortfall_bps": float(r.median_abs_shortfall_bps),
         }
     return out
+
+
+def append_shortfall_log(rows: pd.DataFrame, lake: Lake) -> Path | None:
+    """Read-modify-write append onto the lake's ``shortfall_log`` reference table.
+
+    ``Lake.write_reference`` REPLACES the underlying parquet file wholesale — there is no
+    native append — so any prior table is read back first and the new rows are concatenated
+    AFTER it; nothing already accumulated is ever lost. ``rows`` must already carry
+    :data:`SHORTFALL_LOG_COLUMNS` (``scripts/daily_run.py`` builds it from
+    :func:`production.execution.shortfall.implementation_shortfall` plus ``qty``,
+    ``filled_at``, ``run_id``).
+
+    An empty/``None`` ``rows`` is a no-op — nothing is written and any existing table is
+    left untouched (this is what makes ``--dry-run`` safe: the caller simply never
+    constructs rows to pass in, but this guard makes the function safe standalone too).
+    Returns the written path, or ``None`` when nothing was written.
+    """
+    if rows is None or rows.empty:
+        return None
+    try:
+        existing = lake.read_reference(SHORTFALL_LOG_TABLE)
+    except LakeError:
+        existing = pd.DataFrame(columns=SHORTFALL_LOG_COLUMNS)
+    combined = pd.concat([existing[SHORTFALL_LOG_COLUMNS], rows[SHORTFALL_LOG_COLUMNS]],
+                         ignore_index=True)
+    return lake.write_reference(combined, SHORTFALL_LOG_TABLE)
