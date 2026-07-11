@@ -74,6 +74,7 @@ class TiingoPricesLoader(BaseLoader):
                 f"tiingo: symbol list truncated to max_symbols={self.max_symbols} "
                 f"of {len(self.symbols)} (free-tier quota); re-run to extend coverage")
         out: dict[str, pd.DataFrame] = {}
+        not_found: list[str] = []
         params = {"startDate": str(pd.Timestamp(start).date()),
                   "endDate": str(pd.Timestamp(end).date()),
                   "token": self.api_key, "format": "json"}
@@ -89,6 +90,7 @@ class TiingoPricesLoader(BaseLoader):
                         f"with {len(out)} of {len(todo)} symbols fetched")
                     break
                 if resp.status_code == 404:   # unknown/delisted ticker on tiingo
+                    not_found.append(sym)
                     continue
                 resp.raise_for_status()
                 rows = resp.json()
@@ -98,30 +100,71 @@ class TiingoPricesLoader(BaseLoader):
             df = self._to_ohlcv(rows)
             if df is not None and not df.empty:
                 out[sym] = df
+        if not_found:
+            # Negative-result memory: the frontier ordering otherwise re-tries the
+            # same delisted names every run (found 2026-07-11: a whole ~50-name
+            # tranche 404'd — tiingo does not serve delisted tickers — the empty
+            # pull failed the audit, nothing was recorded, and the next run would
+            # have burned its quota on the identical dead names forever). Persist
+            # BEFORE transform/audit so the memory survives an all-404 tranche.
+            self._record_unavailable(not_found)
         return out
 
+    def _record_unavailable(self, symbols: list[str]) -> None:
+        """Merge 404'd symbols into the ``tiingo_unavailable`` reference table.
+
+        Best-effort: a reference-write failure only warns — losing the negative
+        cache costs a re-probe, never correctness."""
+        try:
+            try:
+                existing = set(self.lake.read_reference("tiingo_unavailable")["symbol"])
+            except Exception:
+                existing = set()
+            merged = sorted(existing | set(symbols))
+            self.lake.write_reference(
+                pd.DataFrame({"symbol": merged,
+                              "recorded_at": pd.Timestamp.now(tz="UTC")}),
+                "tiingo_unavailable")
+            new = len(merged) - len(existing)
+            if new:
+                self.warnings.append(
+                    f"tiingo: recorded {new} new 404/delisted symbol(s) in "
+                    f"tiingo_unavailable ({len(merged)} total) — deprioritized next run")
+        except Exception as exc:
+            self.warnings.append(f"tiingo: could not persist 404 list: {exc!r:.120}")
+
     def _frontier_order(self, symbols: list[str]) -> list[str]:
-        """Stable-sort ``symbols`` so those WITHOUT existing tiingo-sourced lake rows
-        come first (see fetch: the hourly quota then extends coverage every run).
-        Stability preserves the ETF-sleeves-before-equities intent within each group.
-        Any lake/resolution hiccup degrades to the original order — never raises."""
+        """Stable three-tier sort: never-tried symbols first, already-covered next,
+        known-404 (tiingo_unavailable reference) LAST — so the ~50-request hourly
+        quota extends live coverage every run, refreshes covered names second, and
+        only re-probes dead tickers when everything else is exhausted. Stability
+        preserves the ETF-sleeves-before-equities intent within each tier. Any
+        lake/resolution hiccup degrades to the original order — never raises."""
         try:
             cur = self.lake.read_curated("prices")
             covered_iids = set(
                 cur.loc[cur["source"].astype(str).str.contains("tiingo"),
                         "instrument_id"].unique())
         except Exception:
-            return list(symbols)
-        if not covered_iids:
+            covered_iids = set()
+        try:
+            unavailable = set(self.lake.read_reference("tiingo_unavailable")["symbol"])
+        except Exception:
+            unavailable = set()
+        if not covered_iids and not unavailable:
             return list(symbols)
 
-        def _is_covered(sym: str) -> bool:
+        def _tier(sym: str) -> int:
+            if sym in unavailable:
+                return 2
             try:
-                return self.resolve(sym, "yfinance") in covered_iids
+                if self.resolve(sym, "yfinance") in covered_iids:
+                    return 1
             except Exception:
-                return False
+                pass
+            return 0
 
-        return sorted(symbols, key=_is_covered)
+        return sorted(symbols, key=_tier)
 
     @staticmethod
     def _to_ohlcv(rows) -> pd.DataFrame | None:

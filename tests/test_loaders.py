@@ -1049,6 +1049,58 @@ def test_tiingo_fetches_uncovered_symbols_first(tmp_lake, monkeypatch):
     assert "BBB" in calls[0] and "AAA" in calls[1]
 
 
+def test_tiingo_404s_are_remembered_and_deprioritized(tmp_lake, monkeypatch):
+    """Negative-result memory: an all-404 tranche (delisted names — found live
+    2026-07-11 when the frontier reached the dead stretch of the alphabet) must
+    record the symbols in the tiingo_unavailable reference BEFORE transform/audit
+    can fail, and the next run's ordering must put them LAST (behind covered)."""
+    import sys
+    import types
+
+    from production.data.loaders.tiingo_prices import TiingoPricesLoader
+
+    class _Resp:
+        def __init__(self, code, payload=None):
+            self.status_code = code
+            self._payload = payload or []
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._payload
+
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(url)
+        if "DEADX" in url or "DEADY" in url:
+            return _Resp(404)
+        return _Resp(200, [{"date": "2016-01-04T00:00:00.000Z",
+                            "adjClose": 10.0, "adjVolume": 100, "volume": 100}])
+
+    mod = types.ModuleType("requests")
+    mod.get = fake_get
+    monkeypatch.setitem(sys.modules, "requests", mod)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    # run 1: all-404 tranche — memory persists even though nothing was fetched
+    loader = TiingoPricesLoader(tmp_lake, instruments=_instruments(),
+                                symbols=["DEADX", "DEADY"], api_key="k", pause_s=0)
+    raw = loader.fetch("2016-01-01", "2016-02-01")
+    assert raw == {}
+    ref = tmp_lake.read_reference("tiingo_unavailable")
+    assert set(ref["symbol"]) == {"DEADX", "DEADY"}
+    assert any("recorded 2 new" in w for w in loader.warnings)
+
+    # run 2: known-404 names go LAST, after the never-tried live name
+    calls.clear()
+    loader2 = TiingoPricesLoader(tmp_lake, instruments=_instruments(),
+                                 symbols=["DEADX", "AAA", "DEADY"], api_key="k",
+                                 pause_s=0)
+    loader2.fetch("2016-01-01", "2016-02-01")
+    assert "AAA" in calls[0]
+    assert all(("DEADX" in c) or ("DEADY" in c) for c in calls[1:])
+
+
 # ===================================================== (14) alpaca secondary feed
 def test_alpaca_bars_to_long_and_pagination(monkeypatch):
     """Canned payload of the REAL alpaca shape (live probe 2026-07-07): {bars:
