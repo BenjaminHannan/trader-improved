@@ -4,6 +4,14 @@ Covers: order construction (per-sleeve rounding, min-notional drop, side signs),
 -> Alpaca symbol mapping from the master JSON, the dry-run safety property (submission issues
 zero HTTP requests), retry-on-429-then-success, 4xx -> ExecutionError, implementation-shortfall
 arithmetic, and a --dry-run smoke run of scripts/daily_run.py on the synthetic bundle.
+
+Runtime discipline (daily_run section, bottom of file): each ``scripts.daily_run.main``
+call is a full synthetic walk-forward (~20-60s). ``test_daily_run_dry_run_smoke`` is the
+ONE genuinely end-to-end run and covers everything a plain dry-run, a --order-type limit
+dry-run, and a no-lake-touch dry-run would separately assert (those CLI flag-sets produce
+bit-identical output — see its docstring). The two cost-overrides wiring tests only inspect
+the CostModel-construction argument, not order output, so they use a short trading window
+(--end 2019-01-31 instead of 2019-09-30) to stay cheap without touching engine internals.
 """
 from __future__ import annotations
 
@@ -456,31 +464,32 @@ def test_cost_model_absent_overrides_table_is_baseline(tmp_path):
 
 
 # ------------------------------------------------------------------ daily_run
-def test_daily_run_dry_run_smoke(monkeypatch, capsys, pregate_engine_registry):
-    # No network, no keys: dry-run must produce orders and never touch requests.
-    # pregate_engine_registry: the synthetic warmup bundle cannot feed the live
-    # registry's accepted-only factor set (fx carry + crypto basis) — pin all-candidate.
+def test_daily_run_dry_run_smoke(monkeypatch, capsys, pregate_engine_registry, tmp_path):
+    """Consolidated (was 3 separate ~62s full end-to-end runs): a single synthetic
+    walk-forward + main() invocation carries every assertion that
+    test_daily_run_dry_run_smoke, test_daily_run_dry_run_limit_prints_limit_column, and
+    test_daily_run_dry_run_writes_no_shortfall_log used to make on THREE separate runs.
+    Safe to merge because none of those runs' CLI flags disagree on the same output:
+    --order-type limit / --limit-offset-bps 5 is already the argparse default (see
+    build_arg_parser), so a plain dry-run and an explicit --order-type limit dry-run are
+    bit-identical, and a dry-run never touches the lake regardless of --order-type. Kept
+    genuinely end-to-end (no mocking of run_backtest) — this is the one full walk-forward
+    the daily_run tests below now share; see module docstring.
+    pregate_engine_registry: the synthetic warmup bundle cannot feed the live
+    registry's accepted-only factor set (fx carry + crypto basis) — pin all-candidate.
+    """
     monkeypatch.setattr(ap.requests, "request", _no_http)
     from scripts.daily_run import main
 
-    rc = main(["--synthetic", "--dry-run", "--start", "2019-01-01", "--end", "2019-09-30"])
+    lake_root = tmp_path / "lake"
+    rc = main(["--synthetic", "--dry-run", "--order-type", "limit", "--limit-offset-bps", "5",
+               "--lake-root", str(lake_root), "--start", "2019-01-01", "--end", "2019-09-30"])
     assert rc == 0
+
     out = capsys.readouterr().out
-    assert "DRY-RUN" in out
-
-
-def test_daily_run_dry_run_limit_prints_limit_column(monkeypatch, capsys,
-                                                     pregate_engine_registry):
-    # --order-type limit dry-run: prints the limit_price column, still zero HTTP.
-    monkeypatch.setattr(ap.requests, "request", _no_http)
-    from scripts.daily_run import main
-
-    rc = main(["--synthetic", "--dry-run", "--order-type", "limit",
-               "--limit-offset-bps", "5", "--start", "2019-01-01", "--end", "2019-09-30"])
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "DRY-RUN" in out
-    assert "limit_price" in out
+    assert "DRY-RUN" in out           # dry-run safety / smoke (ex test_daily_run_dry_run_smoke)
+    assert "limit_price" in out       # --order-type limit column (ex ..._limit_prints_limit_column)
+    assert not lake_root.exists()     # dry-run touches the lake for nothing (ex ..._writes_no_shortfall_log)
 
 
 # ---------------------------------------------------- shortfall_log accumulation (#15)
@@ -624,20 +633,14 @@ def test_accumulate_shortfall_fetch_failure_warns_and_completes(monkeypatch, cap
         lake.read_reference("shortfall_log")
 
 
-def test_daily_run_dry_run_writes_no_shortfall_log(monkeypatch, pregate_engine_registry,
-                                                    tmp_path):
-    # --dry-run must touch the lake for nothing — no reference dir even gets created.
-    monkeypatch.setattr(ap.requests, "request", _no_http)
-    from scripts.daily_run import main
-
-    lake_root = tmp_path / "lake"
-    rc = main(["--synthetic", "--dry-run", "--lake-root", str(lake_root),
-               "--start", "2019-01-01", "--end", "2019-09-30"])
-    assert rc == 0
-    assert not lake_root.exists()
-
-
 # ------------------------------------------------ live path consumes cost overrides (#14)
+# The two tests below only inspect the CostModel-construction argument (a spy on
+# production.backtest.engine.CostModel) and rc — never order output — so unlike the smoke
+# test above they don't need the full 9-month window: --end 2019-01-31 still clears warmup
+# and produces at least one rebalance (target non-empty -> rc == 0), cutting each run from
+# ~62s to ~20-25s. _load_cost_overrides / CostModel construction happens once, up front in
+# run_backtest, before the walk-forward loop, so the shrunk window changes nothing about
+# what's under test here.
 def test_daily_run_live_path_threads_cost_overrides_into_engine(monkeypatch,
                                                                  pregate_engine_registry,
                                                                  tmp_path):
@@ -670,7 +673,7 @@ def test_daily_run_live_path_threads_cost_overrides_into_engine(monkeypatch,
 
     with pytest.warns(UserWarning, match="cost overrides ACTIVE"):
         rc = main(["--synthetic", "--dry-run", "--lake-root", str(lake_root),
-                   "--start", "2019-01-01", "--end", "2019-09-30"])
+                   "--start", "2019-01-01", "--end", "2019-01-31"])
     assert rc == 0
     assert captured["overrides_table"] == override
 
@@ -697,6 +700,6 @@ def test_daily_run_lake_without_cost_overrides_table_unchanged(monkeypatch,
     monkeypatch.setattr(_eng, "CostModel", _SpyCostModel)
 
     rc = main(["--synthetic", "--dry-run", "--lake-root", str(lake_root),
-               "--start", "2019-01-01", "--end", "2019-09-30"])
+               "--start", "2019-01-01", "--end", "2019-01-31"])
     assert rc == 0
     assert captured == [None]
