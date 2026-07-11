@@ -1,0 +1,20 @@
+{
+  "check1_date_clustered": {
+    "mean": 0.048221513953062935,
+    "se": 0.016405742613839508,
+    "t": 2.9393069907353278,
+    "n": 575,
+    "n_clusters": 332,
+    "pass": true
+  },
+  "check2_liquid_10k": {
+    "mean": 0.04134611420094553,
+    "se": 0.02287577048306614,
+    "t": 1.8074195241446454,
+    "n": 268,
+    "n_clusters": 168,
+    "pass": true
+  },
+  "n_favorites": 575,
+  "n_distinct_settle_dates": 332
+}
