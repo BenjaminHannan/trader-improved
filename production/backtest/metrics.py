@@ -10,18 +10,40 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# Below this daily-return std, a series is numerically indistinguishable from a
+# constant-zero series and its mean/std ratio is noise, not signal. This is NOT a
+# "very low but real" volatility floor: CLAUDE.md's per-sleeve cost floors are
+# >= 5bp (equities) / >= 30bp (crypto), so any position the optimizer actually
+# decided to hold produces a same-order-of-magnitude return contribution the day
+# it's marked — many orders of magnitude above this threshold. A daily std this
+# small can only arise from solver-tolerance residue (CLARABEL/OSQP leave
+# ~1e-8-1e-9 scale non-zero weights on a "hold zero" corner solution, e.g. when
+# alpha is too weak to clear the cost floor) riding on real market returns, which
+# is scale-invariant noise: mean/std still divides out to a "plausible" ratio even
+# though both the mean and the std individually round to nothing. Treating that
+# ratio as a real Sharpe is the exact bug this guards against — see
+# tests/test_backtest_engine.py::test_sharpe_nan_on_solver_noise_floor.
+_DEGENERATE_STD = 1e-6
+
 
 def _clean(r) -> pd.Series:
     return pd.Series(r).astype(float).dropna()
 
 
 def sharpe(r, freq: int = 252) -> float:
-    """Annualized Sharpe ratio ``mean/std * sqrt(freq)`` (sample std, ddof=1)."""
+    """Annualized Sharpe ratio ``mean/std * sqrt(freq)`` (sample std, ddof=1).
+
+    A std below ``_DEGENERATE_STD`` is treated the same as an exact zero (NaN):
+    below that floor the series carries no economically meaningful signal (see
+    the module-level comment), so the mean/std ratio is solver-noise, not a real
+    Sharpe — and reporting one there would contradict ``ann_vol``/``ann_return``,
+    which correctly read as ~0 on the same series.
+    """
     s = _clean(r)
     if len(s) < 2:
         return float("nan")
     sd = s.std(ddof=1)
-    if sd == 0 or not np.isfinite(sd):
+    if not np.isfinite(sd) or sd < _DEGENERATE_STD:
         return float("nan")
     return float(s.mean() / sd * np.sqrt(freq))
 

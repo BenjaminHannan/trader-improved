@@ -57,7 +57,7 @@ from production.backtest.metrics import (ann_vol, hit_rate, max_drawdown, sharpe
 from production.backtest.report import build_report, write_report
 from production.core.config import REPO_ROOT, backtest_config
 from production.signals.base import sleeve_from_id
-from tests.conftest import make_funding, make_gbm_prices, make_macro
+from tests.conftest import make_basis, make_funding, make_gbm_prices, make_macro
 
 # Two sleeves, ~10 months of trading after the 3y warmup, macro included for the overlays.
 _EQ = {f"EQ:SYN{i:02d}:2000-01-03": "equity" for i in range(8)}
@@ -356,6 +356,34 @@ def test_sharpe_known_answer():
     r = pd.Series([0.01, -0.005, 0.02, 0.0, 0.015, -0.01])
     expected = r.mean() / r.std(ddof=1) * np.sqrt(252)
     assert sharpe(r) == pytest.approx(expected)
+
+
+def test_sharpe_nan_on_solver_noise_floor():
+    """2026-07-11 incident: a sleeve the optimizer correctly decided NOT to trade (alpha
+    too weak to clear the cost floor) can still carry ~1e-8-1e-9 scale non-zero weights
+    from CVXPY solver tolerance on the "hold zero" corner solution. Those phantom weights,
+    marked against real market returns, produce a daily-return series whose mean AND std
+    both round to ~0 -- but whose ratio does not, because Sharpe is scale-invariant. Before
+    the fix this reported a "plausible" nonzero Sharpe next to ann_vol/ann_return/
+    max_drawdown that correctly read ~0 (production/backtest/metrics.py ann_vol/ann_return),
+    an internally contradictory report (nonzero Sharpe requires nonzero vol). A std this
+    small cannot arise from real trading: CLAUDE.md's cost floors are >= 5bp (equities) /
+    >= 30bp (crypto), so any position the optimizer genuinely holds moves the book by many
+    orders of magnitude more than this on the day it is marked.
+    """
+    rng = np.random.default_rng(3)
+    noise = pd.Series(rng.normal(0.0, 1.0, 300)) * 1e-9  # solver-tolerance-scale residue
+    assert np.isnan(sharpe(noise))
+
+    # An exactly-constant-zero series (the pre-solver-noise, "really did not trade" case)
+    # must keep behaving exactly as before: also NaN, never a divide-by-zero explosion.
+    assert np.isnan(sharpe(pd.Series(0.0, index=range(300))))
+
+    # Guardrail: the fix must not swallow real, legitimately low-vol strategies. CLAUDE.md's
+    # cost floors put a genuine trade's daily return contribution many orders of magnitude
+    # above the noise floor, so a series at that realistic scale must still score normally.
+    real = pd.Series(rng.normal(0.0002, 0.003, 300))  # ~30bp/day vol, a real quiet sleeve
+    assert np.isfinite(sharpe(real))
 
 
 def test_max_drawdown_known_answer():
@@ -825,6 +853,98 @@ def test_run_backtest_lake_without_cost_overrides_table_unchanged(monkeypatch,
     assert captured == [None, None]                  # never received a table either time
     assert not any("cost overrides ACTIVE" in w for w in result_lake._warnings)
     assert result_lake.total_returns.equals(result_none.total_returns)
+
+
+# ============================================================ report consistency (2026-07-11 incident)
+@pytest.fixture(scope="module")
+def _degenerate_sleeve_result(tmp_path_factory):
+    """End-to-end reproduction of the 2026-07-11 incident report's exact shape: one sleeve
+    (crypto, via ``basis_carry``) whose only accepted factor's alpha never clears its cost
+    floor -- an economically-correct "never trade" decision -- next to a second sleeve
+    (fx_etf, via ``carry_rate_diff``) that trades normally. This is the real signal classes
+    (not a hand-rolled fixture), a real (temp, 2-factor) registry, and the real engine walk;
+    it is what actually produced the incident's per_sleeve.crypto (nonzero Sharpe, ~0
+    ann_vol/ann_return/turnover) next to a healthy per_sleeve.fx_etf. Kept as small as the
+    mechanism allows (2 sleeves, 5 names each -- the rank_ic min_names floor --, 3 months of
+    trading) to bound runtime; still takes ~20s, the cost of exercising the real optimizer/
+    solver-tolerance path rather than a synthetic return series.
+    """
+    start, end = "2019-01-01", "2019-03-31"
+    data_start = (pd.Timestamp(start) - pd.DateOffset(years=3, months=3)).strftime("%Y-%m-%d")
+    data_end = pd.Timestamp(end).strftime("%Y-%m-%d")
+
+    cr = {f"CR:{s}:2017-01-01": "crypto" for s in ["BTC", "ETH", "SOL", "LTC", "XRP"]}
+    fx = {f"FX:{s}:2007-01-03": "fx_etf" for s in ["FXE", "FXY", "FXB", "FXA", "FXC"]}
+    instruments = {**cr, **fx}
+    crypto_ids = list(cr)
+
+    data = {
+        "prices": make_gbm_prices(instruments, start=data_start, end=data_end),
+        "funding": make_funding(crypto_ids, start=data_start, end=data_end),
+        # RATE_AU/CA/CH cover FXA/FXC/FXF-style currencies so all 5 fx names clear
+        # rank_ic's min_names=5 cross-sectional floor (production/alpha/ic.py).
+        "macro": make_macro({"DGS3MO_US": 2.0, "RATE_EU": 0.5, "RATE_JP": -0.1,
+                             "RATE_GB": 1.0, "RATE_AU": 1.5, "RATE_CA": 1.2, "RATE_CH": -0.5},
+                            start=data_start, end=data_end),
+        "basis": make_basis(crypto_ids, start=data_start, end=data_end),
+    }
+
+    # A minimal, self-contained 2-factor registry (NOT configs/factors.yaml -- decoupled
+    # from the live gate's current accepted set, which can change) mirroring the real
+    # incident's factor/sleeve pairing: one factor per sleeve, both accepted.
+    factors_cfg = {
+        "factors": {
+            "carry_rate_diff": {"signal": "production.signals.carry.RateDifferentialCarry",
+                                "sleeves": ["fx_etf"], "horizon_days": 21,
+                                "min_history_days": 21, "status": "accepted"},
+            "basis_carry": {"signal": "production.signals.carry.BasisCarry",
+                           "sleeves": ["crypto"], "horizon_days": 5,
+                           "min_history_days": 7, "status": "accepted"},
+        },
+        "n_trials": 2,
+    }
+    reg_path = tmp_path_factory.mktemp("degenerate_registry") / "factors.yaml"
+    yaml.safe_dump(factors_cfg, open(reg_path, "w"), sort_keys=False)
+
+    return run_backtest(data, pd.Series(instruments), factors_cfg=str(reg_path))
+
+
+def test_degenerate_sleeve_turnover_is_near_zero(_degenerate_sleeve_result):
+    """Sanity check on the mechanism itself: crypto's basis_carry alpha never clears the
+    cost floor, so the optimizer's (correct) decision is to hold ~no position -- turnover
+    stays at solver-tolerance scale, nowhere near a real trade."""
+    ps = _degenerate_sleeve_result.report["per_sleeve"]
+    assert "crypto" in ps and "fx_etf" in ps
+    assert ps["crypto"]["turnover"] < 1e-4
+    assert ps["fx_etf"]["turnover"] > 1e-3        # the healthy control sleeve trades for real
+
+
+def test_degenerate_sleeve_sharpe_matches_ann_vol_not_solver_noise(_degenerate_sleeve_result):
+    """The incident's core complaint, reproduced and fixed: a sleeve/headline series that
+    never really traded must not report a "plausible" Sharpe next to ~0 ann_vol/ann_return
+    -- that pairing is impossible for a real return series (nonzero Sharpe requires nonzero
+    vol) and is exactly what production/backtest/metrics.py:sharpe's degenerate-std guard
+    now prevents."""
+    report = _degenerate_sleeve_result.report
+    h, ps = report["headline"], report["per_sleeve"]
+
+    # The dead sleeve: Sharpe must be NaN, consistent with its ~0 turnover/ann_vol/ann_return.
+    assert np.isnan(ps["crypto"]["sharpe"])
+    assert abs(ps["crypto"]["ann_vol"]) < 1e-4
+    assert abs(ps["crypto"]["ann_return"]) < 1e-4
+
+    # The healthy control sleeve: a real Sharpe on real vol.
+    assert np.isfinite(ps["fx_etf"]["sharpe"])
+    assert ps["fx_etf"]["ann_vol"] > 1e-3
+
+    # Headline: whatever the blended total's realized vol is, Sharpe is finite if and only
+    # if ann_vol/ann_return are meaningfully (not just technically) nonzero too -- no more
+    # of the incident's "net_sharpe=0.18, ann_vol_net=1.6e-09" contradiction.
+    if np.isfinite(h["net_sharpe"]):
+        assert h["ann_vol_net"] > 1e-4
+        assert h["ann_return_net"] != 0.0
+    else:
+        assert h["ann_vol_net"] < 1e-4
 
 
 # ============================================================ CLI smoke (subprocess)
