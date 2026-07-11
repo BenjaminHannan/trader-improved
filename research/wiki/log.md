@@ -1,6 +1,26 @@
 # autoresearch log
 
-## [2026-07-11] The illiquid/drift incident — a volume-blind gap in hygiene
+## [2026-07-11] Iteration 8 — Q5 exposures adjudication: NO-ADOPT (0.86pp vs 1.00pp)
+
+Full pre-registered run (equity, 574 ids, 112 eval dates, walk 2021-2026,
+artifact `adjudication_q5_exposures_20260711.json`; machinery mirror-checked
+vs production estimate_factor_returns, max|diff|=0). Candidate = liquidity +
+earnings_yield equity risk exposures (config-flip, alpha gate untouched).
+- Criterion (a) PASSED emphatically: pure-factor books snap into band —
+  f5_earnings_yield B **1.696 → 1.001**, f5_liquidity **1.494 → 1.053**,
+  E/P-tilted f1 0.920 → 0.920 (in band both). The model's risk forecasts for
+  DELIBERATE value/liquidity tilts are badly hot without these exposures and
+  essentially perfect with them.
+- Criterion (b) FAILED by 0.14pp: mean cross-sectional R² 0.2145 → 0.2231,
+  **+0.86pp vs the ≥1.00pp bar** (2,484 regression days). This is precisely
+  the pre-written alternative: sector dummies already span the value effect
+  on AVERAGE days.
+- **NO-ADOPT per the registration.** The conjunction was the prediction; half
+  a prediction is a fail. Filed for a future round (NEW registration, not a
+  tweak): (i) adopt if equity family-4 MVP B (2.185, THE structural failure)
+  moves materially toward band under the candidate — the residual-co-movement
+  mechanism Q5 was aimed at was never directly scored; (ii) or an R² criterion
+  measured on factor-tilted days/books rather than the unconditional mean.
 
 **A second corruption class the MI-incident fixes could not see.** After the
 name-driven blocklist purge (KG/MI/SBNY/CHK/MNK) the fresh French check still failed:
