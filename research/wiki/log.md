@@ -1,5 +1,137 @@
 # autoresearch log
 
+## [2026-07-11] The illiquid/drift incident — a volume-blind gap in hygiene
+
+**A second corruption class the MI-incident fixes could not see.** After the
+name-driven blocklist purge (KG/MI/SBNY/CHK/MNK) the fresh French check still failed:
+market↔Mkt-RF **0.691** (below the healthy 0.88–0.92), momentum↔Mom **0.106**
+(gate 0.6). A pattern-driven forensic scan of the whole equity lake found the residue
+the blocklist never named — and, crucially, **every existing hygiene guard is
+volume-blind**, so two survivors slipped all three:
+
+- **EQ:SLE (Sara Lee, renamed 2012)** — a dead single-vendor series that *drifts* to
+  $97,344 at **~12 shares/day** (75% of days < 100 shares). It makes ZERO >400%
+  single-day moves (drop_corrupt_series counts moves) and never reverts to a stable
+  median (apply_flap_screen needs reversion), and it sits far above the $0.10 floor.
+  All three screens pass it. The volume-aware guard is the only thing that sees it.
+  The scan surfaced two more of the same class no one had named: **EQ:HPH** (1
+  share/day, 130× range) and **EQ:CPWR** (Compuware, taken private 2014 → all 2016+
+  data is reused-ticker garbage).
+- **EQ:COL (Rockwell Collins, delisted 2018-11)** — the MI class again: tiingo serves
+  the real ~$87 entity, yfinance a recycled ~$0.30 penny. Each leg is internally
+  smooth (per-vendor ingest screens pass both); the merged/deduped series flaps and
+  racks up 595 raw (21 post-dedupe) >400% moves. drop_corrupt_series *would* catch it
+  — but only on the MERGED panel, and it runs PER VENDOR at ingest, before the merge.
+
+**Root cause (structural, not a threshold miss):** `apply_hygiene` runs inside each
+vendor loader on that vendor's own frame, *before* `write_curated` merges vendors
+under one `instrument_id`. Cross-vendor entity disagreement (COL) and single-vendor
+dead-drift (SLE) are both invisible pre-merge — and nothing in hygiene ever looked at
+volume.
+
+**Fix.** (1) New guard `hygiene.drop_illiquid_series` — drops a series only on the
+CONJUNCTION *median volume < 100 shares AND max/min close > 100×*. The conjunction is
+what keeps it safe: an NVDA-like 100×+ survivor is spared by volume (millions of
+shares); a quiet flat delisted tail (EQ:PCL/EQ:CA, ~1.1× range) is spared by range.
+Wired into `apply_hygiene` (reported as `counts["illiquid_series"]`), so future dead
+vendor series are caught at ingest. (2) New pattern-driven pass
+`scripts/remediate_illiquid_equity.py` re-runs the series guards on the vendor-DEDUPED
+panel (the view the risk model consumes) — this is where COL's flaps and SLE's
+drift are finally visible. It dropped {COL, CPWR, HPH, SLE} = 5,603 rows across 11
+year partitions (audit: `data/audit/equity_illiquid_series_remediation_20260711.json`);
+CTRA (Coterra — real tiingo series, a brief alpaca garbage leg already resolved by the
+dedupe: 0 post-dedupe moves) was correctly spared. 5 new tests in
+`tests/test_universe.py` pin the guard (drops dead-wild, spares liquid-explosive and
+dead-flat, no-ops without a volume column).
+
+**Verdict, post-remediation:** market↔Mkt-RF **0.920 PASS** (0.691 → 0.920, squarely
+in-band), momentum↔Mom **0.581** (0.106 → 0.581, a 5.5× recovery). Momentum lands on
+the previously-documented *benign* floor (see the MI-incident entry below: alpaca-only
+delisted-collapse fragments — real FRC/SIVB histories that reduce survivorship bias but
+lower the Mom correlation; yfinance-only view PASSes ~0.63). size↔SMB -0.377 (expected
+large-cap-universe artifact, ungated). The COL wholesale drop loses a real
+(delisted-2018) name; a future vendor-aware *leg* drop could keep the good tiingo leg —
+noted, not built.
+
+## [2026-07-11] Iterations 6-7 + the MI incident + first PASS of the loop
+
+**Iteration 7 — political underconfidence: PASS, first of the loop.** Pre-registered
+BEFORE the Politics backfill existed; 499 series / 168,898 rows ingested (category
+enumeration + min-settled-markets cost control; the 4h fetch survived a stamp-time
+crash via raw-zone replay — mixed-precision ISO fix in stamp_availability). Verdicts:
+Q1 MZ ψ=+0.0371 t=5.64 (n=6,011); Q2 favorite-backing [0.70,0.95] **+4.82% post-fee
+t=2.93**; Q3 recency +4.56% t=2.28. Promotion checks: date-clustered t=2.94 (332
+settle dates), liquid-≥10k-contracts +4.1% t=1.81 — both PASS. Favorite-tilt signal
+(p̂ = p + 0.03 haircut, category-in-data fail-closed, same-night group caps) built
+per the binding design in [[questions/research-political-underconfidence]].
+Domain conditionality measured: the same mechanism is dead in macro (iteration 5).
+SLEEVE-SCALE MEASUREMENT (walk-forward, real engine): as-wired the tilt LOSES
+(Sharpe −0.67 — entries weeks before close where no edge was claimed + the flat
+200bp haircut ~2×-overcharging favorites); the pre-registered evidence-matched
+variant (≤10d nearness, actual taker fee once) WINS: +0.43 full span, +1.30 last
+18mo, +0.43 ex-election-month, corr ~0, ERC combined 1.29 vs 1.21 book-alone.
+Decision rule PASS → execution-layer re-spec landed (signal nearness gate +
+accurate Whelan fee curve replacing iteration-25's flat 200bp for the whole
+sleeve). Caveat on record: settlement-night lumpiness (top-5 days ≈ 105% of
+additive P&L) — bounded by the same-night group caps.
+
+**The MI incident — a NEW corruption class.** First-ever French validation on this
+machine fired (market↔Mkt-RF 0.538): cross-vendor ENTITY DISAGREEMENT on reused
+tickers (KG/MI/SBNY) — each vendor internally smooth (every ingest screen right to
+pass them), but yfinance and alpaca serve DIFFERENT entities; vendor-mixed reads
+manufacture run-alternators. Remediated (9,125 + 1,294 rows incl. CHK/MNK
+bankruptcy-splices, audit records), blocklist extended + made machine-portable
+(TIE/BMC/CFC added), analysis readers now vendor-dedupe by the lake's
+latest-vintage rule. Post-fix: **market 0.948 PASS** (best ever measured);
+momentum 0.565 vs 0.6 gate with verified benign cause (alpaca-only delisted
+fragments — real FRC/SIVB collapse histories reducing survivorship bias;
+yfinance-only view = 0.635 PASS).
+
+**Iteration 6 — risk-harness baseline + first adoption adjudication.** Baseline
+(coverage-core panels): families 1/3 in-band everywhere; the failure map is
+family-2/4 — equity L/S B=1.69 and MVP B=2.34 (structural model treats residual
+co-movement as zero — THE model weakness, iteration-8 target via wiki Q5
+exposures), crypto uniformly over-forecast (halflife-90 EWMA too slow both ways:
+fc/real ≈ 1.24 median in calm years, B>1.4 in spike years — per-sleeve halflife is
+the candidate), fx MVP B=0.591 (shrinkage inflates the spectrum bottom ~3x; probe:
+raw EWMA fc/real 1.15 vs lw_cc 2.19). Q3 (NW horizon) formally CLOSED — predicted
+signature absent, do not build. Candidate `fixed:0.0` for covariance sleeves:
+fx f4 0.591→1.074 into band, ALL five sleeves' MVPs realized lower vol (intl
+p=0.004), no new failures — but **NO-ADOPT: criterion 2 failed at 50% vs the 60%
+bar** (magnitude-blind cell counting; the rule held against a tempting change;
+criteria revision, if any, must be pre-registered first). Equity+crypto cells were
+re-run on the remediated deduped lake: equity f1-f3 now **IN BAND** (0.956 /
+1.024 / 0.971) — the L/S family-2 failure (was 1.69) was CONTAMINATION, not
+structure; equity MVP barely moved (2.34→2.185, still OUT) — structural
+residual co-movement confirmed as THE remaining equity weakness (Q5/iteration-8
+target). Crypto: all four cells OUT (f1 1.207, f2 1.701, f3 1.189, f4 1.411 —
+net under-forecast; the spike-year lag dominates the calm-year over-forecast),
+baseline health FAIL on the crypto random books — exactly the failure the
+pre-registered halflife candidate below targets. Caveat: crypto coverage core
+is 5/25 ids at the 98% bar. Ledger `risk_harness_20260711T211638Z.json`.
+
+PRE-REGISTERED CANDIDATE (crypto halflife, written before running): probe evidence
+(quarterly as_ofs 2016-2026, equal-weight crypto book) shows halflife-90 EWMA lags
+crypto's vol cycle in BOTH directions — median fc/realized ≈ 1.24 in calm years,
+B>1.4 in spike years (2017/2021/2024). Candidate: `ewma_halflife_days: 30` for the
+CRYPTO sleeve only (structural factor cov + its small-sleeve fallback), all else
+unchanged. Adjudication: the standard 4 criteria via adoption_verdict on the
+crypto cells + the crypto MVP horse race; ADDITIONALLY the by-year fc/real spread
+(max−min of yearly medians) must NARROW vs incumbent — the specific failure being
+fixed. NO-ADOPT if any criterion fails; a different halflife value after seeing
+results = a new pre-registration.
+
+**Infra closed today:** #14 cost overrides (backtest + live path; floor-lowering
+vector found and clamped), #15 shortfall_log (TCA loop closed end-to-end), #18
+consumption half (quarantine filters backtest equities), #20 longshot_bias macro
+exclusion (documented re-spec), #21 events calibration (FAIL — mid-range already
+calibrated; #19 demoted). Data layer: ALFRED-vintaged macro (owner key; 63k
+fallback rows purged), alpaca 1.07M + cross-check re-run (64 quarantined), tiingo
+frontier fix + 404 negative cache (~206/924 and advancing), CM crypto CSVs (BTC
+2010+, floor/ratchet/fallback fixes), Binance vision bulk (delisted-retention
+VERIFIED; ms→µs timestamp migration caught), events live-snapshot CLI path.
+Backtest on the remediated lake: [PENDING — in flight]. n_trials unchanged at 24.
+
 ## [2026-07-10] autoresearch | Kalshi mechanism diagnostics (iteration 5) — both negatives, machine migration
 
 New machine (benja): lake was EMPTY (the 2026-07-07 lake lives on the PC machine).

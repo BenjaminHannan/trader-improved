@@ -1,0 +1,135 @@
+{
+  "run_id": "20260711T211638Z",
+  "generated_at": "2026-07-11T21:16:38.327337+00:00",
+  "incumbent_cells": {
+    "equity/family1": {
+      "B": 0.9564141227432688,
+      "band": [
+        0.8657687889571951,
+        1.1342312110428048
+      ],
+      "in_band": true,
+      "T": 111,
+      "MRAD": 0.25788604945930255,
+      "n_dates": 111,
+      "n_portfolios": 1,
+      "skipped_dates": 2
+    },
+    "equity/family2": {
+      "B": 1.0236969683951427,
+      "band": [
+        0.8657687889571951,
+        1.1342312110428048
+      ],
+      "in_band": true,
+      "T": 111,
+      "MRAD": 0.24335421131538712,
+      "n_dates": 111,
+      "n_portfolios": 1,
+      "skipped_dates": 2
+    },
+    "equity/family3": {
+      "B": 0.9708612243151052,
+      "band": [
+        0.8657687889571951,
+        1.1342312110428048
+      ],
+      "in_band": true,
+      "T": 111,
+      "MRAD": 0.26337600287484153,
+      "n_dates": 111,
+      "n_portfolios": 1,
+      "skipped_dates": 2
+    },
+    "equity/family4": {
+      "B": 2.1845050000678037,
+      "band": [
+        0.9050842004247501,
+        1.0949157995752499
+      ],
+      "in_band": false,
+      "T": 222,
+      "MRAD": 0.9935261973193853,
+      "n_dates": 111,
+      "n_portfolios": 2,
+      "skipped_dates": 2
+    },
+    "crypto/family1": {
+      "B": 1.206737082181644,
+      "band": [
+        0.8908910548820038,
+        1.1091089451179963
+      ],
+      "in_band": false,
+      "T": 168,
+      "MRAD": 0.33545578598238773,
+      "n_dates": 168,
+      "n_portfolios": 1,
+      "skipped_dates": 3
+    },
+    "crypto/family2": {
+      "B": 1.701451824740602,
+      "band": [
+        0.8908910548820038,
+        1.1091089451179963
+      ],
+      "in_band": false,
+      "T": 168,
+      "MRAD": 0.689578640321545,
+      "n_dates": 168,
+      "n_portfolios": 1,
+      "skipped_dates": 3
+    },
+    "crypto/family3": {
+      "B": 1.1892298238231125,
+      "band": [
+        0.8908910548820038,
+        1.1091089451179963
+      ],
+      "in_band": false,
+      "T": 168,
+      "MRAD": 0.32989998988523195,
+      "n_dates": 168,
+      "n_portfolios": 1,
+      "skipped_dates": 3
+    },
+    "crypto/family4": {
+      "B": 1.4105907270538993,
+      "band": [
+        0.9228483250189541,
+        1.077151674981046
+      ],
+      "in_band": false,
+      "T": 336,
+      "MRAD": 0.41551309959504945,
+      "n_dates": 168,
+      "n_portfolios": 2,
+      "skipped_dates": 3
+    }
+  },
+  "candidate_cells": null,
+  "horse_race": null,
+  "verdict": null,
+  "baseline_health": {
+    "passed": false,
+    "fraction_in_band": 0.5,
+    "n_cells": 4,
+    "failing_cells": [
+      [
+        "crypto",
+        1
+      ],
+      [
+        "crypto",
+        2
+      ]
+    ]
+  },
+  "notes": [
+    "n=100",
+    "seed=0",
+    "min_obs=252",
+    "sleeves=['equity', 'crypto']",
+    "families 5/6 not scored: no pre-built external books (see module docstring)"
+  ]
+}

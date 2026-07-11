@@ -28,6 +28,9 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[questions/research-kalshi-mechanism-diagnostics]] — 2026-07-10 (iteration 5): both
   pre-registered Kalshi tests negative (longshot fade fee-eaten; market beats nowcast);
   backfill + monthly nowcast vintages permanent; zero trials burned
+- [[questions/research-political-underconfidence]] — 2026-07-11 (iteration 7): FIRST
+  PASS of the loop — favorite-backing +4.8% post-fee t=2.9, robust to date clustering
+  and liquidity floor; favorite-tilt signal landed in the events sleeve
 
 ## Concepts
 - [[concepts/ewma-shrinkage-combination]]
