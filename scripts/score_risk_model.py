@@ -258,12 +258,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-obs", type=int, default=252,
                    help="trailing obs required before the first evaluation date")
     p.add_argument("--ledger-dir", default="diagnostics/risk_harness")
+    p.add_argument("--instrument-cov", default=None,
+                   help="CANDIDATE override for instrument_covariance (small ETF "
+                        "sleeves): 'lw_cc' | 'lw' | 'fixed:<shrink>' (e.g. fixed:0.0 "
+                        "= raw EWMA). Structural sleeves are untouched. The config "
+                        "file is never modified — this exists so candidate-vs-"
+                        "incumbent adjudication runs are one command each.")
+    p.add_argument("--sleeves", default=None,
+                   help="comma-separated sleeve subset (default: all present); a "
+                        "candidate that only changes instrument_covariance only "
+                        "needs the covariance sleeves re-scored")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     cfg = risk_config()
+    if args.instrument_cov:
+        spec = str(args.instrument_cov)
+        icov = dict(cfg.get("instrument_covariance") or {})
+        if spec.startswith("fixed"):
+            icov["method"] = "fixed"
+            if ":" in spec:
+                icov["shrinkage_to_diagonal"] = float(spec.split(":", 1)[1])
+        else:
+            icov["method"] = spec
+        cfg = {**cfg, "instrument_covariance": icov}
+        print(f"CANDIDATE instrument_covariance override: {icov} "
+              "(config file untouched)")
 
     if args.synthetic:
         print("synthetic run: GBM bundle, no lake")
@@ -282,6 +304,9 @@ def main(argv: list[str] | None = None) -> int:
 
     all_sleeves = list(cfg["structural_sleeves"]) + list(cfg["covariance_sleeves"])
     present_sleeves = [s for s in all_sleeves if (instruments == s).any()]
+    if args.sleeves:
+        wanted = {s.strip() for s in args.sleeves.split(",") if s.strip()}
+        present_sleeves = [s for s in present_sleeves if s in wanted]
     if not present_sleeves:
         print("FATAL: no sleeve in configs/risk.yaml has any instrument in the price panel.",
              file=sys.stderr)
