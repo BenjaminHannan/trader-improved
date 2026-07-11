@@ -44,10 +44,14 @@ def _kalshi_payload():
     (integer 10 -> 0.10) — the loader must parse both.
     """
     markets = [
+        # volume_fp: the listing-level volume the fetch ranks/filters on (the
+        # 2026-07-11 esports-spam fix drops sub-floor listings before candles).
         {"ticker": "T1", "event_ticker": "EVT-A", "title": "Will A resolve YES?",
-         "close_time": "2026-08-01T00:00:00Z", "status": "active"},
+         "close_time": "2026-08-01T00:00:00Z", "status": "active",
+         "volume_fp": "5000.00"},
         {"ticker": "T2", "event_ticker": "EVT-A", "title": "Will A resolve by July?",
-         "close_time": "2026-08-01T00:00:00Z", "status": "active"},
+         "close_time": "2026-08-01T00:00:00Z", "status": "active",
+         "volume_fp": "4000.00"},
     ]
     ts = int(pd.Timestamp("2026-07-01", tz=UTC).timestamp())
     candles = {

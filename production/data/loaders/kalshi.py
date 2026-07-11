@@ -54,6 +54,8 @@ default state is "trade" and this one's default state is "don't".
 """
 from __future__ import annotations
 
+import time
+
 import pandas as pd
 
 from production.data.base import AvailabilityRule, BaseLoader
@@ -81,10 +83,15 @@ class KalshiLoader(BaseLoader):
     # third vendor-side drift on this API this week (candlestick path, dollar
     # schema, now the status enum).
     def __init__(self, lake=None, instruments=None, status="open", max_markets=500,
-                 page_limit=1000):
+                 page_limit=1000, min_volume_contracts=100.0, max_list_pages=30,
+                 pause_s=0.15):
         super().__init__(lake, instruments)
         self.status = status
         self.max_markets = max_markets
+        self.min_volume_contracts = min_volume_contracts
+        self.max_list_pages = max_list_pages
+        # Candle + listing pacing: 500 unpaced candlestick calls 429 (2026-07-11).
+        self.pause_s = pause_s
         self.page_limit = page_limit
 
     # ------------------------------------------------------------------ fetch
@@ -140,9 +147,25 @@ class KalshiLoader(BaseLoader):
         start_ts = int(pd.Timestamp(start).timestamp())
         end_ts = int(pd.Timestamp(end).timestamp())
 
-        markets: list[dict] = []
+        # Rank by volume, never take the raw listing head: as of 2026-07-11 the
+        # "open" listing leads with THOUSANDS of esports parlay micro-markets
+        # (KXMVESPORTSMULTIGAMEEXTENDED-*), mostly zero-volume but some traded —
+        # a head slice yields no usable batch (zero candles everywhere -> schema-
+        # failed empty ingest) and a bare volume floor still fills up with traded
+        # parlays. Scan up to max_list_pages pages, keep markets clearing the
+        # volume floor, then take the TOP max_markets BY VOLUME — the sleeve's
+        # targets (elections/macro/financials, 10^4-10^6 contracts) dominate that
+        # ranking; downstream liquid_universe/dedupe handles the rest.
+        def _vol(m: dict) -> float:
+            try:
+                return float(m.get("volume_fp", m.get("volume", 0)) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        candidates: list[dict] = []
         cursor = None
-        while len(markets) < self.max_markets:
+        pages = 0
+        while pages < self.max_list_pages:
             params = {"limit": self.page_limit, "status": self.status}
             if cursor:
                 params["cursor"] = cursor
@@ -150,11 +173,17 @@ class KalshiLoader(BaseLoader):
             resp.raise_for_status()
             body = resp.json()
             page = body.get("markets", [])
-            markets.extend(page)
+            pages += 1
+            candidates.extend(m for m in page if _vol(m) >= self.min_volume_contracts)
             cursor = body.get("cursor")
             if not cursor or not page:
                 break
-        markets = markets[: self.max_markets]
+            time.sleep(self.pause_s)
+        markets = sorted(candidates, key=_vol, reverse=True)[: self.max_markets]
+        if not markets:
+            self.warnings.append(
+                f"kalshi: no market cleared min_volume_contracts="
+                f"{self.min_volume_contracts} across {pages} listing page(s)")
 
         politics_series = self._fetch_politics_series()
 
@@ -163,6 +192,7 @@ class KalshiLoader(BaseLoader):
             ticker = m.get("ticker")
             if not ticker:
                 continue
+            time.sleep(self.pause_s)   # unpaced candle calls 429 (2026-07-11)
             # Series-scoped candlestick path (the unscoped one 404s vendor-side).
             series = str(m.get("event_ticker") or ticker).split("-", 1)[0]
             try:
