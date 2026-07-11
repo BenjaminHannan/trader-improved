@@ -3,9 +3,13 @@
 Kalshi is a CFTC-regulated binary event exchange. Its public v2 REST API needs no key
 for market metadata or historical candlesticks:
 
-  * list markets (paginated by ``cursor``):
+  * enumerate every series ticker in a category (one call per configured category;
+    see :meth:`KalshiLoader._fetch_category_series`):
+        GET https://api.elections.kalshi.com/trade-api/v2/series/?category={category}
+        -> {"series": [{ticker, category, ...}, ...], "cursor": "<next|empty>"}
+  * list a SINGLE series' open markets (paginated by ``cursor``):
         GET https://api.elections.kalshi.com/trade-api/v2/markets
-        params: ``limit`` (<=1000), ``status`` (active/…​), ``cursor``
+        params: ``series_ticker``, ``limit`` (<=1000), ``status`` (open/…​), ``cursor``
         -> {"markets": [ {ticker, event_ticker, title, close_time, status, ...}, ... ],
             "cursor": "<next|empty>"}
   * daily candlesticks for one market (the series-scoped path — the old
@@ -28,25 +32,37 @@ raises or returns garbage is skipped with a recorded warning rather than abortin
 whole ingest. The BaseLoader machinery gives us watermark-incremental pulls for free
 (``run`` trims the fetch start to the lake watermark minus the overlap window).
 
+**Category-scoped discovery (2026-07-11 rewrite)**: as of that date Kalshi's whole-
+universe ``/markets?status=open`` listing is flooded with hundreds of thousands of
+same-day esports/cross-category parlay micro-markets (``KXMVESPORTSMULTIGAME*``,
+``KXMVECROSSCATEGORY*``). They dominate BOTH the cursor head and the volume ranking
+(the single top "open" market was a 51k-contract parlay) and serve NO daily
+candlesticks at all (same-day lifetimes) — so head-slicing OR volume-ranking that
+listing both yield a zero-candle batch and a schema-failed empty ingest.
+Whole-universe scanning is therefore dead: instead, for each configured category
+(:attr:`KalshiLoader.categories`, default ``("Politics", "Economics", "Financials")``)
+every series ticker is enumerated and each series' open markets are listed directly
+via ``/markets?series_ticker={S}&status=open`` — a listing path the parlay flood never
+appears on, because the sleeve's targets never share a series with it. See
+:meth:`KalshiLoader.fetch` for the full stage-by-stage contract.
+
 Category stamping (promotion check 3 of the political-favorite-tilt study, see
-``research/wiki/questions/research-political-underconfidence.md``): one extra
-paginated call enumerates the Politics category::
+``research/wiki/questions/research-political-underconfidence.md``): the SAME
+per-category series enumeration that drives market discovery also drives the
+``category`` column. Each market's series (its ``event_ticker`` prefix before the
+first ``-``) is looked up against the ``category_series`` map built from every
+configured category and stamped with THAT category's own name, lowercased
+(``"politics"``, ``"economics"``, ``"financials"``, ...) — not the old politics/other
+binary. A series that was enumerated under none of the configured categories (e.g. one
+category's listing failed while others succeeded, and the series belongs to the failed
+one) stamps ``category="other"``.
 
-    GET https://api.elections.kalshi.com/trade-api/v2/series/?category=Politics
-        -> {"series": [{ticker, category, ...}, ...], "cursor": "<next|empty>"}
-
-matching the single-page-in-practice behavior documented on this same endpoint by
-``kalshi_history.py``'s ``_enumerate_category`` (Politics: ~2,083 series, one page,
-no ``cursor`` key at all — but pagination is still driven generically off ``cursor``
-in case that changes). Each market's series (its ``event_ticker`` prefix before the
-first ``-``) is checked against the resulting frozenset and every row is stamped
-``category="politics"`` or ``category="other"``.
-
-This category label gates :func:`production.events.signals.political_favorite_tilt`.
-Degrade path: if the series listing itself fails, every row is stamped
-``category="unknown"`` (with a recorded warning) rather than guessing — and the
-signal treats anything other than ``"politics"`` as *no tilt*. This is
-**fail-CLOSED**: an ambiguous category suppresses a new, narrowly-scoped edge. It is
+This category label gates :func:`production.events.signals.political_favorite_tilt`,
+which only acts on ``category == "politics"`` — unaffected by the wider category set.
+Degrade path: if EVERY configured category's series listing fails, every row is
+stamped ``category="unknown"`` (with a recorded warning per category) rather than
+guessing — and the signal treats anything other than ``"politics"`` as *no tilt*. This
+is **fail-CLOSED**: an ambiguous category suppresses a new, narrowly-scoped edge. It is
 the opposite polarity of :func:`production.events.signals.longshot_bias`'s macro
 exclusion, which is fail-OPEN (a missing/ambiguous column there leaves the older,
 already-validated fade active elsewhere) — deliberately so, since that signal's
@@ -84,31 +100,37 @@ class KalshiLoader(BaseLoader):
     # schema, now the status enum).
     def __init__(self, lake=None, instruments=None, status="open", max_markets=500,
                  page_limit=1000, min_volume_contracts=100.0, max_list_pages=30,
-                 pause_s=0.15):
+                 pause_s=0.15, categories=("Politics", "Economics", "Financials")):
         super().__init__(lake, instruments)
         self.status = status
         self.max_markets = max_markets
         self.min_volume_contracts = min_volume_contracts
+        # Per-series page cap (most series are single-page; this only guards a
+        # pathological series from spinning forever).
         self.max_list_pages = max_list_pages
-        # Candle + listing pacing: 500 unpaced candlestick calls 429 (2026-07-11).
+        # Series-listing + candle pacing: 500 unpaced candlestick calls 429
+        # (2026-07-11); the ~2,700-series-listing rewrite reuses the same pacer.
         self.pause_s = pause_s
         self.page_limit = page_limit
+        self.categories = tuple(categories)
 
     # ------------------------------------------------------------------ fetch
-    def _fetch_politics_series(self) -> frozenset | None:
-        """Enumerate every series ticker in Kalshi's Politics category.
+    def _fetch_category_series(self, category: str) -> frozenset | None:
+        """Enumerate every series ticker in one Kalshi category.
 
-        One extra paginated call: ``GET {KALSHI_BASE}/series/?category=Politics``.
-        Probed live to return the whole category in a single page (~2,083 series;
-        see ``kalshi_history.py``'s ``_enumerate_category`` docstring for the same
-        finding on this exact endpoint — no ``cursor`` key at all), but pagination
-        is still driven generically off ``cursor`` in case the vendor starts
-        paginating it later.
+        One (in practice single-page) call: ``GET {KALSHI_BASE}/series/?category=``
+        + ``category``. Probed live to return the whole category in one page — no
+        ``cursor`` key at all; see ``kalshi_history.py``'s ``_enumerate_category``
+        docstring for the same finding on this exact endpoint — but pagination is
+        still driven generically off ``cursor`` in case the vendor starts paginating
+        it later.
 
-        Returns ``None`` — never an empty set — on any failure, so the caller can
-        tell "listing failed, category is unknown for every row" apart from
-        "listing succeeded, this series legitimately isn't Politics". Only the
-        ``None`` case degrades to ``category="unknown"`` in :meth:`transform`.
+        Returns ``None`` — never an empty set — on any failure, so :meth:`fetch` can
+        tell "this category's listing failed, treat it as unlisted" apart from
+        "listing succeeded, this category legitimately has zero series". A ``None``
+        here makes :meth:`fetch` warn and skip just this category; only when EVERY
+        configured category returns ``None`` does the whole run degrade to
+        ``category="unknown"`` stamping in :meth:`transform`.
         """
         import requests
 
@@ -116,7 +138,7 @@ class KalshiLoader(BaseLoader):
         cursor = None
         try:
             while True:
-                params = {"category": "Politics"}
+                params = {"category": category}
                 if cursor:
                     params["cursor"] = cursor
                 resp = requests.get(f"{KALSHI_BASE}/series/", params=params, timeout=30)
@@ -128,65 +150,101 @@ class KalshiLoader(BaseLoader):
                 if not cursor or not page:
                     break
         except Exception as exc:  # network / shape / rate-limit — degrade, don't guess
-            self.warnings.append(f"kalshi politics series listing failed: {exc!r}")
+            self.warnings.append(f"kalshi {category} series listing failed: {exc!r}")
             return None
         return frozenset(tickers)
 
     def fetch(self, start, end) -> dict:
         """Return ``{"markets": [...], "candles": {ticker: [candle, ...]},
-        "politics_series": frozenset[str] | None}``.
+        "category_series": {category_lower: frozenset[str]} | None}``.
 
-        Market metadata is paginated via the opaque ``cursor``; each listed market's
-        daily candlesticks are pulled between ``start`` and ``end``. Per-market failures
-        are swallowed with a warning so one bad ticker never sinks the batch. One extra
-        call (:meth:`_fetch_politics_series`) enumerates the Politics category for the
-        category stamp applied in :meth:`transform`.
+        Three stages:
+
+        1. **Category enumeration.** Every series ticker in each configured category
+           (:attr:`categories`) is listed via :meth:`_fetch_category_series`. A
+           category whose own listing fails is warned-and-skipped (the warning is
+           recorded inside that method); the run proceeds with whichever categories
+           succeeded. Only if EVERY category fails does the resulting map come back
+           ``None`` here (never an empty dict), which is the fail-closed signal
+           :meth:`transform` reads to stamp every row ``"unknown"``.
+
+        2. **Market listing, category-scoped.** For every series enumerated in step
+           1, its open markets are listed directly via
+           ``GET {KALSHI_BASE}/markets?series_ticker={S}&status={status}``
+           (cursor-paginated, ``page_limit`` per page, paced with ``pause_s`` between
+           calls) — this listing path is never touched by the whole-universe esports-
+           parlay flood documented at module level, because the sleeve's target
+           series never collide with the parlay series. A series listing call that
+           itself fails (network blip, 5xx) is warned and skipped — one bad series
+           among ~2,700 must not sink the whole batch — and a series with zero open
+           markets still costs exactly one call before moving on. Every returned
+           market is filtered to ``volume >= min_volume_contracts`` as it's
+           collected; the surviving candidates are then ranked by volume descending
+           and only the top ``max_markets`` are kept.
+
+        3. **Candlesticks, top slice only.** Exactly the markets that survived step
+           2's rank-and-cap proceed to the (paced) per-market candlestick pull —
+           candles are never fetched for anything outside that slice. Unchanged from
+           the prior single-listing design: a candlestick pull that raises or returns
+           garbage is skipped with a recorded warning rather than aborting the batch.
         """
         import requests
 
         start_ts = int(pd.Timestamp(start).timestamp())
         end_ts = int(pd.Timestamp(end).timestamp())
 
-        # Rank by volume, never take the raw listing head: as of 2026-07-11 the
-        # "open" listing leads with THOUSANDS of esports parlay micro-markets
-        # (KXMVESPORTSMULTIGAMEEXTENDED-*), mostly zero-volume but some traded —
-        # a head slice yields no usable batch (zero candles everywhere -> schema-
-        # failed empty ingest) and a bare volume floor still fills up with traded
-        # parlays. Scan up to max_list_pages pages, keep markets clearing the
-        # volume floor, then take the TOP max_markets BY VOLUME — the sleeve's
-        # targets (elections/macro/financials, 10^4-10^6 contracts) dominate that
-        # ranking; downstream liquid_universe/dedupe handles the rest.
         def _vol(m: dict) -> float:
             try:
                 return float(m.get("volume_fp", m.get("volume", 0)) or 0)
             except (TypeError, ValueError):
                 return 0.0
 
+        # Stage 1: enumerate series per configured category. A category's own
+        # listing failure warns (inside _fetch_category_series) and is dropped; only
+        # if every category fails does category_series stay empty here -> None below.
+        category_series: dict[str, frozenset] = {}
+        for category in self.categories:
+            series = self._fetch_category_series(category)
+            if series is not None:
+                category_series[category.lower()] = series
+        category_series_out = category_series if category_series else None
+
+        # Stage 2: list OPEN markets per enumerated series — category-scoped, never
+        # the flooded whole-universe listing (see module docstring). Filter to the
+        # volume floor as candidates are collected; rank + cap happens once, after.
+        all_series = sorted({s for series in category_series.values() for s in series})
         candidates: list[dict] = []
-        cursor = None
-        pages = 0
-        while pages < self.max_list_pages:
-            params = {"limit": self.page_limit, "status": self.status}
-            if cursor:
-                params["cursor"] = cursor
-            resp = requests.get(f"{KALSHI_BASE}/markets", params=params, timeout=30)
-            resp.raise_for_status()
-            body = resp.json()
-            page = body.get("markets", [])
-            pages += 1
-            candidates.extend(m for m in page if _vol(m) >= self.min_volume_contracts)
-            cursor = body.get("cursor")
-            if not cursor or not page:
-                break
-            time.sleep(self.pause_s)
+        for series in all_series:
+            cursor = None
+            pages = 0
+            while pages < self.max_list_pages:
+                params = {"series_ticker": series, "status": self.status,
+                          "limit": self.page_limit}
+                if cursor:
+                    params["cursor"] = cursor
+                try:
+                    resp = requests.get(f"{KALSHI_BASE}/markets", params=params, timeout=30)
+                    resp.raise_for_status()
+                    body = resp.json()
+                except Exception as exc:  # one bad series must not sink ~2,700 others
+                    self.warnings.append(
+                        f"kalshi markets listing failed for series {series}: {exc!r}")
+                    break
+                page = body.get("markets", [])
+                pages += 1
+                candidates.extend(m for m in page if _vol(m) >= self.min_volume_contracts)
+                cursor = body.get("cursor")
+                time.sleep(self.pause_s)
+                if not cursor or not page:
+                    break
         markets = sorted(candidates, key=_vol, reverse=True)[: self.max_markets]
         if not markets:
             self.warnings.append(
                 f"kalshi: no market cleared min_volume_contracts="
-                f"{self.min_volume_contracts} across {pages} listing page(s)")
+                f"{self.min_volume_contracts} across {len(all_series)} series "
+                f"in categories {sorted(category_series)}")
 
-        politics_series = self._fetch_politics_series()
-
+        # Stage 3: candlesticks for the top slice only.
         candles: dict[str, list] = {}
         for m in markets:
             ticker = m.get("ticker")
@@ -206,15 +264,17 @@ class KalshiLoader(BaseLoader):
             except Exception as exc:  # network / shape / rate-limit — degrade this market
                 self.warnings.append(f"kalshi candlesticks failed for {ticker}: {exc!r}")
                 continue
-        return {"markets": markets, "candles": candles, "politics_series": politics_series}
+        return {"markets": markets, "candles": candles,
+                "category_series": category_series_out}
 
     # -------------------------------------------------------------- transform
     def transform(self, raw) -> pd.DataFrame:
         markets = {m.get("ticker"): m for m in raw.get("markets", []) if m.get("ticker")}
         candles = raw.get("candles", {})
-        # None (listing failed upstream, or the payload predates this key entirely)
-        # -> every row degrades to "unknown", never guessed as "other".
-        politics_series = raw.get("politics_series")
+        # None (every category's listing failed upstream, or the payload predates
+        # this key/generation entirely) -> every row degrades to "unknown", never
+        # guessed as "other".
+        category_series = raw.get("category_series")
         rows: list[dict] = []
         for ticker, candle_series in candles.items():
             meta = markets.get(ticker, {})
@@ -230,12 +290,13 @@ class KalshiLoader(BaseLoader):
             # Market's series = the event_ticker's own prefix before the first "-"
             # (same rule the candlestick fetch and signals._series_of use).
             market_series = str(event_key).split("-", 1)[0]
-            if politics_series is None:
+            if category_series is None:
                 category = "unknown"
-            elif market_series in politics_series:
-                category = "politics"
             else:
-                category = "other"
+                category = next(
+                    (cat for cat, series in category_series.items()
+                     if market_series in series),
+                    "other")
             for candle in candle_series or []:
                 try:
                     ts = candle.get("end_period_ts")

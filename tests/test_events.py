@@ -142,22 +142,44 @@ def test_kalshi_run_end_to_end_writes_curated(tmp_lake, monkeypatch):
 
 # ================================================== (2b) kalshi category stamping
 # T1/T2 (from _kalshi_payload) both carry event_ticker "EVT-A" -> series "EVT".
-def test_kalshi_transform_stamps_category_politics_when_series_matches():
-    raw = dict(_kalshi_payload(), politics_series=frozenset({"EVT"}))
+# category_series maps LOWERED category name -> its series set; transform() now
+# stamps the matched category's own name (actual category, not a politics/other
+# binary).
+def test_kalshi_transform_stamps_category_politics_when_series_matches_politics():
+    raw = dict(_kalshi_payload(), category_series={"politics": frozenset({"EVT"})})
     long = KalshiLoader().transform(raw)
     assert set(long["category"]) == {"politics"}
 
 
-def test_kalshi_transform_stamps_category_other_when_series_not_listed():
-    raw = dict(_kalshi_payload(), politics_series=frozenset({"SOMEOTHERSERIES"}))
+def test_kalshi_transform_stamps_actual_category_not_binary():
+    # Same series, a DIFFERENT configured category -> the label is that category's
+    # own name (economics), proving this isn't a politics/other binary.
+    raw = dict(_kalshi_payload(), category_series={"economics": frozenset({"EVT"})})
+    long = KalshiLoader().transform(raw)
+    assert set(long["category"]) == {"economics"}
+
+
+def test_kalshi_transform_stamps_category_other_when_series_in_no_configured_category():
+    raw = dict(_kalshi_payload(), category_series={
+        "politics": frozenset({"SOMEOTHERSERIES"}),
+        "financials": frozenset({"YETANOTHER"}),
+    })
     long = KalshiLoader().transform(raw)
     assert set(long["category"]) == {"other"}
 
 
 def test_kalshi_transform_stamps_category_unknown_when_listing_absent():
-    # No "politics_series" key at all (e.g. a payload from before this feature, or a
+    # No "category_series" key at all (e.g. a payload from before this feature, or a
     # caller that never ran fetch()) -> fail-CLOSED "unknown", not "other".
     long = KalshiLoader().transform(_kalshi_payload())
+    assert set(long["category"]) == {"unknown"}
+
+
+def test_kalshi_transform_stamps_category_unknown_when_all_categories_failed():
+    # fetch()'s own all-categories-failed degrade: category_series is explicitly
+    # None (not merely absent).
+    raw = dict(_kalshi_payload(), category_series=None)
+    long = KalshiLoader().transform(raw)
     assert set(long["category"]) == {"unknown"}
 
 
@@ -172,62 +194,183 @@ class _FakeResp:
         return self._body
 
 
-def test_kalshi_fetch_politics_listing_failure_degrades_to_unknown_with_warning(monkeypatch):
-    """The politics-series-listing call is additive: if it fails, markets and
-    candlesticks still come back (the batch is not sunk), ``politics_series``
-    degrades to ``None`` with a recorded warning, and transform() then stamps every
-    row "unknown" (fail-closed) rather than guessing "other"."""
-    payload = _kalshi_payload()
+def _kalshi_market(ticker, event_ticker, volume,
+                   close_time="2026-08-01T00:00:00Z", status="active"):
+    return {"ticker": ticker, "event_ticker": event_ticker, "title": ticker,
+            "close_time": close_time, "status": status, "volume_fp": str(volume)}
 
-    def fake_get(url, params=None, timeout=None):
-        if url == f"{KALSHI_BASE}/series/":
-            raise RuntimeError("boom: series listing unreachable")
-        if url == f"{KALSHI_BASE}/markets":
-            return _FakeResp({"markets": payload["markets"], "cursor": None})
-        for ticker, candles in payload["candles"].items():
-            if url.endswith(f"/markets/{ticker}/candlesticks"):
-                return _FakeResp({"candlesticks": candles})
-        raise AssertionError(f"unexpected url {url}")
 
+def _kalshi_candle(ts, close_dollars="0.5000", volume=100, open_interest=50):
+    return {"end_period_ts": ts, "price": {"close_dollars": close_dollars},
+            "volume_fp": str(volume), "open_interest_fp": str(open_interest)}
+
+
+def _install_kalshi_fake_requests(monkeypatch, fake_get):
     fake_requests = types.ModuleType("requests")
     fake_requests.get = fake_get
     monkeypatch.setitem(sys.modules, "requests", fake_requests)
-
-    loader = KalshiLoader()
-    raw = loader.fetch("2026-06-01", "2026-07-31")
-    assert raw["politics_series"] is None
-    assert any("politics series listing failed" in w for w in loader.warnings)
-
-    long = loader.transform(raw)
-    assert set(long["category"]) == {"unknown"}
+    monkeypatch.setattr("time.sleep", lambda s: None)
 
 
-def test_kalshi_fetch_politics_listing_success_is_wired_into_transform(monkeypatch):
-    """End-to-end fetch() -> transform(): a successful (single-page, no cursor)
-    politics listing correctly separates politics vs. other series."""
-    payload = _kalshi_payload()
+def test_kalshi_fetch_lists_markets_per_series_across_categories_and_stamps_category(monkeypatch):
+    """Category-scoped discovery (2026-07-11 rewrite): each configured category's
+    series are enumerated, then EACH series is listed directly via
+    ``/markets?series_ticker=...&status=open`` -- never the flooded whole-universe
+    listing. Category stamping threads all the way through fetch() -> transform()
+    to actual per-category labels, not a politics/other binary."""
+    ts = int(pd.Timestamp("2026-07-01", tz=UTC).timestamp())
+    series_by_category = {"Politics": ["POLSER"], "Economics": ["ECOSER"]}
+    markets_by_series = {
+        "POLSER": [_kalshi_market("P1", "POLSER-A", 5000)],
+        "ECOSER": [_kalshi_market("E1", "ECOSER-A", 4000)],
+    }
+    candle_calls: list[str] = []
 
     def fake_get(url, params=None, timeout=None):
         if url == f"{KALSHI_BASE}/series/":
-            assert params.get("category") == "Politics"
-            return _FakeResp({"series": [{"ticker": "EVT"}]})   # no "cursor" key
+            cat = params["category"]
+            return _FakeResp({"series": [{"ticker": t}
+                                         for t in series_by_category.get(cat, [])]})
         if url == f"{KALSHI_BASE}/markets":
-            return _FakeResp({"markets": payload["markets"], "cursor": None})
-        for ticker, candles in payload["candles"].items():
-            if url.endswith(f"/markets/{ticker}/candlesticks"):
-                return _FakeResp({"candlesticks": candles})
+            assert params["status"] == "open"
+            series = params["series_ticker"]
+            return _FakeResp({"markets": markets_by_series.get(series, []), "cursor": None})
+        if url.endswith("/candlesticks"):
+            ticker = url.rsplit("/", 2)[1]
+            candle_calls.append(ticker)
+            return _FakeResp({"candlesticks": [_kalshi_candle(ts)]})
         raise AssertionError(f"unexpected url {url}")
 
-    fake_requests = types.ModuleType("requests")
-    fake_requests.get = fake_get
-    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    _install_kalshi_fake_requests(monkeypatch, fake_get)
 
-    loader = KalshiLoader()
+    loader = KalshiLoader(categories=("Politics", "Economics"))
     raw = loader.fetch("2026-06-01", "2026-07-31")
-    assert raw["politics_series"] == frozenset({"EVT"})
+
+    assert raw["category_series"] == {"politics": frozenset({"POLSER"}),
+                                      "economics": frozenset({"ECOSER"})}
+    assert {m["ticker"] for m in raw["markets"]} == {"P1", "E1"}
+    assert set(candle_calls) == {"P1", "E1"}
 
     long = loader.transform(raw)
-    assert set(long["category"]) == {"politics"}   # both T1, T2 are series "EVT"
+    got = dict(zip(long["instrument_id"], long["category"]))
+    assert got == {"EV:kalshi:P1": "politics", "EV:kalshi:E1": "economics"}
+
+
+def test_kalshi_fetch_filters_volume_ranks_and_caps_before_candles(monkeypatch):
+    """Candidates below min_volume_contracts never reach the ranking; only the top
+    max_markets by volume proceed to a candlestick call -- candles are never fetched
+    for anything outside that slice."""
+    ts = int(pd.Timestamp("2026-07-01", tz=UTC).timestamp())
+    markets = [
+        _kalshi_market("LOW", "SER-A", 50),    # below the 100-contract floor -> dropped
+        _kalshi_market("MID", "SER-B", 200),
+        _kalshi_market("TOP", "SER-C", 300),   # highest volume -> the only survivor (max_markets=1)
+    ]
+
+    candle_calls: list[str] = []
+
+    def fake_get(url, params=None, timeout=None):
+        if url == f"{KALSHI_BASE}/series/":
+            return _FakeResp({"series": [{"ticker": "SER"}]})
+        if url == f"{KALSHI_BASE}/markets":
+            assert params["series_ticker"] == "SER"
+            return _FakeResp({"markets": markets, "cursor": None})
+        if url.endswith("/candlesticks"):
+            ticker = url.rsplit("/", 2)[1]
+            candle_calls.append(ticker)
+            return _FakeResp({"candlesticks": [_kalshi_candle(ts)]})
+        raise AssertionError(f"unexpected url {url}")
+
+    _install_kalshi_fake_requests(monkeypatch, fake_get)
+
+    loader = KalshiLoader(categories=("Politics",), max_markets=1,
+                          min_volume_contracts=100.0)
+    raw = loader.fetch("2026-06-01", "2026-07-31")
+
+    assert [m["ticker"] for m in raw["markets"]] == ["TOP"]
+    assert candle_calls == ["TOP"]
+
+
+def test_kalshi_fetch_single_series_listing_failure_does_not_sink_others(monkeypatch):
+    """One bad series among (in production) ~2,700 must not sink the whole batch:
+    its own /markets listing call is warned-and-skipped, the rest proceed."""
+    ts = int(pd.Timestamp("2026-07-01", tz=UTC).timestamp())
+
+    def fake_get(url, params=None, timeout=None):
+        if url == f"{KALSHI_BASE}/series/":
+            return _FakeResp({"series": [{"ticker": "BADSER"}, {"ticker": "GOODSER"}]})
+        if url == f"{KALSHI_BASE}/markets":
+            if params["series_ticker"] == "BADSER":
+                raise RuntimeError("boom: 500 from vendor")
+            return _FakeResp({"markets": [_kalshi_market("G1", "GOODSER-A", 5000)],
+                              "cursor": None})
+        if url.endswith("/candlesticks"):
+            return _FakeResp({"candlesticks": [_kalshi_candle(ts)]})
+        raise AssertionError(f"unexpected url {url}")
+
+    _install_kalshi_fake_requests(monkeypatch, fake_get)
+
+    loader = KalshiLoader(categories=("Politics",))
+    raw = loader.fetch("2026-06-01", "2026-07-31")
+
+    assert {m["ticker"] for m in raw["markets"]} == {"G1"}
+    assert any("BADSER" in w for w in loader.warnings)
+
+
+def test_kalshi_fetch_category_listing_failure_warns_and_continues_with_others(monkeypatch):
+    """A single category's series listing failing is additive: warn, skip that
+    category, and proceed with whichever others succeeded -- only ALL-categories-
+    failed degrades category_series to None (module docstring, item 3)."""
+    ts = int(pd.Timestamp("2026-07-01", tz=UTC).timestamp())
+
+    def fake_get(url, params=None, timeout=None):
+        if url == f"{KALSHI_BASE}/series/":
+            if params["category"] == "Politics":
+                raise RuntimeError("boom: politics series listing unreachable")
+            return _FakeResp({"series": [{"ticker": "ECOSER"}]})
+        if url == f"{KALSHI_BASE}/markets":
+            assert params["series_ticker"] == "ECOSER"
+            return _FakeResp({"markets": [_kalshi_market("E1", "ECOSER-A", 5000)],
+                              "cursor": None})
+        if url.endswith("/candlesticks"):
+            return _FakeResp({"candlesticks": [_kalshi_candle(ts)]})
+        raise AssertionError(f"unexpected url {url}")
+
+    _install_kalshi_fake_requests(monkeypatch, fake_get)
+
+    loader = KalshiLoader(categories=("Politics", "Economics"))
+    raw = loader.fetch("2026-06-01", "2026-07-31")
+
+    assert raw["category_series"] == {"economics": frozenset({"ECOSER"})}
+    assert any("Politics series listing failed" in w for w in loader.warnings)
+    assert {m["ticker"] for m in raw["markets"]} == {"E1"}
+
+    long = loader.transform(raw)
+    assert set(long["category"]) == {"economics"}
+
+
+def test_kalshi_fetch_all_categories_fail_degrades_category_series_to_none(monkeypatch):
+    """Every configured category's series listing failing is the only case that
+    degrades category_series to None (and, structurally, leaves no series to list
+    markets for at all -- the resulting "unknown" transform() stamping is proven
+    directly, against a payload WITH rows, by
+    test_kalshi_transform_stamps_category_unknown_when_all_categories_failed)."""
+    def fake_get(url, params=None, timeout=None):
+        if url == f"{KALSHI_BASE}/series/":
+            raise RuntimeError(f"boom: {params['category']} series listing unreachable")
+        raise AssertionError(f"unexpected url {url}")   # no series -> no markets call
+
+    _install_kalshi_fake_requests(monkeypatch, fake_get)
+
+    loader = KalshiLoader(categories=("Politics", "Economics", "Financials"))
+    raw = loader.fetch("2026-06-01", "2026-07-31")
+
+    assert raw["category_series"] is None
+    assert raw["markets"] == [] and raw["candles"] == {}
+    # one warning per failed category, plus the "no market cleared the volume floor"
+    # summary warning from the (necessarily empty) market-listing stage
+    failure_warnings = [w for w in loader.warnings if "series listing failed" in w]
+    assert len(failure_warnings) == 3
 
 
 # ===================================================== helpers: curated-shape panel
