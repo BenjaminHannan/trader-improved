@@ -130,7 +130,21 @@ fallback rows purged), alpaca 1.07M + cross-check re-run (64 quarantined), tiing
 frontier fix + 404 negative cache (~206/924 and advancing), CM crypto CSVs (BTC
 2010+, floor/ratchet/fallback fixes), Binance vision bulk (delisted-retention
 VERIFIED; ms→µs timestamp migration caught), events live-snapshot CLI path.
-Backtest on the remediated lake: [PENDING — in flight]. n_trials unchanged at 24.
+Backtest on the remediated lake + DEEP basis (50,312 rows, 2020+, was 33.6k
+2021+): net Sharpe **−0.041** on the protocol window (2019-01..2026-07;
+was +0.183 pre-remediation/shallow-basis), deflated 0.000, CI [−0.63,+0.56] —
+the honest headline remains *indistinguishable from zero*, now with a
+negative point estimate. Window robustness: 2013+ −0.035, 2022+ −0.024.
+Attribution is ENTIRELY the crypto sleeve (+0.162→−0.177; fx unchanged
++0.05), and the forensic says it's a REGIME FLIP, not early-data noise:
+basis_carry per-year rank-IC vs fwd-5d = 2021 −0.037 (t=−2.9, the validated
+fade era) → 2022/23 weakly negative → **2024/25/26 POSITIVE (+0.018/+0.019/
++0.040, 2026 t=+2.5)**; full-sample IC 0.0003. Deep history makes the
+trailing-IC walk-forward HOLD the dead fade through the flip (stale 2021
+confidence) — the shallow-basis +0.183 was the factor trading only inside
+its favorable era because the data started there. Factor-health action is a
+decision for a pre-registered round: demotion/re-spec of basis_carry burns a
+trial; monitoring note filed. n_trials unchanged at 24.
 
 ## [2026-07-10] autoresearch | Kalshi mechanism diagnostics (iteration 5) — both negatives, machine migration
 
