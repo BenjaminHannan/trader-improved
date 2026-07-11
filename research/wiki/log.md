@@ -22,6 +22,18 @@ earnings_yield equity risk exposures (config-flip, alpha gate untouched).
   mechanism Q5 was aimed at was never directly scored; (ii) or an R² criterion
   measured on factor-tilted days/books rather than the unconditional mean.
 
+PRE-REGISTERED (iteration 8b, committed before running — path (i) above made
+binding): same candidate (liquidity + earnings_yield equity exposures),
+re-adjudicated against its mechanism target, the equity MVP cell. ADOPT iff
+ALL of: (1) equity family-4 |B_cand − 1| ≤ 0.5·|B_inc − 1| (B_inc = 2.185 from
+ledger 211638Z ⇒ B_cand must land in [0.408, 1.593]); (2) equity f1-f3 stay
+in band under the candidate; (3) equity MVP horse race (step=5, min_obs=252,
+LW-2011 paired bootstrap): candidate realized vol LOWER with p < 0.05 —
+candidate is NOT simpler, no leniency; (4) incumbent cells reused verbatim
+from ledger 211638Z (n=100/seed=0/min_obs=252 — identical panel args).
+NO-ADOPT if any fails; any threshold moved after seeing results = a new
+registration. Zero n_trials cost (risk-model change, alpha gate untouched).
+
 **A second corruption class the MI-incident fixes could not see.** After the
 name-driven blocklist purge (KG/MI/SBNY/CHK/MNK) the fresh French check still failed:
 market↔Mkt-RF **0.691** (below the healthy 0.88–0.92), momentum↔Mom **0.106**
