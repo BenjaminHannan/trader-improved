@@ -179,7 +179,8 @@ def test_transform_applies_hygiene_backstop_and_blocklist():
     assert (long["close"] >= 0.10).all()
     # Drop counts recorded (1 penny row, 2 blocklisted FB rows) and surfaced as a warning.
     assert loader.hygiene_drops == {"backstop_dropped": 1, "flap_dropped": 0,
-                                    "blocklist_dropped": 2, "corrupt_series": []}
+                                    "blocklist_dropped": 2, "corrupt_series": [],
+                                    "illiquid_series": []}
     assert any("hygiene" in w for w in loader.warnings)
 
 
