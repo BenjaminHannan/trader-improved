@@ -110,6 +110,18 @@ def test_rows_stop_strictly_before_existing_ccxt_coverage(tmp_lake):
     assert len(long) == 2
 
 
+def test_sub_ten_cent_crypto_prices_survive(tmp_lake):
+    """The equity sub-$0.10 hygiene floor must NOT apply here: ccxt's crypto path
+    doesn't apply it either (SHIB at $0.000004 lives in the real lake), and the
+    first backfill wrongly ate 5,287 legitimate rows (early BTC, pre-2021 DOGE)."""
+    _seed_ccxt_coverage(tmp_lake, "CR:BTC:2013-09-01", "2021-01-01")
+    raw = {"btc": _csv([("2010-08-01", "", "0.06"), ("2010-08-02", "", "0.07")])}
+    loader = CoinMetricsRatesLoader(tmp_lake, instruments=_crypto_instruments())
+    long = loader.transform(raw)
+    assert len(long) == 2
+    assert long["close"].min() == pytest.approx(0.06)
+
+
 def test_dead_asset_without_coverage_keeps_full_history(tmp_lake):
     # coverage exists for BTC only; ETH (think: a dead asset) has none -> full keep
     _seed_ccxt_coverage(tmp_lake, "CR:BTC:2013-09-01", "2021-01-01")
@@ -118,6 +130,47 @@ def test_dead_asset_without_coverage_keeps_full_history(tmp_lake):
     long = loader.transform(raw)
     assert len(long) == 2
     assert long["obs_date"].max() == pd.Timestamp("2022-03-01")
+
+
+def test_cutoff_ignores_prior_cm_rows_no_ratchet(tmp_lake):
+    """Re-run idempotence: the cutoff comes from ccxt-sourced rows ONLY. A prior
+    CM backfill's own earlier rows must not ratchet the floor backward (the bug
+    that shrank the second --full run from 8,266 to 4,513 rows)."""
+    _seed_ccxt_coverage(tmp_lake, "CR:BTC:2013-09-01", "2021-01-01")
+    # simulate a prior CM backfill row well before ccxt coverage
+    old = pd.DataFrame({
+        "obs_date": [pd.Timestamp("2015-01-01")],
+        "instrument_id": ["CR:BTC:2013-09-01"],
+        "close": [314.25], "volume": [float("nan")], "dollar_volume": [float("nan")],
+        "available_from": [pd.Timestamp("2015-01-03", tz=UTC)],
+        "source": ["coinmetrics:community-csv"],
+        "ingested_at": [pd.Timestamp("2026-01-01", tz=UTC)],
+    })
+    tmp_lake.write_curated(old, "prices", "crypto")
+    raw = {"btc": _csv([("2015-01-01", "", "314.25"), ("2020-12-01", "", "19700")])}
+    loader = CoinMetricsRatesLoader(tmp_lake, instruments=_crypto_instruments())
+    long = loader.transform(raw)
+    # both rows precede the CCXT floor (2021-01-01): both emitted, no ratchet
+    assert len(long) == 2
+    assert long["obs_date"].max() == pd.Timestamp("2020-12-01")
+
+
+def test_reference_rate_fallback_shifts_one_day_back_and_coalesces(tmp_lake):
+    """Newer assets' CSVs carry no PriceUSD (day-START-stamped rates only): the
+    fallback must map time=D to obs_date D-1 (in-file identity
+    ReferenceRate(D+1) == PriceUSD(D)) and coalesce ReferenceRateUSD with the
+    plain ReferenceRate column, which carries the FULL history where the
+    USD-suffixed twin is only populated for recent days (sol, probed 2026-07-11)."""
+    _seed_ccxt_coverage(tmp_lake, "CR:BTC:2013-09-01", "2021-01-01")
+    csv_no_price = ("time,AdrActCnt,ReferenceRate,ReferenceRateUSD\n"
+                    "2015-06-02,9,251.5,\n"          # only plain RR populated
+                    "2015-06-03,9,260.0,260.0\n")    # both populated (equal)
+    loader = CoinMetricsRatesLoader(tmp_lake, instruments=_crypto_instruments())
+    long = loader.transform({"eth": csv_no_price})
+    got = long.set_index("obs_date")["close"]
+    assert got[pd.Timestamp("2015-06-01")] == pytest.approx(251.5)  # coalesced
+    assert got[pd.Timestamp("2015-06-02")] == pytest.approx(260.0)  # shifted back
+    assert len(long) == 2
 
 
 def test_refuses_to_emit_when_lake_has_no_crypto_coverage(tmp_lake):
