@@ -171,12 +171,23 @@ Attribution is ENTIRELY the crypto sleeve (+0.162→−0.177; fx unchanged
 +0.05), and the forensic says it's a REGIME FLIP, not early-data noise:
 basis_carry per-year rank-IC vs fwd-5d = 2021 −0.037 (t=−2.9, the validated
 fade era) → 2022/23 weakly negative → **2024/25/26 POSITIVE (+0.018/+0.019/
-+0.040, 2026 t=+2.5)**; full-sample IC 0.0003. Deep history makes the
-trailing-IC walk-forward HOLD the dead fade through the flip (stale 2021
-confidence) — the shallow-basis +0.183 was the factor trading only inside
-its favorable era because the data started there. Factor-health action is a
++0.040, 2026 t=+2.5)**; full-sample IC 0.0003. Factor-health action is a
 decision for a pre-registered round: demotion/re-spec of basis_carry burns a
 trial; monitoring note filed. n_trials unchanged at 24.
+
+CORRECTION (same day, post-forensic): the old +0.183 was NOT era-selection —
+it was a **measurement artifact**. In the shallow-basis run the crypto sleeve
+never traded at all (turnover 3.02e-9: the optimizer correctly sat out below
+the 30bp floor, leaving ~1e-9 CVXPY residual weights), `sharpe()` reported
+the resulting solver noise as +0.162 (scale-invariant mean/std on a ~0/~0
+series — fixed 223ce1d, NaN-guard + 3 regression tests), and a SECOND bug
+levered the headline onto that noise: `allocation.py`'s ERC fixed point
+treats a near-zero-variance sleeve as risk-free and allocated **99.994% of
+capital to the dead sleeve** (fix in progress). In the DEEP-basis run the
+sleeve genuinely traded (turnover 0.338) and genuinely lost −0.177 — the
+regime-flip losses are real. Every historical headline Sharpe from this
+engine predating these fixes is untrustworthy; re-measure after the ERC fix
+lands.
 
 ## [2026-07-10] autoresearch | Kalshi mechanism diagnostics (iteration 5) — both negatives, machine migration
 
