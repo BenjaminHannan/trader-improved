@@ -182,7 +182,8 @@ def resolution_convergence(panel: pd.DataFrame, window: int = 5,
 
 
 def political_favorite_tilt(panel: pd.DataFrame, low: float = 0.70, high: float = 0.95,
-                            haircut: float = 0.03, cap: float = 0.99) -> pd.DataFrame:
+                            haircut: float = 0.03, cap: float = 0.99,
+                            max_days_to_close: int = 10) -> pd.DataFrame:
     """Tilt toward Kalshi political favorites: the opposite sign of the longshot bias.
 
     Practitioner-scan idea #6 (Le, arXiv 2602.19520; see
@@ -229,18 +230,38 @@ def political_favorite_tilt(panel: pd.DataFrame, low: float = 0.70, high: float 
     exclusion protects a signal that defaults to *trading* (fail open = keep
     fading elsewhere), while this is a new, narrowly-scoped edge whose default
     must be *not trading* on ambiguous data (fail closed = no tilt).
+
+    **Nearness gate (execution re-spec, 2026-07-11)**: emits ONLY for markets
+    closing within ``max_days_to_close`` calendar days of ``obs_date`` (default 10).
+    This is a SIGNAL-LEVEL restriction — it holds regardless of any downstream
+    ``liquid_universe`` nearness filter — and matches the validated evidence exactly:
+    the tilt as originally wired (no nearness restriction) loses money at portfolio
+    scale (``diagnostics/events_tilt_backtest.json``: full-span Sharpe -0.67), while
+    the pre-registered, evidence-matched variant restricted to <=10 days to close
+    wins (full-span Sharpe +0.43, last-18mo +1.30). Fail-closed, the same posture as
+    the venue/category guards above: a missing ``close_time`` column, or a row whose
+    ``close_time`` is ``NaT`` (unresolvable nearness), suppresses that row's emission
+    rather than defaulting to tradeable.
     """
     if panel is None or panel.empty:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
     if "venue" not in panel.columns or "category" not in panel.columns:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+    if "close_time" not in panel.columns:
         return pd.DataFrame(columns=OUTPUT_COLUMNS)
 
     venue = panel["venue"].astype(str).str.lower()
     category = panel["category"].astype(str).str.lower()
     price = pd.to_numeric(panel["yes_price"], errors="coerce")
 
+    obs = pd.to_datetime(panel["obs_date"])
+    obs_utc = obs.dt.tz_localize("UTC") if obs.dt.tz is None else obs.dt.tz_convert("UTC")
+    close = pd.to_datetime(panel["close_time"], utc=True, errors="coerce")
+    days_to_close = (close - obs_utc).dt.total_seconds() / 86400.0
+    near = days_to_close.notna() & (days_to_close <= max_days_to_close)
+
     eligible = (venue == "kalshi") & (category == "politics") & price.between(
-        low, high, inclusive="both")
+        low, high, inclusive="both") & near
     edge = (price + haircut).clip(upper=cap) - price
 
     value = pd.Series(np.nan, index=panel.index)

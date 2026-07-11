@@ -28,8 +28,18 @@ Modeling choices (documented approximations):
     ``weight * side * (p_d - p_prev) / entry`` (side ``+1`` YES, ``-1`` NO). Telescoped over the
     hold this is ``weight * side * (p_exit - entry) / entry`` — e.g. a long from 0.9 settling at
     1.0 makes ``weight * (1/0.9 - 1)``.
-  * **cost**: the flat ``FEE_BPS`` (200bp) round-trip fee is charged on the entered notional
-    (``sum weight``) as a negative return on the first effective day of each rebalance.
+  * **cost**: the actual Kalshi taker fee (:func:`production.events.sizing.taker_fee_fraction`
+    — an execution re-spec, 2026-07-11, replacing a flat ``FEE_BPS = 200`` (2%) round-trip
+    placeholder; see ``production/events/sizing.py``'s module docstring for the fee schedule
+    and ``diagnostics/events_tilt_backtest.json`` for the supporting evidence) is charged on
+    each instrument's entered weight, at ITS OWN entry price, as a negative return on the
+    first effective day of each rebalance — charged ONCE, at entry: Kalshi settlement is
+    free, so a position held to settlement pays no exit fee. This changes the realized fee
+    for every events signal that runs through this engine (``longshot_bias`` and
+    ``resolution_convergence`` today), not just a hypothetical new one: the prior flat 200bp
+    was a deliberately conservative placeholder (backlog iteration 25), roughly double the
+    actual entry-only taker fee at a typical favorite price; this is a strictly more accurate
+    replacement, not a change of sign or intent.
 """
 from __future__ import annotations
 
@@ -38,7 +48,7 @@ import pandas as pd
 
 from production.events.markets import dedupe_related, liquid_universe
 from production.events.signals import longshot_bias, resolution_convergence
-from production.events.sizing import FEE_BPS, size_event_book
+from production.events.sizing import size_event_book, taker_fee_fraction
 
 
 def _snap_resolution(price: float) -> float:
@@ -149,9 +159,16 @@ def event_sleeve_returns(panel: pd.DataFrame, rebalance_dates, capital_frac: flo
         hold = grid[(grid > t) & (grid <= t_next)]
         if len(hold) == 0:
             continue
-        # fee charged on the entered notional on the first effective day
+        # fee charged on the entered notional on the first effective day, per-instrument at
+        # ITS OWN entry price (the taker fee is price-dependent, not a flat rate) — charged
+        # ONCE, here, at entry; no exit/settlement fee is ever charged (Kalshi settlement is
+        # free), so positions running to their last hold day incur no further cost.
         first = hold[0]
-        fee = FEE_BPS / 1e4 * float(sum(weight.values()))
+        fee = float(sum(
+            weight[iid] * taker_fee_fraction(entry[iid])
+            for iid in weight
+            if np.isfinite(entry.get(iid, np.nan)) and entry[iid] > 0.0
+        ))
         out.loc[first] += -fee
 
         # per-position running mark, seeded at the entry price so day-1 P&L is measured from

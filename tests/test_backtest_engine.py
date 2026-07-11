@@ -583,7 +583,7 @@ def test_default_config_ships_tranching_and_crypto_cadence_on():
 
 # ============================================================ events sleeve integration
 from production.events.backtest import event_sleeve_returns
-from production.events.sizing import FEE_BPS, size_event_book
+from production.events.sizing import size_event_book, taker_fee_fraction
 from production.events.markets import dedupe_related, liquid_universe
 from production.events.backtest import _combined_signals
 from production.portfolio.allocation import _ewma_cov, _risk_contrib_shares, sleeve_allocation
@@ -642,7 +642,9 @@ def test_event_sleeve_known_answer_long_favorite_resolves():
     assert list(book["instrument_id"]) == ["EV:kalshi:FAV"]
     assert book.iloc[0]["side"] == "YES"
     w = float(book.iloc[0]["weight"])
-    expected = w * (1.0 / 0.90 - 1.0) - w * FEE_BPS / 1e4
+    # fee: the accurate per-price taker fraction at the 0.90 entry (the flat
+    # FEE_BPS haircut was retired in the 2026-07-11 events fee re-spec)
+    expected = w * (1.0 / 0.90 - 1.0) - w * taker_fee_fraction(0.90)
     assert out.sum() == pytest.approx(expected, rel=1e-9, abs=1e-12)
 
 

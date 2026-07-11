@@ -4,20 +4,64 @@ Binary event contracts are Bernoulli bets, so the Kelly criterion applies cleanl
 module turns a directional signal (a believed edge over the market price) into position
 weights, subject to three disciplines the research insists on:
 
-  * **costs are never zero** — a flat round-trip fee haircut is subtracted from the raw
-    edge before sizing; an edge that does not clear the haircut is not traded;
+  * **costs are never zero** — the actual Kalshi taker-fee haircut (see
+    :func:`taker_fee_fraction`) is subtracted from the raw edge before sizing; an edge
+    that does not clear the haircut is not traded;
   * **fractional Kelly** — full Kelly is too aggressive under parameter uncertainty, so
     weights are scaled by ``KELLY_FRACTION`` (0.25x);
   * **caps** — one net position per correlated-event group (``per_group_cap``), and total
     gross exposure bounded by ``capital_frac``.
+
+Fee model — execution re-spec (2026-07-11), replacing a flat ``FEE_BPS = 200`` (2%)
+round-trip placeholder: :func:`taker_fee` / :func:`taker_fee_fraction` port the Kalshi
+taker-fee schedule from ``research/diagnostics/_common.py::taker_fee`` (production
+never imports ``research/``, per CLAUDE.md, so the formula is duplicated here, not
+imported). Kalshi charges ``ceil-to-cent(0.07 * C * p * (1-p))`` dollars on ``C``
+contracts at price ``p``; following Buergi, Deng & Whelan we impute the per-contract
+rate from a 100-lot: ``c(p) = ceil(700 * p * (1-p)) / 10000`` (50c price -> 1.75c/
+contract; 5c price -> 0.34c/contract). Maker fee is 25% of taker on the 2026-07-07
+schedule; the events sleeve is a taker (crosses the spread on entry), so it prices the
+taker side. The fee is charged ONCE, at entry — Kalshi settlement is free, so a
+position held to settlement pays no exit fee. The prior flat 200bp was a deliberately
+conservative placeholder (backlog iteration 25) for ALL events signals
+(``longshot_bias``, ``resolution_convergence``, and — once wired —
+``political_favorite_tilt``); this is a strictly more accurate replacement, evidence
+in ``diagnostics/events_tilt_backtest.json``.
 """
 from __future__ import annotations
+
+import math
 
 import numpy as np
 import pandas as pd
 
 KELLY_FRACTION = 0.25   # fractional-Kelly multiplier (quarter-Kelly)
-FEE_BPS = 200.0         # flat round-trip cost haircut, in basis points (2%)
+
+
+def taker_fee(p: float) -> float:
+    """Per-contract Kalshi taker fee in dollars at price ``p``, imputed on a 100-lot.
+
+    ``ceil(700 * p * (1-p)) / 10000`` — see the module docstring for the derivation
+    (ported from ``research/diagnostics/_common.py::taker_fee``, Whelan Table 8's
+    fee schedule). ``p=0.50`` -> ``0.0175`` (1.75c); ``p=0.85`` -> ``0.009`` (0.9c).
+    """
+    p = float(p)
+    return math.ceil(700.0 * p * (1.0 - p)) / 10000.0
+
+
+def taker_fee_fraction(p: float) -> float:
+    """Kalshi taker fee as a fraction of the entry price ``p``.
+
+    A ``$1``-payout YES contract bought at price ``p`` costs ``p + taker_fee(p)``
+    dollars; expressed as a fraction of the stake ``p`` that is
+    ``taker_fee(p) / p``. Charged ONCE, at entry, per the module docstring. Returns
+    ``0.0`` for a non-positive price (guards a degenerate/missing entry price rather
+    than dividing by zero).
+    """
+    p = float(p)
+    if p <= 0.0:
+        return 0.0
+    return taker_fee(p) / p
 
 
 def bernoulli_variance(p: float) -> float:
@@ -60,8 +104,10 @@ def size_event_book(signals_df: pd.DataFrame, panel: pd.DataFrame,
     (YES probability minus market price). ``panel`` supplies the market price
     (``yes_price``) at each instrument's latest observation. For each instrument:
 
-      1. subtract the flat ``FEE_BPS`` round-trip haircut from the edge magnitude; an edge
-         that does not clear the haircut is dropped (**costs are never zero**);
+      1. subtract the actual Kalshi taker-fee haircut (:func:`taker_fee_fraction` of
+         that instrument's market price — see the module docstring) from the edge
+         magnitude; an edge that does not clear the haircut is dropped (**costs are
+         never zero**);
       2. form ``p_model = p_market + net_edge`` and size with fractional Kelly
          (``KELLY_FRACTION`` x :func:`kelly_fraction`), capped at ``per_group_cap``.
 
@@ -81,13 +127,13 @@ def size_event_book(signals_df: pd.DataFrame, panel: pd.DataFrame,
           .drop_duplicates("instrument_id", keep="last")
           .set_index("instrument_id")["yes_price"])
 
-    haircut = FEE_BPS / 1e4
     recs: list[dict] = []
     for iid, row in sig.iterrows():
         if iid not in px.index:
             continue
         p_market = float(px.loc[iid])
         edge = float(row["value"])
+        haircut = taker_fee_fraction(p_market)
         net_edge = np.sign(edge) * max(abs(edge) - haircut, 0.0)
         if net_edge == 0.0:               # edge did not clear the cost floor -> no trade
             continue

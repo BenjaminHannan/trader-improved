@@ -19,6 +19,7 @@ import pytest
 from production.data.audit import audit
 from production.data.loaders.kalshi import KALSHI_BASE, KalshiLoader
 from production.data.loaders.polymarket import PolymarketLoader
+from production.events.backtest import _combined_signals, event_sleeve_returns
 from production.events.markets import EventMarket, dedupe_related, liquid_universe
 from production.events.signals import (
     longshot_bias,
@@ -26,10 +27,11 @@ from production.events.signals import (
     resolution_convergence,
 )
 from production.events.sizing import (
-    FEE_BPS,
     bernoulli_variance,
     kelly_fraction,
     size_event_book,
+    taker_fee,
+    taker_fee_fraction,
 )
 
 UTC = "UTC"
@@ -602,23 +604,25 @@ def _political_panel(rows) -> pd.DataFrame:
 
 
 def test_political_tilt_emits_only_in_bucket_for_politics_kalshi_rows():
+    # close_time 7 days out (2026-07-08), well within the default max_days_to_close=10
+    # nearness gate -- these rows exercise bucket/category/venue logic, not nearness.
     rows = [
         # politics + in-bucket (closed interval) -> p_hat = yes + 0.03
-        ("2026-07-01", "EV:kalshi:P1", 0.80, 1, 1, "2026-08-01", "E1", "kalshi", "politics"),
+        ("2026-07-01", "EV:kalshi:P1", 0.80, 1, 1, "2026-07-08", "E1", "kalshi", "politics"),
         # inclusive lower boundary
-        ("2026-07-01", "EV:kalshi:P2", 0.70, 1, 1, "2026-08-01", "E2", "kalshi", "politics"),
+        ("2026-07-01", "EV:kalshi:P2", 0.70, 1, 1, "2026-07-08", "E2", "kalshi", "politics"),
         # inclusive upper boundary
-        ("2026-07-01", "EV:kalshi:P3", 0.95, 1, 1, "2026-08-01", "E3", "kalshi", "politics"),
+        ("2026-07-01", "EV:kalshi:P3", 0.95, 1, 1, "2026-07-08", "E3", "kalshi", "politics"),
         # below bucket -> no emission
-        ("2026-07-01", "EV:kalshi:P4", 0.50, 1, 1, "2026-08-01", "E4", "kalshi", "politics"),
+        ("2026-07-01", "EV:kalshi:P4", 0.50, 1, 1, "2026-07-08", "E4", "kalshi", "politics"),
         # above bucket -> no emission
-        ("2026-07-01", "EV:kalshi:P5", 0.97, 1, 1, "2026-08-01", "E5", "kalshi", "politics"),
+        ("2026-07-01", "EV:kalshi:P5", 0.97, 1, 1, "2026-07-08", "E5", "kalshi", "politics"),
         # non-political kalshi, in bucket -> no emission
-        ("2026-07-01", "EV:kalshi:M1", 0.80, 1, 1, "2026-08-01", "E6", "kalshi", "macro"),
+        ("2026-07-01", "EV:kalshi:M1", 0.80, 1, 1, "2026-07-08", "E6", "kalshi", "macro"),
         # unknown category (loader listing-failure degrade), in bucket -> no emission
-        ("2026-07-01", "EV:kalshi:U1", 0.80, 1, 1, "2026-08-01", "E7", "kalshi", "unknown"),
+        ("2026-07-01", "EV:kalshi:U1", 0.80, 1, 1, "2026-07-08", "E7", "kalshi", "unknown"),
         # politics on Polymarket (venue guard), in bucket -> no emission
-        ("2026-07-01", "EV:polymarket:P6", 0.80, 1, 1, "2026-08-01", "E8", "polymarket", "politics"),
+        ("2026-07-01", "EV:polymarket:P6", 0.80, 1, 1, "2026-07-08", "E8", "polymarket", "politics"),
     ]
     out = political_favorite_tilt(_political_panel(rows))
     got = dict(zip(out["instrument_id"], out["value"]))
@@ -631,11 +635,59 @@ def test_political_tilt_emits_only_in_bucket_for_politics_kalshi_rows():
 
 
 def test_political_tilt_edge_shrinks_where_cap_binds():
-    rows = [("2026-07-01", "EV:kalshi:P7", 0.98, 1, 1, "2026-08-01", "E1", "kalshi", "politics")]
+    # close_time 7 days out, within the default nearness gate.
+    rows = [("2026-07-01", "EV:kalshi:P7", 0.98, 1, 1, "2026-07-08", "E1", "kalshi", "politics")]
     # widen `high` so a price whose +haircut would exceed the cap is reachable
     out = political_favorite_tilt(_political_panel(rows), high=0.99)
     # 0.98 + 0.03 = 1.01 -> p_hat clipped to 0.99 -> edge 0.01, not 0.03
     assert out.iloc[0]["value"] == pytest.approx(0.01)
+
+
+# ============================================ (5d) political tilt nearness gate (re-spec)
+def test_political_tilt_nearness_gate_emits_at_9_days_to_close():
+    # obs_date 2026-07-01, close_time 2026-07-10 -> 9 days to close, inside the default
+    # max_days_to_close=10 -> emits.
+    rows = [("2026-07-01", "EV:kalshi:P1", 0.80, 1, 1, "2026-07-10", "E1", "kalshi", "politics")]
+    out = political_favorite_tilt(_political_panel(rows))
+    assert list(out["instrument_id"]) == ["EV:kalshi:P1"]
+    assert out.iloc[0]["value"] == pytest.approx(0.03)
+
+
+def test_political_tilt_nearness_gate_boundary_at_10_days_emits():
+    # exactly at the (inclusive) max_days_to_close boundary -> still emits.
+    rows = [("2026-07-01", "EV:kalshi:P1", 0.80, 1, 1, "2026-07-11", "E1", "kalshi", "politics")]
+    out = political_favorite_tilt(_political_panel(rows))
+    assert list(out["instrument_id"]) == ["EV:kalshi:P1"]
+
+
+def test_political_tilt_nearness_gate_silent_at_11_days_to_close():
+    # obs_date 2026-07-01, close_time 2026-07-12 -> 11 days to close, outside the default
+    # max_days_to_close=10 -> silent, even though price/category/venue are all in-bucket.
+    rows = [("2026-07-01", "EV:kalshi:P1", 0.80, 1, 1, "2026-07-12", "E1", "kalshi", "politics")]
+    out = political_favorite_tilt(_political_panel(rows))
+    assert out.empty
+
+
+def test_political_tilt_nearness_gate_respects_custom_max_days_to_close():
+    # 11 days to close is silenced by the default, but emits when the caller widens the gate.
+    rows = [("2026-07-01", "EV:kalshi:P1", 0.80, 1, 1, "2026-07-12", "E1", "kalshi", "politics")]
+    out = political_favorite_tilt(_political_panel(rows), max_days_to_close=11)
+    assert list(out["instrument_id"]) == ["EV:kalshi:P1"]
+
+
+def test_political_tilt_nearness_gate_fail_closed_on_nat_close_time():
+    # close_time is NaT (unresolvable) -> fail-closed, no emission, even though every other
+    # guard (venue, category, price bucket) passes.
+    rows = [("2026-07-01", "EV:kalshi:P1", 0.80, 1, 1, pd.NaT, "E1", "kalshi", "politics")]
+    out = political_favorite_tilt(_political_panel(rows))
+    assert out.empty
+
+
+def test_political_tilt_nearness_gate_fail_closed_on_missing_close_time_column():
+    # "close_time" column entirely absent from the panel -> fail-closed, no emission.
+    rows = [("2026-07-01", "EV:kalshi:P1", 0.80, 1, 1, "2026-07-08", "E1", "kalshi", "politics")]
+    df = _political_panel(rows).drop(columns=["close_time"])
+    assert political_favorite_tilt(df).empty
 
 
 def test_political_tilt_missing_category_column_is_empty():
@@ -731,9 +783,30 @@ def _signals(value_map):
     })
 
 
+# =================================================== (7b) Kalshi taker fee (re-spec)
+def test_taker_fee_pinned_at_50_cents():
+    # ceil(700 * 0.5 * 0.5) = ceil(175) = 175 -> 1.75c/contract.
+    assert taker_fee(0.5) == pytest.approx(0.0175)
+    # 1.75c / 0.50 = 3.5% of the stake.
+    assert taker_fee_fraction(0.5) == pytest.approx(0.035)
+
+
+def test_taker_fee_pinned_at_85_cents():
+    # ceil(700 * 0.85 * 0.15) = ceil(89.25) = 90 -> 0.9c/contract.
+    assert taker_fee(0.85) == pytest.approx(0.009)
+    # 0.9c / 0.85 = ~1.06% of the stake.
+    assert taker_fee_fraction(0.85) == pytest.approx(0.009 / 0.85, rel=1e-9)
+    assert taker_fee_fraction(0.85) == pytest.approx(0.010588, abs=1e-6)
+
+
+def test_taker_fee_fraction_guards_nonpositive_price():
+    assert taker_fee_fraction(0.0) == 0.0
+    assert taker_fee_fraction(-0.1) == 0.0
+
+
 def test_size_book_edge_below_fee_haircut_no_trade():
-    haircut = FEE_BPS / 1e4
-    sig = _signals({"EV:k:A": haircut * 0.5})           # edge below the 2% haircut
+    haircut = taker_fee_fraction(0.5)                   # ~3.5% at p=0.50, not a flat 2%
+    sig = _signals({"EV:k:A": haircut * 0.5})           # edge below the taker-fee haircut
     book = size_event_book(sig, _sizing_panel({"EV:k:A": 0.5}))
     assert book.empty
 
@@ -766,3 +839,71 @@ def test_size_book_gross_cap_scales_down():
     assert book["weight"].sum() == pytest.approx(0.10)  # scaled to the gross cap
     # equal scaling: each 0.02 -> 0.01
     assert np.allclose(book["weight"], 0.01)
+
+
+# ============================================== (9) event_sleeve_returns fee charge (re-spec)
+def _favorite_known_answer_frame(start="2026-07-01"):
+    """A favorite drifting 0.90 -> 0.98 (settles to 1.0 via the >=0.97 snap), plus a flat
+    0.50 market that never signals but extends the grid so the favorite resolves in-sample.
+    Only one rebalance (day 0) is used, so the favorite's whole life is a single held
+    position entered at exactly 0.90 (the only row available at t0)."""
+    d0 = pd.Timestamp(start)
+    fav_prices = [0.90, 0.91, 0.92, 0.94, 0.95, 0.96, 0.97, 0.98]
+    fav_dates = pd.date_range(d0, periods=len(fav_prices), freq="D")
+    fav_close = fav_dates[-1] + pd.Timedelta(days=2)
+    rows = [(d, "EV:kalshi:FAV", p, 5000.0, 1000.0, fav_close, "active", "EVT-FAV")
+            for d, p in zip(fav_dates, fav_prices)]
+    flat_dates = pd.date_range(d0, periods=len(fav_prices) + 5, freq="D")
+    flat_close = flat_dates[-1] + pd.Timedelta(days=40)
+    rows += [(d, "EV:kalshi:FLAT", 0.50, 5000.0, 1000.0, flat_close, "active", "EVT-FLAT")
+             for d in flat_dates]
+    df = pd.DataFrame(rows, columns=["obs_date", "instrument_id", "yes_price", "volume",
+                                     "open_interest", "close_time", "status", "event_key"])
+    df["obs_date"] = pd.to_datetime(df["obs_date"])
+    df["close_time"] = pd.to_datetime(df["close_time"], utc=True)
+    df["available_from"] = df["obs_date"].dt.tz_localize("UTC") + pd.Timedelta(hours=1)
+    df["question"] = df["instrument_id"]
+    df["venue"] = "kalshi"
+    df["source"] = "test"
+    df["ingested_at"] = df["available_from"]
+    df = df.sort_values(["obs_date", "instrument_id"]).reset_index(drop=True)
+    return df, fav_dates[0] + pd.Timedelta(days=1)
+
+
+def test_event_sleeve_charges_accurate_taker_fee_once_at_entry_not_twice():
+    """A position held to settlement pays the Kalshi taker fee ONCE, at entry, not a
+    round-trip charge: the seam is event_sleeve_returns's fee line, which used to be the
+    flat FEE_BPS (200bp) applied to entered notional -- now it is
+    taker_fee_fraction(entry_price) per instrument, applied on the same first-hold-day and
+    nowhere else (no exit/settlement fee)."""
+    frame, t0 = _favorite_known_answer_frame()
+    out = event_sleeve_returns(frame, [t0])
+
+    avail = frame[pd.to_datetime(frame["available_from"], utc=True)
+                  <= pd.Timestamp(t0).tz_localize("UTC")]
+    universe = liquid_universe(avail)
+    book = size_event_book(_combined_signals(avail), avail, capital_frac=0.10,
+                           groups=dedupe_related(universe))
+    assert list(book["instrument_id"]) == ["EV:kalshi:FAV"]
+    assert book.iloc[0]["side"] == "YES"
+    w = float(book.iloc[0]["weight"])
+
+    entry = 0.90
+    fee = taker_fee_fraction(entry)
+    # single fee, charged at entry: gross settlement P&L minus exactly one fee charge.
+    expected_one_fee = w * (1.0 / entry - 1.0) - w * fee
+    assert out.sum() == pytest.approx(expected_one_fee, rel=1e-9, abs=1e-12)
+
+    # a round-trip (entry + exit) charge would be a materially different number -- pin that
+    # the engine does NOT do this (hold-to-settlement pays no exit fee, settlement is free).
+    expected_two_fees = w * (1.0 / entry - 1.0) - 2.0 * w * fee
+    assert out.sum() != pytest.approx(expected_two_fees, rel=1e-9)
+
+
+def test_event_sleeve_fee_is_price_dependent_not_a_flat_rate():
+    """Two favorites entered at different prices must be charged different fee amounts per
+    unit weight (taker_fee_fraction varies with price) -- pinning that the re-spec removed
+    the flat-rate FEE_BPS behavior, not just renamed it."""
+    assert taker_fee_fraction(0.90) != taker_fee_fraction(0.98)
+    # sanity: fee fraction shrinks as price moves toward the 1.0 rail (less variance to fee).
+    assert taker_fee_fraction(0.98) < taker_fee_fraction(0.90)
