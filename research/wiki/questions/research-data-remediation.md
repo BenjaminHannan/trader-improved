@@ -15,8 +15,8 @@ related:
 | Source | Coverage | Price | Integration effort | Notes |
 |---|---|---|---|---|
 | **Coin Metrics community reference rates** | 550+ assets, FULL history at daily frequency (BTC to 2010-ish), includes many dead assets | free (HTTP API, 1000 req/10min; `format=csv`; GitHub archive `coinmetrics/data`) | ~0.5-1 day (one BaseLoader) | **Best documented depth**: transparent volume-weighted-median methodology across vetted constituent exchanges — arguably better than any single-exchange close for daily factors. Rate only (no per-exchange OHLC/volume) |
-| CryptoCompare (CoinDesk) `histoday` | full daily history incl. CCCAGG aggregate; retains delisted coins | free tier (2000 rows/call, paginate `toTs`) | ~1 day | aggregate index methodology less transparent than CM; good survivorship property |
-| Binance public dumps (data.binance.vision) | per-pair klines from listing (exchange launched 2017-07), 1s-1mo | free, official | ~1 day | **delisted-pair retention UNVERIFIED** (README silent) — check before relying on it for survivorship |
+| CryptoCompare (CoinDesk) `histoday` | full daily history incl. CCCAGG aggregate; retains delisted coins | ~~free~~ **key-gated as of 2026-07-11** (keyless probe → 401) | ~1 day | needs a signup (owner action) before it can be evaluated |
+| Binance public dumps (data.binance.vision) | per-pair klines from listing (SOL 2020-08, ATOM 2019-04), 1s-1mo | free, official, no key | ~1 day | **delisted-pair retention VERIFIED 2026-07-11** (BCCUSDT, delisted 2018-11, still serves all 13 monthly zips) — loader in progress as `binance_hist`; closes the newer-asset gaps CM community data cannot (its CSVs are gutted to ~7d for post-2020 assets) |
 | CryptoDataDownload / Bitstamp CSVs | Bitstamp BTC from 2011; Gemini/Bitfinex archives | free, no login | ~0.5 day | pre-2017 BTC/ETH depth; per-exchange |
 
 **Recommendation**: Coin Metrics community daily reference rates as the pre-2021

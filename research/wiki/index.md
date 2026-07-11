@@ -68,9 +68,11 @@ findings here, and (when the evidence survives) lands a verified implementation 
     documented cross-sectional crypto predictor — see iteration 10)
 12. GP persistence weighting — revisit once live IC decay curves exist (iteration 6)
 13. ~~Robust-alpha ellipsoid in the QP~~ (iteration 19, opt-in via robust_kappa)
-14. Wire lake `cost_overrides` consumption into the engine's CostModel construction
-    (TCA calibration writes the table — iteration 20 — but run_backtest doesn't read
-    it yet; thread overrides_table through to the CostModel call)
+14. ~~Wire lake `cost_overrides` consumption into the engine's CostModel~~
+    (2026-07-11: done — run_backtest(lake=...) reads and threads the table, loud
+    warning on an active cost regime; floor_bps overrides clamped upward-only —
+    a real hard-rule violation vector found and closed. FOLLOW-UP: the live path
+    (daily_run / latest_target_weights) still does not consume overrides)
 15. Accumulate per-run shortfall into the `shortfall_log` reference table from
     daily_run --live fills (feeds --calibrate-tca)
 16. ~~Kalshi resolved-market historical backfill~~ (iteration 5, 2026-07-10: done —
@@ -79,13 +81,12 @@ findings here, and (when the evidence survives) lands a verified implementation 
 17. ~~Turn-of-year tax-loss-rebound diagnostic~~ (iteration 5, 2026-07-10: ran
     pre-registered — FAIL on the placebo-concentration gate despite +249bp t=2.26
     spread; near-miss details + re-spec observations in the 2026-07-10 log entry)
-18. Cross-check follow-ups from first live run: per-name verification of the 66
-    quarantined instruments (ticker-reuse class -> blocklist extensions; FX-ETF
-    distribution-adjustment class -> vendor-methodology doc); wire quarantine list
-    consumption into backtest universe filtering. Distribution-adjustment class now
-    diagnosed in [[sources/etf-adjustment-methodology]]: cross-check UNADJUSTED
-    closes + event tables, not vendor adjusted closes — most of that class should
-    un-quarantine
+18. Cross-check follow-ups: CONSUMPTION HALF DONE (2026-07-11: run_backtest drops
+    quarantined equities, keeps+warns the ETF adjustment-artifact class; 64 names
+    on this machine's re-run). REMAINING: per-name verification of the quarantined
+    equities (ticker-reuse -> blocklist extensions) and the unadjusted-close +
+    event-table cross-check that should un-quarantine the FX/commodity-ETF class
+    ([[sources/etf-adjustment-methodology]])
 19. Events-sleeve maker-side execution: rest limit orders at model fair-value bands
     (extends edge-C1 passive execution to Kalshi) instead of crossing. Whelan caveat:
     makers ALSO lose ~10% on average — the maker seat needs the calibration model
@@ -93,11 +94,14 @@ findings here, and (when the evidence survives) lands a verified implementation 
     release-window pull rule (cancel resting quotes before scheduled prints —
     otherwise we supply the under-reaction edge to faster traders) + per-ladder
     inventory caps. Execution layer, not signal: does not touch n_trials
-20. Live `longshot_bias` events signal: category audit (zero-trial). Iteration 5
-    showed the macro-ladder slice of the taker-side fade nets ~0 post-fee; measure
-    the live signal's category mix from `event_markets` snapshots and decide whether
-    a category condition is warranted (any signal change = documented re-spec)
-21. Events-sleeve calibration curve from RESOLVED outcomes (score → realized
-    probability), buildable now from `event_markets_hist` settlements — closes the
-    iteration-25 documented approximation ("calibration is the first real-data
-    improvement"); also the prerequisite signal model for #19's maker seat
+20. ~~Live `longshot_bias` events signal: category audit~~ (2026-07-11: documented
+    re-spec landed — the signal now excludes the 12 measured US-macro Kalshi series
+    (exact-match, venue-gated, fail-open); evidence block with all three diagnostic
+    numbers lives in production/events/signals.py. Other categories unchanged —
+    Whelan Table 8 concentrates the bias there)
+21. ~~Events-sleeve calibration curve from RESOLVED outcomes~~ (2026-07-11: ran
+    pre-registered — FAIL. Mid-range macro-ladder prices are already calibrated
+    (0.594→0.600); all miscalibration is the fee-eaten ≤5c tail; OOS Brier
+    p=0.41. Curve filed as diagnostic record (diagnostics/events_calibration.json).
+    CONSEQUENCE for #19: the maker seat's validated-calibration prerequisite
+    failed — #19 is demoted until a calibration input with real OOS lift exists)
