@@ -275,3 +275,60 @@ def test_build_test_portfolios_family_dispatch():
         assert False, "unknown family must raise"
     except RiskValidationError:
         pass
+
+
+# --------------------------------------------------- 7. score_sleeve's sigma memo
+def test_memoized_sigma_fn_builds_once_across_families():
+    """scripts/score_risk_model.py::score_sleeve wraps sigma_fn with
+    _memoize_sigma_fn so its 4 per-family bias_stats calls share one Sigma_t
+    build per evaluation date instead of rebuilding it 4x (see that
+    function's docstring for the as_of-key justification). Prove a counting
+    sigma_fn's underlying build runs exactly ONCE per evaluation date across
+    two consecutive bias_stats calls that use DIFFERENT families -- the
+    second call must be a pure cache hit, not a second walk of builds."""
+    from scripts.score_risk_model import _memoize_sigma_fn
+
+    n_assets = 4
+    cols = [f"n{i}" for i in range(n_assets)]
+    dates = pd.bdate_range("2015-01-01", periods=600)
+    rng = np.random.default_rng(21)
+    R = rng.normal(0, 0.01, (len(dates), n_assets))
+    returns_panel = pd.DataFrame(R, index=dates, columns=cols)
+    min_obs, h = 252, 21
+
+    expected_dates = evaluation_dates(returns_panel.index, h=h, min_obs=min_obs)
+    assert 5 <= len(expected_dates) <= 30, "expected a handful of eval dates for this fixture"
+
+    calls: list[pd.Timestamp] = []
+
+    def counting_sigma_fn(window: pd.DataFrame) -> pd.DataFrame:
+        calls.append(window.index.max())
+        cov = window.tail(60).cov().to_numpy()
+        return pd.DataFrame(cov, index=window.columns, columns=window.columns)
+
+    wrapped = _memoize_sigma_fn(counting_sigma_fn)
+
+    weights_rng = np.random.default_rng(0)
+    weights_f1 = build_test_portfolios(returns_panel, "test", 1, weights_rng, n=10)
+    weights_f3 = build_test_portfolios(returns_panel, "test", 3, weights_rng)
+
+    cell1 = bias_stats(returns_panel, wrapped, weights_f1, h=h, min_obs=min_obs)
+    n_builds_after_family1 = len(calls)
+    assert n_builds_after_family1 == len(expected_dates)
+    assert cell1["T"] > 0
+
+    cell3 = bias_stats(returns_panel, wrapped, weights_f3, h=h, min_obs=min_obs)
+    n_builds_after_family3 = len(calls)
+    # Same returns_panel, same evaluation-date grid -> family 3's walk hits
+    # the memo on every date; zero NEW underlying builds.
+    assert n_builds_after_family3 == n_builds_after_family1
+    assert cell3["T"] > 0
+
+    # And the memo did not just short-circuit real work: the as_of values it
+    # saw are exactly one build per evaluation date (not fewer) -- each
+    # as_of is the row immediately before its evaluation date, per bias_stats'
+    # strict `< t` window slice.
+    expected_as_of = [returns_panel.index[returns_panel.index.get_loc(t) - 1]
+                      for t in expected_dates]
+    assert sorted(set(calls)) == sorted(set(expected_as_of))
+    assert len(calls) == len(expected_dates)

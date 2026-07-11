@@ -110,11 +110,38 @@ def _synthetic_prices(start, end):
 
 
 # -------------------------------------------------------------------- scoring
-def _wide_returns(prices: pd.DataFrame, ids: list[str]) -> pd.DataFrame:
+_MIN_COVERAGE = 0.98
+
+
+def _wide_returns(prices: pd.DataFrame, ids: list[str],
+                  min_coverage: float = _MIN_COVERAGE) -> pd.DataFrame:
+    """Complete-panel daily returns for the full-span coverage core of a sleeve.
+
+    The bias-statistic z needs a REALIZED h-day portfolio return; one NaN daily
+    return in any held name poisons the whole window (this is exactly what
+    zeroed the churned equity/crypto sleeves on the first baseline run —
+    RiskModel.build itself was fine). Calibration wants a fixed complete panel:
+    keep only ids with >= 98% price coverage over the scored span (the
+    full-span core, so the cross-name date intersection stays dense),
+    forward-fill residual stale-quote holes (limit 10 days), and drop any
+    still-incomplete dates. The dropped-count is printed so a survivor-core
+    caveat is never silent; a time-varying-universe scoring mode is the
+    documented follow-up for measuring the model on the exact PIT book.
+    """
     df = prices[prices["instrument_id"].isin(ids)]
     close = df.pivot_table(index="obs_date", columns="instrument_id",
                            values="close", aggfunc="last").sort_index()
-    return close.reindex(columns=ids).pct_change().dropna(how="all")
+    coverage = close.notna().mean()
+    kept = coverage[coverage >= min_coverage].index.tolist()
+    dropped = int((coverage < min_coverage).sum())
+    if dropped:
+        print(f"  coverage filter: scoring {len(kept)}/{len(coverage)} ids "
+              f"(dropped {dropped} below {min_coverage:.0%} full-span coverage)")
+    if len(kept) < 3:
+        return pd.DataFrame()
+    filled = close[kept].ffill(limit=10)
+    rets = filled.pct_change().dropna(how="all").dropna(axis=0, how="any")
+    return rets
 
 
 def _sigma_fn(prices: pd.DataFrame, sleeve: str, ids: list[str], cfg: dict,
@@ -131,13 +158,67 @@ def _sigma_fn(prices: pd.DataFrame, sleeve: str, ids: list[str], cfg: dict,
     return fn
 
 
+def _memoize_sigma_fn(sigma_fn):
+    """Wrap a validation.SigmaFn with an as_of-keyed memo.
+
+    score_sleeve calls bias_stats once per family (4x) against the SAME
+    sigma_fn, and bias_stats itself walks the SAME ~113 non-overlapping
+    evaluation dates every time (evaluation_dates is a pure function of the
+    returns panel + h/min_obs, which score_sleeve holds fixed across all 4
+    calls). Each of those 4 walks independently rebuilds Sigma_t via
+    RiskModel.build for every date -- 4x the expensive covariance build for
+    zero new information.
+
+    Cache key: `as_of = window.index.max()`, exactly what the wrapped fn
+    (see `_sigma_fn.fn` above) already derives from `window` to pass into
+    RiskModel.build. This key is sufficient -- not just convenient -- because:
+      1. score_sleeve builds ONE `returns_panel` and passes that same object,
+         unmutated, into every bias_stats call for this sleeve;
+      2. bias_stats always calls sigma_fn(returns_panel.iloc[:pos]) -- the
+         window is a PREFIX of that one fixed panel, never an arbitrary slice;
+      3. a prefix of a fixed sequence is uniquely determined by its length,
+         and its length is uniquely determined by its last index value
+         (returns_panel.index is monotonic and has no duplicate dates), so
+         `as_of` alone pins down the window's content -- no need to hash the
+         window itself.
+
+    Memory: the cache holds one covariance DataFrame per evaluation date, for
+    the life of one score_sleeve call (it is a local dict, not module-level
+    state, so it is freed when score_sleeve returns). Worst case is the
+    ~400-name equity sleeve: a 400x400 float64 frame is 400*400*8 bytes ~=
+    1.3MB; ~113 evaluation dates (the T~=120 the validation module's
+    docstring cites) -> ~150MB peak resident. That is acceptable for a CLI
+    run, so no eviction policy is implemented.
+
+    Exceptions from the underlying build (e.g. too few trailing observations,
+    a singular covariance) are NOT cached: only a successful Sigma is stored.
+    bias_stats treats a sigma_fn failure as "skip this date" per call, not a
+    crash -- caching a failure would silently convert a per-call retry into a
+    permanently poisoned date the moment any one family hit it first.
+    """
+    cache: dict = {}
+
+    def wrapped(window: pd.DataFrame) -> pd.DataFrame:
+        as_of = window.index.max()
+        if as_of in cache:
+            return cache[as_of]
+        sigma = sigma_fn(window)   # let exceptions propagate uncached
+        cache[as_of] = sigma
+        return sigma
+    return wrapped
+
+
 def score_sleeve(prices: pd.DataFrame, sleeve: str, ids: list[str], cfg: dict,
                  sectors: pd.Series | None, n: int, seed: int,
                  min_obs: int) -> dict:
     """Bias-stats cells for families 1-4 on one sleeve. Returns {family: dict}."""
     returns_panel = _wide_returns(prices, ids)
     rng = np.random.default_rng(seed)
-    sigma_fn = _sigma_fn(prices, sleeve, ids, cfg, sectors)
+    # Memoized across all 4 families below: same returns_panel, same
+    # evaluation-date grid, so each date's expensive RiskModel.build runs
+    # once instead of 4x -- see _memoize_sigma_fn's docstring for why the
+    # as_of key is sufficient.
+    sigma_fn = _memoize_sigma_fn(_sigma_fn(prices, sleeve, ids, cfg, sectors))
     cells = {}
     for family in _FAMILIES:
         if family == 4:
