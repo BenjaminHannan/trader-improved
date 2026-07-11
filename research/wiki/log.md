@@ -153,6 +153,19 @@ crypto cells + the crypto MVP horse race; ADDITIONALLY the by-year fc/real sprea
 fixed. NO-ADOPT if any criterion fails; a different halflife value after seeing
 results = a new pre-registration.
 
+VERDICT (adjudicated same day, `adjudication_crypto_halflife_20260711.json`):
+**NO-ADOPT — decisively.** 0/4 cells improved |B−1| (f1 1.207→1.270, f2
+1.701→1.793, f3 1.189→1.206, f4 1.411→1.512); MVP horse race WORSE (cand
+realized 1.272 vs inc 1.157 ann vol, p=0.606). The pre-registered spread
+criterion alone passed (by-year fc/real max−min 0.738→0.453) — which exposes
+the diagnosis error: hl-30 tracks the vol cycle more TIGHTLY year-by-year yet
+forecasts 21d-ahead vol WORSE, because at h=21 vol mean-reverts — a fast EWMA
+extrapolates transient spikes/calms that revert, while hl-90 partially anchors
+to the long-run mean. "Too slow" was the wrong read of the probe; the correct
+candidate shape is a two-component forecast (fast component blended with a
+long-run anchor, GARCH-style) — that is a NEW registration if pursued. Crypto
+under-forecast (all B>1) remains the open risk-model failure.
+
 **Infra closed today:** #14 cost overrides (backtest + live path; floor-lowering
 vector found and clamped), #15 shortfall_log (TCA loop closed end-to-end), #18
 consumption half (quarantine filters backtest equities), #20 longshot_bias macro
