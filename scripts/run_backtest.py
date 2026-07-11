@@ -18,7 +18,9 @@ The ``--synthetic`` flag is the no-lake smoke path: it builds the conftest GBM b
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from pathlib import Path
 
 import pandas as pd
 
@@ -31,9 +33,11 @@ from production.core.config import CONFIG_DIR, REPO_ROOT, backtest_config
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 from production.core.lake import Lake, SIGNAL_BUNDLE_DATASETS, read_signal_bundle
+from production.data.cross_check import quarantine_list
 from production.signals.base import sleeve_from_id
 
 _DATASETS = SIGNAL_BUNDLE_DATASETS
+_QUARANTINE_PREVIEW_N = 5
 
 
 def _load_lake_bundle(lake: Lake, start, end) -> dict:
@@ -86,6 +90,83 @@ def _sector_map(lake: Lake, prices: pd.DataFrame) -> pd.Series | None:
     m = master.set_index("instrument_id")["sector"]
     m = m[m.index.isin(present)].dropna()
     return m if not m.empty else None
+
+
+def quarantine_audit_path(lake_root) -> Path:
+    """Default on-disk location of the price cross-check audit for a lake root."""
+    return Path(lake_root) / "audit" / "cross_check_prices.json"
+
+
+def _preview(ids: list[str]) -> str:
+    shown = ", ".join(ids[:_QUARANTINE_PREVIEW_N])
+    more = f", ... ({len(ids) - _QUARANTINE_PREVIEW_N} more)" if len(ids) > _QUARANTINE_PREVIEW_N else ""
+    return f"[{shown}{more}]"
+
+
+def apply_quarantine(instruments: pd.Series, audit_path, no_quarantine: bool = False) -> pd.Series:
+    """Drop cross-check-quarantined EQUITY instruments from the instrument->sleeve map.
+
+    ``scripts/ingest.py --cross-check`` writes a return-space vendor-divergence report to
+    ``<lake_root>/audit/cross_check_prices.json``; ``production.data.cross_check.quarantine_list``
+    turns it into the set of instrument_ids whose flagged fraction is too high to trust.
+
+    Class distinction (wiki backlog #18 / research/wiki/sources/etf-adjustment-methodology.md):
+    the FX-ETF / commodity-ETF slice of that list is explained by cross-vendor adjusted-close
+    *methodology* divergence (anchor price, rounding, retrieval-date drift on distribution
+    events) — the instruments are healthy, the comparison series was the bug. Dropping all
+    quarantined FX ETFs would gut the fx sleeve an ACCEPTED factor trades, so that class is
+    kept with a loud warning instead. Quarantined EQUITY names (ticker-reuse-class corruption)
+    have no such exoneration and are dropped from the traded universe until resolved by hand.
+
+    Parameters
+    ----------
+    instruments   : instrument_id -> sleeve Series (as built by ``_instrument_map``).
+    audit_path    : path to the cross-check audit JSON (see ``quarantine_audit_path``).
+    no_quarantine : bypass the filter entirely (still prints a loud note that it was bypassed).
+
+    An absent audit file reproduces prior behavior bit-identically: no filtering, no message.
+    A malformed audit file is treated the same way (parsed defensively; never sinks the run).
+    """
+    audit_path = Path(audit_path)
+    if no_quarantine:
+        print(f"quarantine: --no-quarantine set — price cross-check quarantine filter "
+              f"BYPASSED ({audit_path} not consulted)")
+        return instruments
+    if not audit_path.exists():
+        return instruments
+    try:
+        with open(audit_path) as f:
+            report = json.load(f)
+        quarantined = quarantine_list(report)
+    except Exception as exc:  # noqa: BLE001 - a malformed audit file must not sink the run
+        print(f"quarantine: could not parse {audit_path} ({exc}) — skipping quarantine filter")
+        return instruments
+
+    present = [iid for iid in quarantined if iid in instruments.index]
+    if not present:
+        return instruments
+
+    def _class(iid: str) -> str:
+        try:
+            return sleeve_from_id(iid)
+        except ValueError:
+            return "unknown"
+
+    equity_drop = [iid for iid in present if _class(iid) == "equity"]
+    other_warn = [iid for iid in present if iid not in equity_drop]
+
+    if equity_drop:
+        print(f"quarantine: dropped {len(equity_drop)} equity instrument(s) flagged by the "
+              f"price cross-check: {_preview(equity_drop)}")
+        instruments = instruments.drop(index=equity_drop)
+
+    if other_warn:
+        print(f"quarantine: WARNING — {len(other_warn)} non-equity instrument(s) flagged by "
+              "the price cross-check are KEPT (FX/commodity-ETF vendor adjusted-close "
+              "divergence is a cross-check-methodology artifact, not corrupt primary data — "
+              f"see research/wiki/sources/etf-adjustment-methodology.md): {_preview(other_warn)}")
+
+    return instruments
 
 
 def _synthetic_bundle(start, end):
@@ -155,6 +236,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--synthetic", action="store_true",
                    help="run on a synthesized GBM bundle without any lake (smoke path)")
     p.add_argument("--report-dir", default="reports", help="output dir (default: reports/)")
+    p.add_argument("--no-quarantine", action="store_true",
+                   help="bypass price cross-check quarantine filtering (loud note when used)")
     return p
 
 
@@ -174,6 +257,8 @@ def main(argv: list[str] | None = None) -> int:
         if "prices" not in data:
             return 2
         instruments = _instrument_map(lake, data["prices"])
+        instruments = apply_quarantine(instruments, quarantine_audit_path(args.lake_root),
+                                       no_quarantine=args.no_quarantine)
         sectors = _sector_map(lake, data["prices"])
 
     factors_cfg = None
