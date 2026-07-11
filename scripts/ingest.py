@@ -160,6 +160,14 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
         for etf in ("fx_etf", "commodity_etf", "rates_etf", "intl_etf", "sector_etf"):
             syms += _master_vendor_symbols(instruments, etf, "alpaca")
         return AlpacaPricesLoader(lake, instruments, symbols=list(dict.fromkeys(syms)))
+    if dataset == "cm_rates":
+        from production.data.loaders.coinmetrics_rates import CoinMetricsRatesLoader
+
+        # Pre-2021 crypto depth backfill (secondary feed sharing the `prices`
+        # dataset, like tiingo/alpaca). Coin Metrics asset ids are the crypto
+        # sleeve symbols lowercased; the loader does that internally too, so the
+        # plain uppercase sleeve list is passed straight through.
+        return CoinMetricsRatesLoader(lake, instruments, assets=_sleeve_symbols("crypto"))
     if dataset == "funding":
         from production.data.loaders.ccxt_funding import CcxtFundingLoader
 
@@ -217,9 +225,9 @@ def _make_loader(dataset: str, sleeve: str, lake: Lake, instruments):
     raise ValueError(f"no loader for dataset {dataset!r}")
 
 
-DATASETS = ["prices", "stooq", "tiingo", "alpaca", "funding", "basis", "fx", "macro",
-            "french", "cot", "fundamentals", "nowcast", "kalshi_hist", "crypto_meta",
-            "defi_tvl", "universe", "all"]
+DATASETS = ["prices", "stooq", "tiingo", "alpaca", "cm_rates", "funding", "basis", "fx",
+            "macro", "french", "cot", "fundamentals", "nowcast", "kalshi_hist",
+            "crypto_meta", "defi_tvl", "universe", "all"]
 
 # Curated `source` values that identify the two independent price feeds we cross-check.
 _PRIMARY_SOURCES = ("yfinance",)
