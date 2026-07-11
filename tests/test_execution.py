@@ -18,6 +18,8 @@ from production.core.lake import Lake
 from production.execution.orders import ORDER_COLUMNS, target_weights_to_orders
 from production.execution.shortfall import implementation_shortfall
 from production.execution.tca import calibrate_overrides, read_overrides, write_overrides
+from production.backtest.cost_model import CostModel
+from production.core.config import costs_config
 from production.reference.instruments import build_instrument_master
 
 
@@ -410,6 +412,46 @@ def test_overrides_lake_roundtrip(tmp_path):
     assert "calibrated_at" in table.columns
     assert table["calibrated_at"].notna().all()
     assert pd.api.types.is_datetime64_any_dtype(pd.to_datetime(table["calibrated_at"]))
+
+
+def test_cost_model_consumes_lake_cost_overrides_end_to_end(tmp_path):
+    """Narrowest cross-module seam for backlog #14: calibrate -> write -> read -> CostModel
+    actually changes the charged cost for the calibrated instrument. This is the exact
+    ``read_overrides`` -> ``CostModel(overrides_table=...)`` wiring the engine now performs
+    when a lake is threaded through ``run_backtest`` (production/backtest/engine.py)."""
+    lake = Lake(tmp_path)
+    iid = "EQ:AAA:2000-01-03"
+    df = _shortfall_rows(iid, abs_bps=8.0, n=20)
+    ov = calibrate_overrides(df, min_fills=20, safety=1.25)
+    write_overrides(ov, lake)
+
+    table = read_overrides(lake)
+    model = CostModel(costs_config(), overrides_table=table)
+    base = CostModel(costs_config())                      # no table -> yaml-only baseline
+
+    # adv huge relative to the trade -> sqrt-impact is negligible, isolating the half_spread.
+    kw = dict(trade_usd=1.0, adv_usd=1e15, sigma_daily=0.01, sleeve="equity",
+             instrument_ids=[iid])
+    calibrated_cost = model.cost_bps(**kw).iloc[0]
+    baseline_cost = base.cost_bps(**kw).iloc[0]
+    # calibrated half_spread (10.0, from test_calibrate_overrides_known_answer) beats both
+    # the equity floor (5.0) and the yaml-only baseline cost.
+    assert calibrated_cost == pytest.approx(10.0, abs=1e-3)
+    assert calibrated_cost > baseline_cost
+
+
+def test_cost_model_absent_overrides_table_is_baseline(tmp_path):
+    """A lake that was never calibrated (no cost_overrides table) reads back {} and leaves
+    CostModel bit-identical to not passing overrides_table at all."""
+    lake = Lake(tmp_path)
+    table = read_overrides(lake)
+    assert table == {}
+    idx = ["EQ:AAA:2000-01-03", "EQ:BBB:2000-01-03"]
+    kw = dict(trade_usd=pd.Series([1.0, 5e6], index=idx), adv_usd=1e8,
+             sigma_daily=0.05, sleeve="equity", instrument_ids=idx)
+    a = CostModel(costs_config(), overrides_table=table).cost_bps(**kw)
+    b = CostModel(costs_config(), overrides_table=None).cost_bps(**kw)
+    assert a.to_numpy().tolist() == b.to_numpy().tolist()
 
 
 # ------------------------------------------------------------------ daily_run

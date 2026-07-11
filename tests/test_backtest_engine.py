@@ -761,6 +761,70 @@ def test_events_absent_key_bit_identical(events_result):
     assert not np.allclose(ev.to_numpy(), r_base_a.total_returns.to_numpy(), atol=1e-12)
 
 
+# ================================================== cost overrides wiring (backlog #14)
+def test_run_backtest_reads_lake_cost_overrides(monkeypatch, tmp_path_factory):
+    """The engine threads the lake's TCA-calibrated cost_overrides table into the CostModel
+    construction — previously a dead ``lake`` parameter (backlog #14: TCA calibration wrote
+    the table, run_backtest never read it back). A CostModel spy pins the EXACT
+    overrides_table argument the engine passes (the narrowest seam for the previously-dead
+    wiring), not just an indirect P&L difference. A loud warning must accompany an active
+    override — a backtest run must never silently change cost regime (CLAUDE.md)."""
+    from production.core.lake import Lake
+    from production.execution.tca import write_overrides
+    import production.backtest.engine as _eng
+
+    lake = Lake(tmp_path_factory.mktemp("cost_overrides_active"))
+    calibrated_id = sorted(_EQ)[0]
+    override = {calibrated_id: {"half_spread_bps": 50.0, "n_fills": 30,
+                                "median_abs_shortfall_bps": 40.0}}
+    write_overrides(override, lake)
+
+    captured = {}
+    real_cls = _eng.CostModel
+
+    class _SpyCostModel(real_cls):
+        def __init__(self, cfg=None, overrides_table=None):
+            captured["overrides_table"] = overrides_table
+            super().__init__(cfg, overrides_table=overrides_table)
+
+    monkeypatch.setattr(_eng, "CostModel", _SpyCostModel)
+
+    data = {"prices": make_gbm_prices(_EQ, start=_START, end="2020-01-31")}
+    with pytest.warns(UserWarning, match="cost overrides ACTIVE"):
+        result = run_backtest(data, pd.Series(_EQ), lake=lake)
+
+    assert captured["overrides_table"] == override
+    assert any("cost overrides ACTIVE" in w for w in result._warnings)
+    assert any("1 instrument" in w for w in result._warnings)
+
+
+def test_run_backtest_lake_without_cost_overrides_table_unchanged(monkeypatch,
+                                                                   tmp_path_factory):
+    """A lake that was never TCA-calibrated (no cost_overrides table written) must leave the
+    engine's CostModel construction — and therefore the run — bit-identical to lake=None."""
+    from production.core.lake import Lake
+    import production.backtest.engine as _eng
+
+    empty_lake = Lake(tmp_path_factory.mktemp("cost_overrides_absent"))
+    captured: list = []
+    real_cls = _eng.CostModel
+
+    class _SpyCostModel(real_cls):
+        def __init__(self, cfg=None, overrides_table=None):
+            captured.append(overrides_table)
+            super().__init__(cfg, overrides_table=overrides_table)
+
+    monkeypatch.setattr(_eng, "CostModel", _SpyCostModel)
+
+    data = {"prices": make_gbm_prices(_EQ, start=_START, end="2020-01-31")}
+    result_lake = run_backtest(data, pd.Series(_EQ), lake=empty_lake)
+    result_none = run_backtest(data, pd.Series(_EQ), lake=None)
+
+    assert captured == [None, None]                  # never received a table either time
+    assert not any("cost overrides ACTIVE" in w for w in result_lake._warnings)
+    assert result_lake.total_returns.equals(result_none.total_returns)
+
+
 # ============================================================ CLI smoke (subprocess)
 def test_run_backtest_synthetic_smoke(tmp_path):
     env = {"PYTHONPATH": str(REPO_ROOT)}

@@ -45,6 +45,7 @@ from production.core.calendar import (month_starts, offset_grid, rebalance_grid,
                                        twice_weekly_grid)
 from production.core.config import backtest_config, costs_config, risk_config
 from production.events.backtest import event_sleeve_returns
+from production.execution.tca import read_overrides
 from production.portfolio.optimizer import optimize_sleeve
 from production.portfolio.overlays import overlay_multiplier
 from production.portfolio.allocation import sleeve_allocation
@@ -279,6 +280,28 @@ def _sufficient_ids(prices: pd.DataFrame, ids, as_of, min_days: int) -> list:
     return [i for i in ids if counts.get(i, 0) >= min_days]
 
 
+def _load_cost_overrides(lake) -> tuple[dict | None, str | None]:
+    """Read the lake's TCA-calibrated ``cost_overrides`` reference table, if any.
+
+    ``lake=None`` — the default, and what every pre-existing caller passes — reproduces
+    prior behavior bit-identically: no table read, no overrides, no message. A lake with an
+    absent or empty table (never calibrated yet) is likewise treated as "no active
+    overrides": ``read_overrides`` already returns ``{}`` in that case, so this is a no-op.
+    Only a genuinely non-empty table changes the cost regime, and doing so is never silent —
+    it returns a summary message the caller surfaces as a loud warning (min/max bps, count).
+    """
+    if lake is None:
+        return None, None
+    overrides_table = read_overrides(lake)
+    if not overrides_table:
+        return None, None
+    bps = [float(o["half_spread_bps"]) for o in overrides_table.values()]
+    msg = (f"cost overrides ACTIVE: {len(overrides_table)} instrument(s) calibrated from "
+           f"lake 'cost_overrides' (half_spread_bps min {min(bps):.2f} bps, "
+           f"max {max(bps):.2f} bps) — cost regime differs from the yaml-only baseline")
+    return overrides_table, msg
+
+
 def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
                  factors_cfg=None, lake=None,
                  sectors: pd.Series | None = None) -> BacktestResult:
@@ -290,7 +313,14 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     instruments  : Series mapping instrument_id -> sleeve; only these are traded.
     cfg          : backtest config (defaults to ``backtest_config()``).
     factors_cfg  : a ``FactorRegistry`` or a path to factors.yaml (defaults to the repo file).
-    lake         : unused by the engine itself; accepted for signature symmetry with the CLI.
+    lake         : optional ``Lake``. When given, the TCA-calibrated ``cost_overrides``
+                   reference table (production.execution.tca.read_overrides) is read and
+                   threaded into the CostModel construction as ``overrides_table`` — the
+                   lake-calibrated entries merge OVER the yaml ``instrument_overrides`` per
+                   instrument. ``None`` (the default) or an absent/empty table reproduces the
+                   yaml-only cost behavior bit-identically; an active table emits a loud
+                   warning (count + min/max half_spread_bps) so a run never silently changes
+                   cost regime.
     sectors      : optional Series mapping instrument_id -> sector label. When given, it is
                    threaded into the equity sleeve's risk model (sector dummies in ``B``) and
                    optimizer (the ±sector_band constraint). Non-equity sleeves never see it.
@@ -307,7 +337,8 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     macro = data.get("macro")
     macro_panel = macro if (macro is not None and not macro.empty) else _empty_macro()
     costs_cfg = costs_config()
-    cost_model = CostModel(costs_cfg)
+    overrides_table, cost_override_msg = _load_cost_overrides(lake)
+    cost_model = CostModel(costs_cfg, overrides_table=overrides_table)
     adv_window = int(costs_cfg.get("adv_window_days", 20))
 
     instruments = pd.Series(instruments)
@@ -321,6 +352,12 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     sleeve_ids = {s: sorted(traded[traded == s].index.tolist()) for s in sleeves}
 
     factors, gate_applied, warn_list = _select_factors(registry)
+    if cost_override_msg:
+        # Mirrors the gate-not-applied precedent above: a real Python warning (loud on any
+        # console/pytest run) AND a report-surfaced entry — a cost-regime change is never
+        # silent (CLAUDE.md).
+        warnings.warn(cost_override_msg, stacklevel=2)
+        warn_list.append(cost_override_msg)
     # Alpha-uncertainty robustness is opt-in; when off (default) we skip the per-factor IC
     # standard-error precompute and the per-rebalance alpha_se assembly entirely.
     robust_kappa = float(cfg["optimizer"].get("robust_kappa", 0.0))

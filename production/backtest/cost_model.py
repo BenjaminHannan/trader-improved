@@ -43,6 +43,14 @@ class CostModel:
         Overrides may be partial — a TCA-calibrated entry carries only ``half_spread_bps``
         (floors are floors, never recalibrated), so each field falls back to the sleeve
         default when the override omits it. Extra metadata keys (n_fills, …) are ignored.
+
+        Floor enforcement (CLAUDE.md, non-negotiable): an override may only RAISE a
+        sleeve's floor, never lower it. A ``half_spread_bps`` override needs no special
+        handling here — ``cost_bps`` always charges ``max(floor, half_spread + impact)``,
+        so the sleeve floor binds regardless of how low the override sets the spread. A
+        ``floor_bps`` override IS special-cased: it replaces the floor directly, so a
+        malformed/malicious entry requesting a lower floor is clamped back to the sleeve
+        default and recorded in ``cap_warnings`` — never silently honored.
         """
         spec = self.sleeves[sleeve]
         floor = float(spec["floor_bps"])
@@ -50,7 +58,14 @@ class CostModel:
         if instrument_id is not None and instrument_id in self.overrides:
             o = self.overrides[instrument_id]
             if "floor_bps" in o:
-                floor = float(o["floor_bps"])
+                o_floor = float(o["floor_bps"])
+                if o_floor < floor:
+                    self.cap_warnings.append({
+                        "instrument_id": instrument_id, "sleeve": sleeve,
+                        "reason": "floor_override_below_sleeve_floor",
+                        "requested_floor_bps": o_floor, "sleeve_floor_bps": floor})
+                else:
+                    floor = o_floor
             if "half_spread_bps" in o:
                 hs = float(o["half_spread_bps"])
         return floor, hs

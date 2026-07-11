@@ -117,6 +117,51 @@ def test_overrides_table_none_is_bit_identical():
     assert a.to_numpy().tolist() == b.to_numpy().tolist()
 
 
+# ------------------------------------------------------------- floor enforcement (CLAUDE.md)
+def test_overrides_table_half_spread_below_floor_never_lowers_cost():
+    """A TCA-calibrated override whose half_spread_bps sits below the sleeve floor cannot
+    lower the charged cost. This proves the pre-existing enforcement (cost_bps always
+    charges max(floor, half_spread + impact)) rather than re-implementing it — a floor is a
+    floor no matter how low a calibrated override's spread candidate is."""
+    floor = costs_config()["sleeves"]["equity"]["floor_bps"]
+    assert floor > 0.0
+    table = {_A: {"half_spread_bps": floor - 1.0, "n_fills": 25,
+                 "median_abs_shortfall_bps": floor - 1.0}}
+    model = CostModel(overrides_table=table)
+    # Tiny trade -> impact ~ 0, so an unclamped half_spread would be the whole charge.
+    cost = model.cost_bps(trade_usd=1.0, adv_usd=1e9, sigma_daily=0.01,
+                          sleeve="equity", instrument_ids=[_A]).iloc[0]
+    assert cost == pytest.approx(floor)
+
+
+def test_floor_bps_override_below_sleeve_floor_is_clamped_with_warning():
+    """A floor_bps override may only RAISE a sleeve's floor, never lower it (CLAUDE.md,
+    non-negotiable). One requesting a lower floor is clamped back to the sleeve default and
+    recorded in cap_warnings — never silently honored. (test_instrument_override_honored
+    above already covers the legitimate raise-the-floor case.)"""
+    cfg = dict(costs_config())
+    floor = cfg["sleeves"]["equity"]["floor_bps"]
+    cfg["instrument_overrides"] = {_A: {"floor_bps": floor - 2.0, "half_spread_bps": 0.0}}
+    model = CostModel(cfg)
+    cost = model.cost_bps(trade_usd=1.0, adv_usd=1e9, sigma_daily=0.01,
+                          sleeve="equity", instrument_ids=[_A]).iloc[0]
+    assert cost == pytest.approx(floor)            # never lowered below the sleeve floor
+    assert any(w["reason"] == "floor_override_below_sleeve_floor" and w["instrument_id"] == _A
+              for w in model.cap_warnings)
+
+
+def test_floor_bps_override_at_or_above_sleeve_floor_is_not_flagged():
+    """A floor_bps override that legitimately raises the floor produces no clamp warning."""
+    cfg = dict(costs_config())
+    floor = cfg["sleeves"]["equity"]["floor_bps"]
+    cfg["instrument_overrides"] = {_A: {"floor_bps": floor + 5.0}}
+    model = CostModel(cfg)
+    model.cost_bps(trade_usd=1.0, adv_usd=1e9, sigma_daily=0.01,
+                   sleeve="equity", instrument_ids=[_A])
+    assert not any(w["reason"] == "floor_override_below_sleeve_floor"
+                  for w in model.cap_warnings)
+
+
 # --------------------------------------------------------- trailing_adv_sigma PIT
 def _toy_prices(n=60, seed=0):
     rng = np.random.default_rng(seed)

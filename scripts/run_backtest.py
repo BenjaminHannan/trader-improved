@@ -167,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         end = args.end or "2020-06-30"
         print(f"synthetic run: warmup-synthesized bundle, trading ~{start} .. {end}")
         data, instruments, sectors = _synthetic_bundle(start, end)
+        lake = None
     else:
         lake = Lake(args.lake_root)
         data = _load_lake_bundle(lake, args.start, args.end)
@@ -195,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         factors_cfg = _tmp.name
 
     result = run_backtest(data, instruments, cfg=cfg, sectors=sectors,
-                          factors_cfg=factors_cfg)
+                          factors_cfg=factors_cfg, lake=lake)
     path = write_report(result.report, out_dir=args.report_dir)
     _print_headline(result.report)
     print(f"\nreport written: {path}")
