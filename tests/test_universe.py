@@ -268,6 +268,16 @@ def test_blocklist_windows():
     assert hygiene.is_blocked("AAPL", "2023-01-01") is False  # never blocked
     # Boundary is inclusive at the event date.
     assert hygiene.is_blocked("FB", "2022-06-09") is True
+    # 2026-07-11 recurrence (cross-vendor entity disagreement on reused tickers;
+    # French check 0.538 -> 0.948 post-remediation): KG/MI dead since 2011 — every
+    # in-lake row is post-delisting garbage; SBNY keeps its legit pre-collapse era.
+    assert hygiene.is_blocked("KG", "2016-01-04") is True
+    assert hygiene.is_blocked("MI", "2016-01-04") is True
+    assert hygiene.is_blocked("SBNY", "2022-06-01") is False   # real Signature Bank
+    assert hygiene.is_blocked("SBNY", "2023-03-13") is True    # seized; reuse after
+    # Old-machine TIE-incident names now portable via the blocklist too.
+    assert hygiene.is_blocked("TIE", "2016-01-04") is True
+    assert hygiene.is_blocked("BMC", "2016-01-04") is True
 
 
 def test_price_backstop_drops_sub_floor_rows():

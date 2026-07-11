@@ -29,6 +29,25 @@ REUSED_TICKER_BLOCKLIST: dict[str, list[tuple[str, str]]] = {
     # Twitter taken private by Musk; "TWTR" delisted 2022-10-27. Any "TWTR" data after
     # is stale/garbage.
     "TWTR": [("2022-10-27", _OPEN)],
+    # --- 2026-07-07 TIE incident (old-machine lake remediation; see wiki log) ------
+    # Titanium Metals acquired by Precision Castparts 2013-01; vendor series for the
+    # dead ticker alternated price regimes ($2 <-> $15,600).
+    "TIE": [("2013-01-08", _OPEN)],
+    # BMC Software taken private 2013-09; same run-alternator corruption class.
+    "BMC": [("2013-09-11", _OPEN)],
+    # Countrywide Financial absorbed by Bank of America 2008-07.
+    "CFC": [("2008-07-02", _OPEN)],
+    # --- 2026-07-11 fresh-machine recurrence (French check 0.538; forensic scan) ---
+    # King Pharmaceuticals acquired by Pfizer 2011-02; reused-ticker series with
+    # 2,070 catastrophic (>400%) day moves, $0.57 <-> $333.
+    "KG": [("2011-03-01", _OPEN)],
+    # Marshall & Ilsley acquired by BMO 2011-07; the worst offender: $0.196 <->
+    # $211,600, 2,387 catastrophic moves — single-handedly broke the equal-weight
+    # market vs Mkt-RF correlation (0.538). BOTH vendors served the garbage.
+    "MI": [("2011-07-06", _OPEN)],
+    # Signature Bank seized 2023-03-12; ticker reused ($0.33 <-> $360 alternation
+    # after). Pre-collapse history is legitimate and stays.
+    "SBNY": [("2023-03-13", _OPEN)],
     # --- template for future additions -------------------------------------------
     # "XYZ": [("YYYY-MM-DD", "YYYY-MM-DD")],  # <reason: rename/delist/reuse event>
 }
