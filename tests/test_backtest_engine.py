@@ -1006,6 +1006,70 @@ def test_erc_weights_normal_two_sleeve_case_unchanged():
     assert w.sum() == pytest.approx(1.0)
 
 
+def test_degenerate_sleeve_cold_inverse_vol_excludes_dead_sleeve(_degenerate_sleeve_result):
+    """Twin of the warm-path ERC bug, in the COLD (pre-warmup) inverse-vol fallback: before
+    both sleeves reach warmup_days the unfixed 1/vol fair share levered the dead crypto
+    sleeve (solver-residual vol ~1e-10) to ~99.9999% of the cold block. With the fix, at
+    every rebalance date where both sleeves are cold (so the inverse-vol path -- not ERC --
+    is what's under test), crypto must get ~0, the healthy fx_etf control ~1, and the
+    exclusion must warn loudly rather than silently clip."""
+    sr = _degenerate_sleeve_result.sleeve_returns
+    cfg = backtest_config()
+    warmup = int(cfg["allocation"]["warmup_days"])
+    months = pd.DatetimeIndex(sorted({pd.Timestamp(t.year, t.month, 1) for t in sr.index}))
+    checked = False
+    for t in months:
+        r = sr[sr.index < t]
+        counts = r.notna().sum()
+        cold = [s for s in sr.columns if 0 < counts.get(s, 0) < warmup]
+        if "crypto" not in cold or "fx_etf" not in cold:
+            continue
+        checked = True
+        with pytest.warns(UserWarning, match="degenerate"):
+            w = sleeve_allocation(sr, t, cfg)
+        assert w["crypto"] == pytest.approx(0.0, abs=1e-9)
+        assert w["fx_etf"] == pytest.approx(1.0, abs=1e-9)
+    assert checked, "fixture never reaches a rebalance date where both sleeves are cold"
+
+
+def test_sleeve_allocation_all_cold_degenerate_equal_weight_with_warning():
+    """If every cold sleeve is variance-degenerate (and no warm sleeve exists) there is no
+    vol information left to apportion -- sleeve_allocation must fall back to an equal
+    inverse-vol fair share (-> equal final weights) with a loud warning, mirroring the
+    erc_weights all-degenerate fallback, rather than dividing by solver-residual vols."""
+    idx = pd.bdate_range("2020-01-01", periods=40)
+    rng = np.random.default_rng(11)
+    sr = pd.DataFrame({"crypto": rng.normal(0, 1e-9, len(idx)),
+                       "events": rng.normal(0, 1e-9, len(idx))}, index=idx)
+    t = idx[-1] + pd.Timedelta(days=1)
+    cfg = {"allocation": {"sleeve_cov_halflife_days": 63.0, "warmup_days": 126}}
+    with pytest.warns(UserWarning, match="degenerate floor"):
+        w = sleeve_allocation(sr, t, cfg)
+    assert w.to_numpy() == pytest.approx([0.5, 0.5])
+    assert w.sum() == pytest.approx(1.0)
+
+
+def test_sleeve_allocation_normal_cold_inverse_vol_unchanged():
+    """Regression guard: with two genuinely healthy cold sleeves the dead-sleeve exclusion
+    must never fire, and the cold inverse-vol fair share must reproduce the pre-fix
+    weights (inverse-vol proportions, both haircuts cancelling in the normalization)."""
+    idx = pd.bdate_range("2020-01-01", periods=60)
+    rng = np.random.default_rng(12)
+    vols = {"equity": 0.010, "crypto": 0.040}
+    sr = pd.DataFrame({s: rng.normal(0, v, len(idx)) for s, v in vols.items()}, index=idx)
+    t = idx[-1] + pd.Timedelta(days=1)
+    cfg = {"allocation": {"sleeve_cov_halflife_days": 63.0, "warmup_days": 126}}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # any warning here would mean the exclusion mis-fired
+        w = sleeve_allocation(sr, t, cfg)
+    # inverse-vol proportions on the realized (EWMA) vols; loose rel tol -- realized vol on
+    # 60 draws is noisy, but a 4:1 vol ratio is unambiguous next to the failure mode (dead
+    # sleeve -> ~1.0) this guards against.
+    assert w["equity"] > w["crypto"]
+    assert w["equity"] / w["crypto"] == pytest.approx(vols["crypto"] / vols["equity"], rel=0.5)
+    assert w.sum() == pytest.approx(1.0)
+
+
 # ============================================================ CLI smoke (subprocess)
 def test_run_backtest_synthetic_smoke(tmp_path):
     env = {"PYTHONPATH": str(REPO_ROOT)}

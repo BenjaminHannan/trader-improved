@@ -172,6 +172,9 @@ def sleeve_allocation(sleeve_returns: pd.DataFrame, t, cfg: dict) -> pd.Series:
     (halflife from cfg). Cold sleeves (fewer obs) fall back to an inverse-vol weight with a
     0.5 haircut — half of their inverse-vol fair share — because their covariance is not yet
     trustworthy. Warm ERC weights and haircut cold weights are pooled and normalized to 1.
+    Degenerate sleeves (variance below `_MIN_SLEEVE_VARIANCE`, i.e. dead — the optimizer
+    refused to trade them) are excluded from both paths: the warm exclusion lives in
+    `erc_weights`, the cold inverse-vol exclusion here. Both warn loudly.
     """
     alloc = cfg["allocation"]
     halflife = float(alloc["sleeve_cov_halflife_days"])
@@ -191,13 +194,44 @@ def sleeve_allocation(sleeve_returns: pd.DataFrame, t, cfg: dict) -> pd.Series:
 
     raw = pd.Series(0.0, index=cols)
 
-    # Cold sleeves: inverse-vol fair share (over all sleeves), halved.
+    # Cold sleeves: inverse-vol fair share (over all sleeves), halved. Sleeves whose
+    # trailing variance sits below _MIN_SLEEVE_VARIANCE are degenerate -- dead, their
+    # optimizer refused to trade (see erc_weights) -- and are excluded from the
+    # inverse-vol computation entirely: 1/vol on solver residual would lever a dead
+    # sleeve toward the whole cold book, the exact twin of the unfixed ERC fixed point.
+    # They get weight 0 and the fair share renormalizes over the live sleeves. If NO
+    # sleeve carries live variance there is no vol information to apportion: fall back
+    # to an equal fair share across all sleeves, loudly.
     inv = pd.Series(0.0, index=cols)
+    dead = []
     for s in cols:
         v = vol.get(s, np.nan)
-        if np.isfinite(v) and v > 0:
-            inv[s] = 1.0 / v
-    inv_frac = inv / inv.sum() if inv.sum() > 0 else inv
+        if not (np.isfinite(v) and v > 0):
+            continue
+        if v * v < _MIN_SLEEVE_VARIANCE:
+            dead.append(s)
+            continue
+        inv[s] = 1.0 / v
+    if cold and inv.sum() > 0:
+        if dead:
+            warnings.warn(
+                f"sleeve_allocation: excluding degenerate sleeve(s) {dead} (variance "
+                f"below {_MIN_SLEEVE_VARIANCE:g} -- solver residual, not real risk) from "
+                "the cold inverse-vol fair share; they get weight 0 and the share "
+                "renormalizes over the live sleeves.",
+                stacklevel=2,
+            )
+        inv_frac = inv / inv.sum()
+    elif cold:
+        warnings.warn(
+            f"sleeve_allocation: all sleeves {cols} have variance below the degenerate "
+            f"floor ({_MIN_SLEEVE_VARIANCE:g}) or no measurable vol -- falling back to an "
+            "equal inverse-vol fair share for the cold block.",
+            stacklevel=2,
+        )
+        inv_frac = pd.Series(1.0 / len(cols), index=cols)
+    else:
+        inv_frac = inv  # no cold sleeves: the fair share is never consumed
     for s in cold:
         raw[s] = 0.5 * inv_frac[s]
 
