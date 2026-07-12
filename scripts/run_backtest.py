@@ -11,11 +11,13 @@ The lake path loads curated datasets into the signal bundle (``prices`` required
 ``funding``/``macro``/``cot`` optional with a warning), derives the instrument→sleeve map
 from the ``instruments`` reference table (falling back to the id-prefix rule), runs the
 engine, writes ``reports/backtest_<UTC>.json`` + ``.txt`` and prints the headline table.
-It also loads the curated ``event_markets`` panel (Kalshi/Polymarket) for the ``events``
-sleeve, config-gated by ``events.enabled`` in configs/backtest.yaml (default on); an
-absent/empty curated dataset degrades to a printed note and a run without the sleeve,
-exactly like the other optional lake datasets (never a crash). The report's per-sleeve
-table then carries ``events`` alongside crypto/fx_etf/... whenever it fired.
+It also loads the curated Kalshi/Polymarket events panel for the ``events`` sleeve — the
+UNION of the historical settled-market backfill (``event_markets_hist``, 2021-07+) and the
+live snapshot (``event_markets``, 2026-06+), deduped on overlap — config-gated by
+``events.enabled`` in configs/backtest.yaml (default on); either dataset absent/empty is
+fine on its own, and only both absent degrades to a printed note and a run without the
+sleeve, exactly like the other optional lake datasets (never a crash). The report's
+per-sleeve table then carries ``events`` alongside crypto/fx_etf/... whenever it fired.
 
 The ``--synthetic`` flag is the no-lake smoke path: it builds the conftest GBM bundle
 (with ~3y of warmup history synthesized before ``--start``) and runs the identical engine
@@ -45,32 +47,60 @@ from production.signals.base import sleeve_from_id
 _DATASETS = SIGNAL_BUNDLE_DATASETS
 _QUARANTINE_PREVIEW_N = 5
 _EVENTS_DATASET = "event_markets"
+_EVENTS_HIST_DATASET = "event_markets_hist"
 _EVENTS_ASSET_CLASS = "events"
 
 
 def _load_event_markets(lake: Lake, start, end, events_enabled: bool = True):
-    """Load the curated Kalshi/Polymarket ``event_markets`` panel for the events sleeve.
+    """Load the curated Kalshi/Polymarket events panel for the events sleeve: the UNION
+    of the historical settled-market backfill (``event_markets_hist``, 2021-07+) and the
+    live snapshot (``event_markets``, 2026-06+).
 
     Config-gated (``events.enabled`` in configs/backtest.yaml, default True) and, once
-    enabled, degrades exactly like the optional ``SIGNAL_BUNDLE_DATASETS`` entries (e.g.
-    ``tvl``): an absent or empty curated dataset prints a note and returns ``None`` rather
-    than raising — the lake path never crashes for missing kalshi/events data. Disabling
-    the flag skips the lake read entirely (its own note), so ``events.enabled=false``
-    behaves identically to "no events data ever ingested".
+    enabled, each of the two datasets degrades independently exactly like the optional
+    ``SIGNAL_BUNDLE_DATASETS`` entries (e.g. ``tvl``): an absent or empty curated dataset
+    is silently skipped rather than raising. Only when BOTH are absent/empty does this
+    print the note and return ``None`` — the lake path never crashes for missing
+    kalshi/events data. Disabling the flag skips the lake read entirely (its own note),
+    so ``events.enabled=false`` behaves identically to "no events data ever ingested".
+
+    The two datasets' schemas differ (``event_markets_hist`` carries
+    ``series_ticker``/``row_type``/``knowable_at``/``result``/...; ``event_markets``
+    carries ``status``/``open_interest`` from the live loader) so, when both are present,
+    they are concatenated as a column UNION — ``pd.concat`` fills the columns either side
+    never had with NaN — rather than an inner-join intersection. Overlap between the two
+    on ``(obs_date, instrument_id)`` (e.g. the historical backfill's tail catching up to
+    the live snapshot's early days) is resolved with the repo's standard vendor-dedupe
+    convention (see ``scripts/remediate_illiquid_equity.py``'s ``_deduped_view`` for the
+    same pattern applied to a single vendor's overlap): sort by
+    ``[obs_date, instrument_id, available_from, ingested_at]`` and keep the LAST row per
+    ``(obs_date, instrument_id)`` — the latest-knowable, latest-ingested vintage wins.
     """
     if not events_enabled:
         print("  note: events sleeve disabled via configs/backtest.yaml "
               "(events.enabled=false) — skipping")
         return None
-    try:
-        df = lake.read_curated(_EVENTS_DATASET, _EVENTS_ASSET_CLASS, start=start, end=end)
-    except LakeError:
-        df = None
-    if df is None or df.empty:
+
+    frames = []
+    for dataset in (_EVENTS_HIST_DATASET, _EVENTS_DATASET):
+        try:
+            df = lake.read_curated(dataset, _EVENTS_ASSET_CLASS, start=start, end=end)
+        except LakeError:
+            df = None
+        if df is not None and not df.empty:
+            frames.append(df)
+
+    if not frames:
         print(f"  note: optional dataset '{_EVENTS_DATASET}' absent — continuing "
               "without the events sleeve")
         return None
-    return df
+
+    panel = frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
+    return (panel.sort_values(
+                ["obs_date", "instrument_id", "available_from", "ingested_at"],
+                kind="stable")
+                .drop_duplicates(subset=["obs_date", "instrument_id"], keep="last")
+                .reset_index(drop=True))
 
 
 def _load_lake_bundle(lake: Lake, start, end, events_enabled: bool = True) -> dict:

@@ -72,6 +72,37 @@ joining bars can never see an outcome before it was knowable.
 Dollar-string parsing: this API generation quotes prices as strings in dollars
 (``"0.0300"``) and sizes as float-strings (``"68.00"``); everything is parsed with
 ``float`` and prices are already probabilities.
+
+Category stamping (2026-07-11 fix — this backfill shipped ~5 months into
+production, live in the headline backtest as of commit d665a3b, before anyone
+noticed :func:`production.events.signals.political_favorite_tilt` fail-closes on
+a missing ``category`` column and every row here traded zero): every row now
+carries a lowercase ``category``, resolved one of two ways depending on how the
+run was invoked.
+
+  * **Category-scoped run** (``category=`` set, no explicit ``series`` pinned —
+    e.g. ``scripts/ingest.py``'s ``kalshi_hist_politics`` dataset): every row
+    stamps ``self.category.lower()`` directly. No extra call — the caller already
+    told us the category, and every series enumerated for this run came FROM that
+    category's own listing.
+  * **Explicit-series run with no category hint** (the ``DEFAULT_SERIES`` backfill
+    — ``scripts/ingest.py``'s plain ``kalshi_hist`` dataset): each pinned series'
+    category is resolved via :meth:`_resolve_explicit_series_categories`, which
+    reuses the SAME category-listing endpoint (one call per configured category in
+    ``CATEGORIES`` — the identical set, in the identical order, as
+    :attr:`production.data.loaders.kalshi.KalshiLoader.categories`'s default) so
+    the two loaders' ``category`` columns agree on what "politics"/"economics"/
+    "financials" mean. A series matched under none of the successfully-listed
+    categories stamps ``"other"``; if EVERY category's listing fails, every row
+    stamps ``"unknown"`` rather than guessing — the same fail-closed posture
+    ``kalshi.py`` uses for its own all-categories-failed degrade (module
+    docstring, ``KalshiLoader``), and the same posture
+    :func:`political_favorite_tilt` relies on downstream (it only ever acts on
+    ``category == "politics"``; anything else, including ``"unknown"``, is inert).
+  * If BOTH ``category=`` and an explicit ``series=`` are given (only exercised by
+    a precedence test today, not by any production caller), the explicit
+    ``category`` still wins for stamping — it is free (no extra call) and, being
+    caller-supplied, is exactly as trustworthy as the category-scoped case above.
 """
 from __future__ import annotations
 
@@ -94,6 +125,12 @@ DEFAULT_SERIES = [
     "KXFED", "KXFEDDECISION",                             # Fed
     "KXGDP",                                              # GDP
 ]
+
+# Category set used to resolve `category` for an explicit-series run with no
+# category hint (see module docstring, "Category stamping"). Mirrors
+# production.data.loaders.kalshi.KalshiLoader's own default `categories`
+# constructor arg exactly, so a series enumerated here and there agree.
+CATEGORIES = ("Politics", "Economics", "Financials")
 
 
 def _f(value, default=0.0) -> float:
@@ -182,6 +219,32 @@ class KalshiHistoryLoader(BaseLoader):
             return []
         return [r["ticker"] for r in rows if r.get("ticker")]
 
+    def _resolve_explicit_series_categories(self, session,
+                                            series_list: list[str]) -> dict[str, str]:
+        """Map each explicitly-pinned series ticker to its Kalshi category.
+
+        Reuses :meth:`_enumerate_category` — one call per entry in ``CATEGORIES``
+        (each a single page, ~2k series worst case), so this is a handful of cheap
+        calls regardless of how many series are pinned, never a per-series lookup.
+        A series matched under none of the successfully-listed categories stamps
+        ``"other"`` (mirroring ``kalshi.py``'s ``KalshiLoader.transform``); if EVERY
+        category's listing fails, every series stamps ``"unknown"`` instead of
+        guessing (fail-closed, mirroring that loader's all-categories-failed
+        degrade — see module docstring, "Category stamping").
+        """
+        category_series: dict[str, frozenset] = {}
+        for category in CATEGORIES:
+            tickers = self._enumerate_category(session, category)
+            if tickers:
+                category_series[category.lower()] = frozenset(tickers)
+        if not category_series:
+            return {s: "unknown" for s in series_list}
+        return {
+            s: next((cat for cat, tickers in category_series.items() if s in tickers),
+                    "other")
+            for s in series_list
+        }
+
     def fetch(self, start, end) -> dict:
         """Return ``{series: {"markets": [...], "trades": {ticker: [...]}}}``.
 
@@ -199,6 +262,13 @@ class KalshiHistoryLoader(BaseLoader):
         one-off micro series with a handful of settled markets, and paging their
         trades would dominate the run for no research value. Skips are silent except
         for one summary warning at the end (no per-series spam).
+
+        Every fetched series also gets a ``category`` label (module docstring,
+        "Category stamping"): free (``self.category.lower()``) when the caller gave
+        one, else resolved via :meth:`_resolve_explicit_series_categories`. Carried
+        in this method's return payload (one ``"category"`` key per series) so
+        :meth:`transform` can stamp it onto every row without a second network round
+        trip.
         """
         import requests
 
@@ -211,6 +281,14 @@ class KalshiHistoryLoader(BaseLoader):
         category_mode = bool(self.category) and not self._explicit_series
         series_list = (self._enumerate_category(session, self.category)
                        if category_mode else self.series)
+
+        # Category resolution for row stamping — independent of *which* series get
+        # walked above. `self.category` (category-scoped run, or an explicit-series
+        # run that ALSO pins a category) is free and wins outright; a fully unhinted
+        # explicit-series run pays for the listing-based resolution.
+        series_category = ({s: self.category.lower() for s in series_list}
+                           if self.category
+                           else self._resolve_explicit_series_categories(session, series_list))
 
         out: dict[str, dict] = {}
         n_enumerated = len(series_list)
@@ -264,7 +342,8 @@ class KalshiHistoryLoader(BaseLoader):
                     self.warnings.append(
                         f"kalshi-hist trades failed for {ticker}: {exc!r}")
                     continue
-            out[series] = {"markets": list(markets.values()), "trades": trades}
+            out[series] = {"markets": list(markets.values()), "trades": trades,
+                           "category": series_category.get(series, "unknown")}
             n_fetched += 1
 
         if category_mode:
@@ -280,6 +359,10 @@ class KalshiHistoryLoader(BaseLoader):
             markets = {m.get("ticker"): m for m in payload.get("markets", [])
                        if m.get("ticker")}
             trades = payload.get("trades", {})
+            # "unknown" default covers payloads from before this feature (e.g. a
+            # canned test fixture with no "category" key) as well as a genuinely
+            # unresolved fetch — never guessed as "politics"/"other".
+            category = payload.get("category", "unknown")
             for ticker, meta in markets.items():
                 base = {
                     "instrument_id": f"EV:kalshi:{ticker}",
@@ -291,6 +374,7 @@ class KalshiHistoryLoader(BaseLoader):
                     "floor_strike": _f(meta.get("floor_strike"), default=float("nan")),
                     "cap_strike": _f(meta.get("cap_strike"), default=float("nan")),
                     "venue": "kalshi",
+                    "category": category,
                 }
                 rows.extend(self._bar_rows(base, trades.get(ticker) or []))
                 settle = self._settlement_row(base, meta)
@@ -368,7 +452,8 @@ def _object_cast(df: pd.DataFrame) -> pd.DataFrame:
     """Force text columns to numpy object dtype (see kalshi.py: the curated audit's
     numeric summary cannot introspect pandas StringDtype)."""
     for col in ("series_ticker", "event_key", "question", "close_time", "strike_type",
-                "venue", "row_type", "result", "expiration_value", "knowable_at"):
+                "venue", "row_type", "result", "expiration_value", "knowable_at",
+                "category"):
         if col in df.columns:
             df[col] = df[col].astype(object)
     return df

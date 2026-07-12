@@ -10,14 +10,23 @@ input bundle. It reuses the canned Kalshi payload shape from tests/test_events.p
 event_markets dataset via the loader's real transform/audit/write path, then exercises
 ``scripts.run_backtest._load_event_markets`` / ``_load_lake_bundle`` directly.
 
+``_load_event_markets`` reads the UNION of two curated datasets -- the historical
+settled-market backfill (``event_markets_hist``, written by
+``production.data.loaders.kalshi_history.KalshiHistoryLoader``) and the live snapshot
+(``event_markets``, written by ``KalshiLoader``) -- deduped on any overlapping
+``(obs_date, instrument_id)`` key. The "present data" section below covers all three
+shapes: snapshot-only, hist-only, and both-present-with-overlap.
+
 NO NETWORK: everything is written to a tmp lake (the shared ``tmp_lake`` fixture from
 tests/conftest.py).
 """
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from production.data.loaders.kalshi import KalshiLoader
+from production.data.loaders.kalshi_history import KalshiHistoryLoader
 from scripts.run_backtest import _load_event_markets, _load_lake_bundle, _synthetic_bundle
 
 UTC = "UTC"
@@ -53,6 +62,70 @@ def _write_canned_event_markets(lake, monkeypatch):
     return res
 
 
+# --------------------------------------------------------- canned hist payload (reused
+# shape from tests/test_kalshi_history.py's _payload() -- one series, one settled market
+# with a single day of trades).
+def _kalshi_hist_payload():
+    markets = [
+        {"ticker": "T3", "event_ticker": "EVT-B", "title": "Will B resolve YES?",
+         "close_time": "2021-08-01T00:00:00Z"},
+    ]
+    trades = {
+        "T3": [
+            {"created_time": "2021-07-15T14:00:00Z", "yes_price_dollars": "0.4000",
+             "no_price_dollars": "0.6000", "count_fp": "100.00", "taker_side": "yes"},
+        ],
+    }
+    return {"KXFOO": {"markets": markets, "trades": trades}}
+
+
+def _write_canned_event_markets_hist(lake, monkeypatch):
+    """Run the real KalshiHistoryLoader (fetch monkeypatched) so the curated
+    event_markets_hist dataset it writes is exactly the shape production backfill
+    ingestion produces."""
+    loader = KalshiHistoryLoader(lake)
+    monkeypatch.setattr(loader, "fetch", lambda start, end: _kalshi_hist_payload())
+    res = loader.run("2021-07-01", "2021-08-31", incremental=False)
+    assert res.rows == 1 and res.audit["fatal"] is False
+    return res
+
+
+def _write_minimal_event_markets_hist(lake, obs_date, instrument_id, yes_price,
+                                      available_from, ingested_at):
+    """Hand-rolled single-row event_markets_hist write with fully controlled
+    available_from/ingested_at, for deterministic union/dedupe-ordering tests (real
+    loader timestamps are wall-clock-derived and unsuitable for pinning an ordering)."""
+    df = pd.DataFrame({
+        "obs_date": [pd.Timestamp(obs_date)],
+        "instrument_id": [instrument_id],
+        "yes_price": [yes_price],
+        "volume": [10.0],
+        "row_type": ["bar"],
+        "venue": ["kalshi"],
+        "available_from": [pd.Timestamp(available_from, tz=UTC)],
+        "source": ["test"],
+        "ingested_at": [pd.Timestamp(ingested_at, tz=UTC)],
+    })
+    lake.write_curated(df, "event_markets_hist", "events")
+
+
+def _write_minimal_event_markets(lake, obs_date, instrument_id, yes_price,
+                                 available_from, ingested_at):
+    """Hand-rolled single-row event_markets (live-snapshot-shaped) write; see
+    ``_write_minimal_event_markets_hist``."""
+    df = pd.DataFrame({
+        "obs_date": [pd.Timestamp(obs_date)],
+        "instrument_id": [instrument_id],
+        "yes_price": [yes_price],
+        "volume": [10.0],
+        "venue": ["kalshi"],
+        "available_from": [pd.Timestamp(available_from, tz=UTC)],
+        "source": ["test"],
+        "ingested_at": [pd.Timestamp(ingested_at, tz=UTC)],
+    })
+    lake.write_curated(df, "event_markets", "events")
+
+
 def _write_minimal_prices(lake):
     dates = pd.date_range("2020-01-02", periods=3, freq="D")
     avail = dates.tz_localize(UTC) + pd.Timedelta(hours=24)
@@ -63,13 +136,56 @@ def _write_minimal_prices(lake):
 
 
 # =================================================== (a) data present + config-enabled
-def test_load_event_markets_present_populates_frame(tmp_lake, monkeypatch):
+def test_load_event_markets_snapshot_only_populates_frame(tmp_lake, monkeypatch):
+    """Only the live snapshot (event_markets) is curated -- event_markets_hist absent
+    entirely -- and the union degrades gracefully to just the one present dataset."""
     _write_canned_event_markets(tmp_lake, monkeypatch)
     df = _load_event_markets(tmp_lake, "2026-06-01", "2026-07-31", events_enabled=True)
     assert df is not None
     assert set(df["instrument_id"]) == {"EV:kalshi:T1", "EV:kalshi:T2"}
     # exactly what production/events/backtest.py::event_sleeve_returns needs downstream.
     assert {"obs_date", "yes_price", "available_from", "close_time"}.issubset(df.columns)
+
+
+def test_load_event_markets_hist_only_populates_frame(tmp_lake, monkeypatch):
+    """Only the historical backfill (event_markets_hist) is curated -- event_markets
+    (live snapshot) absent entirely -- and the union degrades gracefully to just the
+    one present dataset."""
+    _write_canned_event_markets_hist(tmp_lake, monkeypatch)
+    df = _load_event_markets(tmp_lake, "2021-07-01", "2021-08-31", events_enabled=True)
+    assert df is not None
+    assert set(df["instrument_id"]) == {"EV:kalshi:T3"}
+    assert {"obs_date", "yes_price", "available_from"}.issubset(df.columns)
+
+
+def test_load_event_markets_unions_hist_and_snapshot_dedupe_keeps_latest(tmp_lake):
+    """Both curated datasets present with an overlapping (obs_date, instrument_id) key:
+    the union keeps exactly one row per key -- the LATER one by
+    [available_from, ingested_at], the repo's vendor-dedupe convention (see
+    scripts/remediate_illiquid_equity.py's _deduped_view for the same sort-then-
+    drop_duplicates(keep='last') pattern applied to a single vendor's overlap). A
+    non-overlapping row from either side survives untouched."""
+    iid = "EV:kalshi:T1"
+    _write_minimal_event_markets_hist(
+        tmp_lake, "2026-07-01", iid, yes_price=0.80,
+        available_from="2026-07-01T10:00:00Z", ingested_at="2026-07-01T10:00:00Z")
+    _write_minimal_event_markets(
+        tmp_lake, "2026-07-01", iid, yes_price=0.10,
+        available_from="2026-07-05T00:00:00Z", ingested_at="2026-07-05T00:00:00Z")
+    _write_minimal_event_markets_hist(
+        tmp_lake, "2026-06-15", "EV:kalshi:T2", yes_price=0.55,
+        available_from="2026-06-15T09:00:00Z", ingested_at="2026-06-15T09:00:00Z")
+
+    df = _load_event_markets(tmp_lake, "2026-06-01", "2026-07-31", events_enabled=True)
+    assert df is not None
+    assert len(df) == 2   # the overlapping key collapsed to exactly one row
+    assert set(df["instrument_id"]) == {iid, "EV:kalshi:T2"}
+    overlapped = df[(df["obs_date"] == pd.Timestamp("2026-07-01"))
+                    & (df["instrument_id"] == iid)]
+    assert len(overlapped) == 1
+    assert overlapped.iloc[0]["yes_price"] == pytest.approx(0.10)   # the later row wins
+    survivor = df[df["instrument_id"] == "EV:kalshi:T2"].iloc[0]
+    assert survivor["yes_price"] == pytest.approx(0.55)
 
 
 def test_load_lake_bundle_includes_event_markets_when_present(tmp_lake, monkeypatch, capsys):

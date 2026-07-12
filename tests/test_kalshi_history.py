@@ -105,6 +105,23 @@ def test_metadata_and_strikes_on_every_row():
     assert (t27["strike_type"] == "greater").all()
 
 
+def test_transform_stamps_category_unknown_when_payload_has_no_category_key():
+    """A payload shaped like the pre-category-fix ``fetch()`` output (no "category"
+    key per series at all — exactly ``_payload()`` above) degrades every row to
+    "unknown" rather than raising or guessing "politics"."""
+    long = KalshiHistoryLoader().transform(_payload())
+    assert set(long["category"]) == {"unknown"}
+
+
+def test_transform_stamps_category_from_payload():
+    """``transform`` passes each series' resolved category straight through from the
+    ``fetch()``-produced payload onto every row of that series."""
+    payload = _payload()
+    payload["KXCPIYOY"]["category"] = "economics"
+    long = KalshiHistoryLoader().transform(payload)
+    assert set(long["category"]) == {"economics"}
+
+
 def test_range_audit_and_end_to_end_curated_write(tmp_lake, monkeypatch):
     loader = KalshiHistoryLoader(tmp_lake)
     monkeypatch.setattr(loader, "fetch", lambda start, end: _payload())
@@ -224,7 +241,9 @@ def test_category_enumeration_skips_thin_series_with_summary_warning(monkeypatch
 
 def test_series_param_takes_precedence_over_category(monkeypatch):
     """An explicit `series=` list must skip category enumeration entirely — no call
-    to the series-listing endpoint, no category summary warning."""
+    to the series-listing endpoint, no category summary warning. The explicit
+    `category=` still stamps every row (free — no extra call needed since the
+    caller already told us the category)."""
     def responder(url, params):
         if url == f"{LIVE_BASE}/series":
             raise AssertionError("category enumeration must not run when series is explicit")
@@ -246,6 +265,112 @@ def test_series_param_takes_precedence_over_category(monkeypatch):
     assert len(raw["KXFOO"]["markets"]) == 1     # not dropped by min_settled_markets
     assert not any(url == f"{LIVE_BASE}/series" for url, _ in calls)
     assert not any("category Politics" in w for w in loader.warnings)
+    assert raw["KXFOO"]["category"] == "politics"
+
+
+def test_fetch_category_mode_stamps_self_category_on_every_row(monkeypatch):
+    """Category-scoped run (self.category set, no explicit series): every fetched
+    series stamps `self.category.lower()` directly — the series were enumerated
+    FROM that category, so no separate resolution call is made."""
+    series_listing = {"series": [{"ticker": "KXBIG1", "category": "Politics"}]}
+
+    def responder(url, params):
+        if url == f"{LIVE_BASE}/series":
+            assert params.get("category") == "Politics"
+            return series_listing
+        if url == f"{HIST_BASE}/historical/markets":
+            return {"markets": [_market("KXBIG1-A", "KXBIG1-EVT", "2024-01-05T00:00:00Z")],
+                    "cursor": None}
+        if url == f"{LIVE_BASE}/markets":
+            return {"markets": [], "cursor": None}
+        if url in (f"{HIST_BASE}/historical/trades", f"{LIVE_BASE}/markets/trades"):
+            return {"trades": [], "cursor": None}
+        raise AssertionError(f"unexpected url {url}")
+
+    _install_fake_requests(monkeypatch, responder)
+    loader = KalshiHistoryLoader(category="Politics", min_settled_markets=1)
+    raw = loader.fetch("2024-01-01", "2024-01-31")
+
+    assert raw["KXBIG1"]["category"] == "politics"
+
+
+def test_fetch_explicit_series_resolves_category_via_listing(monkeypatch):
+    """Explicit series, no category hint: category is resolved via the SAME
+    category-listing endpoint kalshi.py uses, one call per CATEGORIES entry. A
+    series found under exactly one configured category stamps that category's
+    lowercase name."""
+    listings = {
+        "Politics": {"series": [{"ticker": "KXOTHER"}]},
+        "Economics": {"series": [{"ticker": "KXFOO"}]},
+        "Financials": {"series": []},
+    }
+    series_calls: list[str] = []
+
+    def responder(url, params):
+        if url == f"{LIVE_BASE}/series":
+            series_calls.append(params["category"])
+            return listings[params["category"]]
+        if url == f"{HIST_BASE}/historical/markets":
+            return {"markets": [_market("KXFOO-A", "KXFOO-EVT", "2024-01-05T00:00:00Z")],
+                    "cursor": None}
+        if url == f"{LIVE_BASE}/markets":
+            return {"markets": [], "cursor": None}
+        if url in (f"{HIST_BASE}/historical/trades", f"{LIVE_BASE}/markets/trades"):
+            return {"trades": [], "cursor": None}
+        raise AssertionError(f"unexpected url {url}")
+
+    _install_fake_requests(monkeypatch, responder)
+    loader = KalshiHistoryLoader(series=["KXFOO"])
+    raw = loader.fetch("2024-01-01", "2024-01-31")
+
+    assert series_calls == ["Politics", "Economics", "Financials"]
+    assert raw["KXFOO"]["category"] == "economics"
+
+
+def test_fetch_explicit_series_unmatched_category_stamps_other(monkeypatch):
+    """A series found under NONE of the successfully-listed categories stamps
+    "other" — mirroring kalshi.py's transform, never guessed as "politics"."""
+    def responder(url, params):
+        if url == f"{LIVE_BASE}/series":
+            return {"series": [{"ticker": "KXSOMETHINGELSE"}]}
+        if url == f"{HIST_BASE}/historical/markets":
+            return {"markets": [_market("KXFOO-A", "KXFOO-EVT", "2024-01-05T00:00:00Z")],
+                    "cursor": None}
+        if url == f"{LIVE_BASE}/markets":
+            return {"markets": [], "cursor": None}
+        if url in (f"{HIST_BASE}/historical/trades", f"{LIVE_BASE}/markets/trades"):
+            return {"trades": [], "cursor": None}
+        raise AssertionError(f"unexpected url {url}")
+
+    _install_fake_requests(monkeypatch, responder)
+    loader = KalshiHistoryLoader(series=["KXFOO"])
+    raw = loader.fetch("2024-01-01", "2024-01-31")
+
+    assert raw["KXFOO"]["category"] == "other"
+
+
+def test_fetch_explicit_series_all_category_listings_fail_stamps_unknown(monkeypatch):
+    """Every configured category's listing failing degrades every series to
+    "unknown" rather than guessing — the same fail-closed posture kalshi.py uses
+    for its own all-categories-failed case."""
+    def responder(url, params):
+        if url == f"{LIVE_BASE}/series":
+            raise RuntimeError(f"boom: {params['category']} series listing unreachable")
+        if url == f"{HIST_BASE}/historical/markets":
+            return {"markets": [_market("KXFOO-A", "KXFOO-EVT", "2024-01-05T00:00:00Z")],
+                    "cursor": None}
+        if url == f"{LIVE_BASE}/markets":
+            return {"markets": [], "cursor": None}
+        if url in (f"{HIST_BASE}/historical/trades", f"{LIVE_BASE}/markets/trades"):
+            return {"trades": [], "cursor": None}
+        raise AssertionError(f"unexpected url {url}")
+
+    _install_fake_requests(monkeypatch, responder)
+    loader = KalshiHistoryLoader(series=["KXFOO"])
+    raw = loader.fetch("2024-01-01", "2024-01-31")
+
+    assert raw["KXFOO"]["category"] == "unknown"
+    assert sum("category listing failed" in w for w in loader.warnings) == 3
 
 
 def test_trade_truncation_keeps_newest_survives_oldest_dropped(monkeypatch):
@@ -283,6 +408,11 @@ def test_trade_truncation_keeps_newest_survives_oldest_dropped(monkeypatch):
         if url == f"{HIST_BASE}/historical/trades":
             trade_page_calls["n"] += 1
             return pages[params.get("cursor")]
+        if url == f"{LIVE_BASE}/series":
+            # category=None here -> the loader resolves KXFOO's category via this
+            # endpoint (one call per CATEGORIES entry); empty listings are fine, the
+            # test below doesn't assert on category, only trade-truncation direction.
+            return {"series": [], "cursor": None}
         raise AssertionError(f"unexpected url {url}")
 
     _install_fake_requests(monkeypatch, responder)
