@@ -16,6 +16,19 @@
   with a concrete data path). Nothing tradeable today; owner decisions filed
   (vendor cost vs free forward capture).
 
+PRE-REGISTERED (maker upper-bound re-price, written before running): re-run
+the two filed negatives' tradeable variants with fees at 25% of the taker
+curve, BOTH LEGS — an explicit UPPER BOUND (assumes 100% fill, zero adverse
+selection). Decision rule, per strategy: net edge ≤ 0 ⇒ the maker path is
+**permanently CLOSED** for it (no fill data can rescue a strategy that loses
+even with free-est-possible execution); net edge > 0 ⇒ stays a candidate
+CONTINGENT on fill calibration (NO trial funded until fill data exists —
+this diagnostic cannot promote anything by itself). Strategies covered:
+(a) longshot fade P2 (iteration 5's tradeable variant, parameters unchanged
+from that registration); (b) post-move reversal fade (iteration 9's exact
+trigger/hold parameters, direction flipped to fade — arithmetic bound already
+implied ≈ +1.2c/trigger; this run just formalizes it). Zero trials either way.
+
 ## [2026-07-12] Factor-health rule + basis_carry demotion round
 
 HONEST FRAMING: this is a governance DECISION on observed OOS degradation,
