@@ -51,10 +51,18 @@ queue position dynamics.
 3. Marriott (SSRN 6583921) proves full reconstruction from free streams is
    feasible; check for released code before writing our own.
 
+## Upper-bound verdicts (2026-07-12, registration 003ded7)
+- Post-move fade: **+1.21c/trigger, t=+8.48, n=18,090** at maker×2 —
+  strongly alive, contingent on fill data. THE quantified case for the LOB
+  investment.
+- Longshot fade P2: +0.77%, t=0.72 — not closed, but the bound itself is
+  ~zero: de-prioritized.
+
 ## Open Questions
 - Fill probability at the touch for 70-95c politics contracts inside 10d of
   close — the tilt's exact habitat.
+- Post-fill adverse drift: how much of the +1.21c/trigger fade bound
+  evaporates conditional on being filled?
+- Capacity: per-trigger fillable size in thin politics/econ books.
 - Does the 2026-07 tier table change Tier-0 formulas or only add discounts?
   (Fetch the PDF when unblocked.)
-- Post-fill adverse drift vs the +1.82c reversal edge: does passive capture
-  survive conditioning on being filled?

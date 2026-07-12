@@ -29,6 +29,18 @@ from that registration); (b) post-move reversal fade (iteration 9's exact
 trigger/hold parameters, direction flipped to fade — arithmetic bound already
 implied ≈ +1.2c/trigger; this run just formalizes it). Zero trials either way.
 
+VERDICTS (`research/diagnostics/maker_upper_bound.py`, same day): **both stay
+open, with very different strength.** (a) longshot fade P2: +0.77%, t=0.72,
+n=1,199 — nominally >0 so not closed, but the UPPER BOUND itself is
+indistinguishable from zero: de-prioritized, do not spend fill-data budget on
+it. (b) post-move fade: **+1.21c/trigger, t=+8.48, n=18,090** (~3.3k
+triggers/yr) — a strongly positive upper bound. The fill-calibration
+investment (own WS capture vs vendor LOB history) now has a quantified
+candidate behind it; the open unknowns are fill probability at the touch,
+post-fill adverse drift (how much of the 1.21c evaporates conditional on
+being filled), and capacity (books are thin — per-trigger size unknown).
+Nothing promotable without that data; no trial burned.
+
 ## [2026-07-12] Factor-health rule + basis_carry demotion round
 
 HONEST FRAMING: this is a governance DECISION on observed OOS degradation,
