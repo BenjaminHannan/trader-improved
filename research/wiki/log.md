@@ -1,5 +1,32 @@
 # autoresearch log
 
+## [2026-07-12] Iteration 10 PRE-REGISTRATION — crypto covariance anchor blend
+
+Motivation on record: crypto cells B>1 everywhere (baseline health FAIL);
+halflife-30 NO-ADOPT identified the mechanism (EWMA projects flat — no
+long-run anchor at h=21, textbook per [[sources/vol-forecast-anchoring-har-garch]]).
+Candidate committed BEFORE any measurement:
+
+- **Shape:** Sigma_fc = w·Sigma_EWMA(hl=90) + (1−w)·Sigma_long, where
+  Sigma_long is the trailing 756-day equal-weight covariance, applied to BOTH
+  factor_covariance and instrument_covariance for the run (config file never
+  modified; scorer override flag, mirroring --ewma-halflife). A convex
+  combination of PSD matrices stays PSD.
+- **w is DERIVED, not tuned:** fit GARCH(1,1) on daily returns of the
+  equal-weight crypto coverage-core index (2016+, the harness's own panel);
+  persistence p̂ = α̂+β̂; w = (1/21)·Σ_{h=1..21} p̂^h — the GARCH-implied
+  average weight on current vol over the 21d evaluation horizon. Whatever
+  number the fit produces IS the candidate; refitting/adjusting after seeing
+  harness results = a new registration.
+- **Adjudication (crypto cells, incumbent = ledger 211638Z conventions,
+  identical panel args n=100/seed=0/min_obs=252/start=2016-01-01):**
+  (1-4) the standard adoption_verdict criteria — no new failures, ≥60% of
+  cells improve |B−1|, MVP horse race candidate lower with p<0.05 (blend is
+  NOT simpler — no leniency), PIT harness green; AND (5) at least one of the
+  crypto random-book cells (f1/f2) ENTERS its band — the candidate exists to
+  fix the baseline-health failure, so it must actually fix part of it.
+  NO-ADOPT if any criterion fails. Zero n_trials impact (risk model).
+
 ## [2026-07-12] autoresearch | Kalshi maker-side execution (fee wall is 4x lower passive)
 - Rounds: 1 (fee schedule + LOB data availability + WS channel spec; kalshi.com
   and SSRN landing rate-limited/403 — secondaries cross-verified)
