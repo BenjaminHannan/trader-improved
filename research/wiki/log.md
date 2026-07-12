@@ -109,6 +109,26 @@ design below measures exactly that):
   (iteration-7 precedent: execution change to an adopted signal, no trial);
   any fail → negative filed. Zero n_trials impact either way.
 
+VERDICT (`tilt_maker_entry_sim.py`, n=984 eligible settled markets, 498
+event clusters, eligibility taken from the PRODUCTION signal function
+directly): **FAIL — Q1 −2.09%/market t=−2.58, Q3 recent-12m −2.65%
+t=−3.69; only Q2 passed (fill rate 54.9%).** Mechanism (the interesting
+part): on FILLED markets maker BEATS baseline +0.78% (price priority pins
+both arms at p_t; the fee discount is real), and dips DO predict losing
+(filled win-rate 73.0% vs 89.4% unfilled) but symmetrically. The failure
+is OPPORTUNITY COST: the best favorites never dip — the maker arm chases
+them at materially worse fallback prices (e.g. 0.82→0.98) or never opens
+(234/984, forfeiting mostly-winners). Production's taker-at-entry design
+is VINDICATED, not merely retained.
+
+**MAKER PROGRAM CLOSE-OUT (one night, existing data, zero trials burned):**
+fees 4x lower passive → upper bounds (fade alive +1.21c, longshot ~0) →
+fill simulation (fade dead: adverse selection −2.44c net) → tilt maker
+entry (dead: never-dipping winners). Conclusion: on Kalshi, for OUR
+strategy shapes, passive execution is structurally dominated — the taker
+fee is the honest price of immediacy. The LOB-data spend is dead; the
+program's residue is the 6.12M-tick cache and reusable fill machinery.
+
 ## [2026-07-12] Factor-health rule + basis_carry demotion round
 
 HONEST FRAMING: this is a governance DECISION on observed OOS degradation,

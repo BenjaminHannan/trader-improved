@@ -4,7 +4,7 @@ title: "Research: Kalshi maker-side execution — the fee wall is 4x lower on th
 created: 2026-07-12
 updated: 2026-07-12
 tags: [research, events, execution, fees]
-status: developing
+status: closed — all maker paths measured dead (fill sim + tilt paired sim, 2026-07-12); taker execution vindicated
 related:
   - "[[sources/kalshi-maker-fees-and-lob-data]]"
   - "[[sources/burgi-deng-whelan-makers-takers]]"
