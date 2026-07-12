@@ -24,6 +24,24 @@ mechanical, symmetric, and not cherry-picked:
   vs forward returns at the factor's rebalance horizon, trailing 24 months
   from the latest obs, clusters = calendar month, vendor-deduped panel.
 
+VERDICT (`factor_health_20260712T032904Z.json`, machinery 109f79e):
+**NO-DEMOTE for either factor — the rule held against my expectation.**
+basis_carry sign-adjusted trailing-24m IC +0.0497 (month-t +2.36, 726d);
+carry_rate_diff +0.111 (t +1.55, 481d). The demotion I anticipated did not
+survive mechanical measurement, for two documented reasons: (1) SIGN
+FORENSICS — the regime-flip narrative above was computed on RAW basis vs
+forward returns; the traded signal is the negated/smoothed construction,
+and adjusting by the registry's recorded accepted sign the edge is intact;
+(2) the crypto sleeve's backtest loss (−0.177 over 7.5y ⇒ t≈−0.5) is
+statistically weak evidence of death. OPEN QUESTIONS filed, not acted on:
+a fresh gate ic-report on the deep lake shows basis_carry train +0.013 /
+OOS −0.083 (sign records disagree across shallow-lake gate_stats, raw-basis
+forensic, and deep-lake re-run — a sign-convention audit is warranted);
+and a P&L-based health rule (trailing factor-attributed net Sharpe, which
+measures what the trailing-IC-weighted engine ACTUALLY trades) is a
+candidate SECOND rule for a future round — if added, BOTH rules get
+reported at every round regardless of which fires (no rule-shopping).
+
 ## [2026-07-11] Iteration 9 PRE-REGISTRATION — Kalshi post-move drift (written before any data contact)
 
 Motivation: the honest headline is zero; the alpha frontier per the burned-trial
