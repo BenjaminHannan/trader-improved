@@ -248,7 +248,17 @@ Sharpe from this engine predating these fixes is untrustworthy.
 −0.005** (gross +0.005), ann vol 0.9%, PSR(>0) 0.494, deflated 0.000, CI
 [−0.60, +0.63] (`backtest_20260712T013448Z`). The gated book — basis_carry
 (crypto, regime-flipped) + rate-differential carry (fx, tiny) — is FLAT
-ZERO at trivial deployed risk. Strategic implications, in order: (1) the
+ZERO at trivial deployed risk.
+
+UPDATE (events sleeve live in the book, 9deb7ec + category remediation):
+**net Sharpe +0.247** (PSR 0.791, deflated 0.000, CI [−0.33, +0.92],
+`backtest_20260712T045301Z`-era report). Per-sleeve: events **+0.423 —
+matching the +0.43 adoption-round walk-forward independently**, ann ret
+6.6%; crypto −0.177 (the regime-flipped fade — demotion stays with the
+pre-registered basis_carry health round); fx +0.05. The book's edge is
+now exactly where the evidence said it was. Known cosmetic: events
+turnover prints 0 (series injected post-optimizer; not in the weights
+frame). Strategic implications, in order: (1) the
 events favorite-tilt (+0.43 walk-forward, the one measured live edge) is
 not in this book — integration is the highest-value move, but NOTE the
 prior ERC-combined measurement (1.29 vs 1.21) predates the allocation
