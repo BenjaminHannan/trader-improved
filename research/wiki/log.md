@@ -29,6 +29,19 @@ Diagnostic (zero trial cost; a trial is funded ONLY if all three pass):
 - Guard: the diagnostic runs only AFTER the in-flight category remediation of
   `event_markets_hist` lands (do not read a half-written vintage).
 
+VERDICT (run after remediation, n=18,090 triggers / 4,062 markets / 1,207
+event clusters): **FAIL on all three — and the effect is REVERSED.** Mean
+signed 3d continuation **−1.82c, t=−12.75**; net of fees −4.27c (t=−29.6);
+liquid half −1.25c (t=−7.2). Kalshi politics/econ markets MEAN-REVERT after
+large 1-day moves — over-reaction, not the sports under-reaction (Angelini
+β=0.63 does not transfer). Consistent −2c/trigger every year 2023-2026. No
+trial burned. The reversal flip side is fee-eaten as a naive taker round-trip
+(fade gross +1.82c vs ~2.45c average double-taker fee ⇒ ~−0.6c net) — same
+shape as the longshot fade (#iteration-5): real anomaly, taker fees eat it.
+FILED as a future hypothesis, not pursued: a MAKER-side fade (limit orders
+inside the post-move spread) would capture the reversion without taker fees,
+but requires fill-probability modeling we have no data for.
+
 ## [2026-07-11] Iteration 8 — Q5 exposures adjudication: NO-ADOPT (0.86pp vs 1.00pp)
 
 Full pre-registered run (equity, 574 ids, 112 eval dates, walk 2021-2026,
