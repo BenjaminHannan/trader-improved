@@ -744,9 +744,13 @@ def run_backtest(data: dict, instruments: pd.Series, cfg: dict | None = None,
     # no optimizer / risk-model path: its P&L comes from event_sleeve_returns (PIT, weekly grid)
     # and its risk enters the book only through the EWMA sleeve covariance + the ``events`` risk
     # cap in sleeve_allocation. Absent the key this branch is skipped -> results bit-identical.
+    # ``events.enabled`` (configs/backtest.yaml, default True when the block is absent) is a
+    # second, independent gate: even a caller that hands in a populated event_markets panel gets
+    # no sleeve once the config has turned it off.
     event_panel = data.get("event_markets")
     risk_caps_cfg = cfg["allocation"].get("risk_caps") or {}
-    if (event_panel is not None and not event_panel.empty
+    events_enabled = bool((cfg.get("events") or {}).get("enabled", True))
+    if (events_enabled and event_panel is not None and not event_panel.empty
             and "events" in risk_caps_cfg):
         price_union = pd.DatetimeIndex(
             sorted(set().union(*[s.index for s in sleeve_net.values()])))

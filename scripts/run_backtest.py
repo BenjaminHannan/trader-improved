@@ -11,9 +11,15 @@ The lake path loads curated datasets into the signal bundle (``prices`` required
 ``funding``/``macro``/``cot`` optional with a warning), derives the instrument→sleeve map
 from the ``instruments`` reference table (falling back to the id-prefix rule), runs the
 engine, writes ``reports/backtest_<UTC>.json`` + ``.txt`` and prints the headline table.
+It also loads the curated ``event_markets`` panel (Kalshi/Polymarket) for the ``events``
+sleeve, config-gated by ``events.enabled`` in configs/backtest.yaml (default on); an
+absent/empty curated dataset degrades to a printed note and a run without the sleeve,
+exactly like the other optional lake datasets (never a crash). The report's per-sleeve
+table then carries ``events`` alongside crypto/fx_etf/... whenever it fired.
 
 The ``--synthetic`` flag is the no-lake smoke path: it builds the conftest GBM bundle
-(with ~3y of warmup history synthesized before ``--start``) and runs the identical engine.
+(with ~3y of warmup history synthesized before ``--start``) and runs the identical engine
+without any lake access, so it never sees an events panel either.
 """
 from __future__ import annotations
 
@@ -32,20 +38,49 @@ from production.core.config import CONFIG_DIR, REPO_ROOT, backtest_config
 # when the script is invoked directly (not under pytest, which adds it automatically).
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
-from production.core.lake import Lake, SIGNAL_BUNDLE_DATASETS, read_signal_bundle
+from production.core.lake import Lake, LakeError, SIGNAL_BUNDLE_DATASETS, read_signal_bundle
 from production.data.cross_check import quarantine_list
 from production.signals.base import sleeve_from_id
 
 _DATASETS = SIGNAL_BUNDLE_DATASETS
 _QUARANTINE_PREVIEW_N = 5
+_EVENTS_DATASET = "event_markets"
+_EVENTS_ASSET_CLASS = "events"
 
 
-def _load_lake_bundle(lake: Lake, start, end) -> dict:
+def _load_event_markets(lake: Lake, start, end, events_enabled: bool = True):
+    """Load the curated Kalshi/Polymarket ``event_markets`` panel for the events sleeve.
+
+    Config-gated (``events.enabled`` in configs/backtest.yaml, default True) and, once
+    enabled, degrades exactly like the optional ``SIGNAL_BUNDLE_DATASETS`` entries (e.g.
+    ``tvl``): an absent or empty curated dataset prints a note and returns ``None`` rather
+    than raising — the lake path never crashes for missing kalshi/events data. Disabling
+    the flag skips the lake read entirely (its own note), so ``events.enabled=false``
+    behaves identically to "no events data ever ingested".
+    """
+    if not events_enabled:
+        print("  note: events sleeve disabled via configs/backtest.yaml "
+              "(events.enabled=false) — skipping")
+        return None
+    try:
+        df = lake.read_curated(_EVENTS_DATASET, _EVENTS_ASSET_CLASS, start=start, end=end)
+    except LakeError:
+        df = None
+    if df is None or df.empty:
+        print(f"  note: optional dataset '{_EVENTS_DATASET}' absent — continuing "
+              "without the events sleeve")
+        return None
+    return df
+
+
+def _load_lake_bundle(lake: Lake, start, end, events_enabled: bool = True) -> dict:
     """Load the signal bundle from the lake, echoing which optional datasets are absent.
 
     ``prices`` is required (a FATAL note if missing); the rest are optional. Bundle-key
     normalization (mcap<-crypto_meta, tvl<-defi_tvl) is handled by
-    ``production.core.lake.read_signal_bundle``.
+    ``production.core.lake.read_signal_bundle``. The ``events`` sleeve's ``event_markets``
+    panel is loaded separately (see ``_load_event_markets``) since, unlike the signal
+    bundle datasets, it is config-gated rather than always-attempted.
     """
     bundle = read_signal_bundle(lake, start=start, end=end)
     for ds in _DATASETS:
@@ -55,6 +90,9 @@ def _load_lake_bundle(lake: Lake, start, end) -> dict:
             print(f"FATAL: no curated 'prices' in lake at {lake.root}", file=sys.stderr)
         else:
             print(f"  note: optional dataset '{ds}' absent — continuing without it")
+    event_panel = _load_event_markets(lake, start, end, events_enabled=events_enabled)
+    if event_panel is not None:
+        bundle["event_markets"] = event_panel
     return bundle
 
 
@@ -253,7 +291,8 @@ def main(argv: list[str] | None = None) -> int:
         lake = None
     else:
         lake = Lake(args.lake_root)
-        data = _load_lake_bundle(lake, args.start, args.end)
+        events_enabled = bool((cfg.get("events") or {}).get("enabled", True))
+        data = _load_lake_bundle(lake, args.start, args.end, events_enabled=events_enabled)
         if "prices" not in data:
             return 2
         instruments = _instrument_map(lake, data["prices"])

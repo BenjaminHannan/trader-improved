@@ -79,4 +79,14 @@ alpha:
   purify_sleeves: [equity, crypto]   # structural sleeves only (N too small for ETF sleeves)
   factor_momentum_gamma: 0.25  # tilt IC weights by trailing single-factor momentum (0.0 = off)
 
+events:
+  enabled: true                 # events (Kalshi/Polymarket prediction-market) sleeve
+                                 # on/off switch, checked by both production/backtest/
+                                 # engine.py (skips the sleeve even if a caller passes an
+                                 # event_markets panel) and scripts/run_backtest.py (skips
+                                 # the lake read). Independent of data availability: an
+                                 # absent/empty curated 'event_markets' dataset always
+                                 # degrades to a printed note and a run without the
+                                 # sleeve, never a crash, regardless of this flag.
+
 report_dir: reports/

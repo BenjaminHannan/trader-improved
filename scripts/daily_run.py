@@ -255,7 +255,8 @@ def main(argv: list[str] | None = None) -> int:
         data, instruments, sectors = _synthetic_bundle(start, end)
         master = build_instrument_master()
     else:
-        data = _load_lake_bundle(lake, args.start, args.end)
+        events_enabled = bool((cfg.get("events") or {}).get("enabled", True))
+        data = _load_lake_bundle(lake, args.start, args.end, events_enabled=events_enabled)
         if "prices" not in data:
             print("FATAL: no curated 'prices' — nothing to trade", file=sys.stderr)
             return 2

@@ -793,6 +793,34 @@ def test_events_absent_key_bit_identical(events_result):
     assert not np.allclose(ev.to_numpy(), r_base_a.total_returns.to_numpy(), atol=1e-12)
 
 
+def test_events_sleeve_in_report_per_sleeve(events_result):
+    """scripts/run_backtest.py's headline table is built from report['per_sleeve']
+    (production/backtest/report.py::_sleeve_table); it iterates sleeve_returns.columns
+    generically, so no per_sleeve-specific events code was needed -- this pins that the
+    report layer actually surfaces the events sleeve end to end, alongside crypto/fx_etf
+    style sleeves, once the engine has added it."""
+    per_sleeve = events_result.report["per_sleeve"]
+    assert "events" in per_sleeve
+    m = per_sleeve["events"]
+    assert set(m) == {"sharpe", "ann_return", "ann_vol", "max_drawdown", "hit_rate", "turnover"}
+    assert np.isfinite(m["ann_return"])
+    assert np.isfinite(m["ann_vol"])
+    # the events sleeve has no optimizer weights_history entry (it is a pure return
+    # stream, not a per-name book) -> turnover defaults to 0.0, not NaN or a crash.
+    assert m["turnover"] == 0.0
+
+
+def test_events_sleeve_disabled_via_config_is_skipped():
+    """cfg['events']['enabled'] = False suppresses the sleeve even though the caller hands
+    the engine a populated event_markets panel -- the config gate (configs/backtest.yaml,
+    threaded through scripts/run_backtest.py too) wins over data presence."""
+    cfg = copy.deepcopy(backtest_config())
+    cfg["events"] = {"enabled": False}
+    result = run_backtest(_events_bundle(), pd.Series(_INSTRUMENTS), cfg=cfg)
+    assert "events" not in result.sleeve_returns.columns
+    assert "events" not in result.report["per_sleeve"]
+
+
 # ================================================== cost overrides wiring (backlog #14)
 def test_run_backtest_reads_lake_cost_overrides(monkeypatch, tmp_path_factory):
     """The engine threads the lake's TCA-calibrated cost_overrides table into the CostModel
