@@ -1,5 +1,29 @@
 # autoresearch log
 
+## [2026-07-12] Factor-health rule + basis_carry demotion round
+
+HONEST FRAMING: this is a governance DECISION on observed OOS degradation,
+not a pre-registered experiment — the trigger evidence (basis_carry IC
+sign-flip: 2024/25/26 = +0.018/+0.019/+0.040 vs the accepted NEGATIVE sign,
+2026 t=+2.5, full-sample ≈0) is already on the record above. What is being
+committed BEFORE implementation is the RULE, so future demotions are
+mechanical, symmetric, and not cherry-picked:
+
+- **Demotion rule (all accepted factors, applied at every health round):**
+  a factor is demoted (new registry status `demoted`: excluded from the
+  traded book — the engine trades `accepted` only — history retained) when
+  its trailing-24-month rank-IC, sign-adjusted to the accepted direction,
+  has month-clustered t ≤ 0. Two years of wrong-or-no sign = the live edge
+  is gone or reversed.
+- **Symmetry:** the rule is measured for EVERY accepted factor in the same
+  round — today that is basis_carry AND carry_rate_diff. No factor is
+  singled out.
+- **Re-admission = a NEW trial** (n_trials increments) with a fresh
+  pre-registration; demotion itself burns nothing.
+- Measurement spec: daily cross-sectional rank-IC of the production signal
+  vs forward returns at the factor's rebalance horizon, trailing 24 months
+  from the latest obs, clusters = calendar month, vendor-deduped panel.
+
 ## [2026-07-11] Iteration 9 PRE-REGISTRATION — Kalshi post-move drift (written before any data contact)
 
 Motivation: the honest headline is zero; the alpha frontier per the burned-trial
