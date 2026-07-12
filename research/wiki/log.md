@@ -87,6 +87,28 @@ resting INSIDE the pre-move price are different specs — unknowable without
 book-depth data, and the conservative bound now argues AGAINST spending on
 it. The owner LOB-data decision is accordingly DOWNGRADED.
 
+PRE-REGISTERED (tilt maker-entry, written before measurement — the
+adverse-selection logic differs here: the tilt holds to SETTLEMENT, so a
+dip-fill is toxic only if pre-settlement dips predict losing; the paired
+design below measures exactly that):
+- Universe: the production tilt's eligibility verbatim (kalshi, politics,
+  yes_price ∈ [0.70,0.95], ≤10 days to close, settled markets).
+- Baseline arm: taker entry at the eligible close p_t, hold to settlement,
+  fee = full taker once at entry (production behavior).
+- Maker arm: rest a YES bid AT p_t from that day's end; fill = first later
+  trade with taker_side=="no" AND yes_price STRICTLY < p_t (same
+  conservative queue-free rule); fee 0.25·taker(p_t). If unfilled within
+  min(3 obs days, close): FALL BACK to taker entry at the then-current
+  close, full taker fee — the arm stays fully invested like the sleeve.
+- Comparison: PAIRED per-market difference (maker-arm net settlement return
+  − baseline net), clustered by event_key.
+- Criteria: (Q1) mean paired improvement > 0 with cluster t ≥ 2.0;
+  (Q2) maker fill rate ≥ 30% (else the improvement rides on a sliver);
+  (Q3) paired improvement point-estimate > 0 in the most recent 12 months
+  of settlements. ALL pass → execution-layer re-spec of the events sleeve
+  (iteration-7 precedent: execution change to an adopted signal, no trial);
+  any fail → negative filed. Zero n_trials impact either way.
+
 ## [2026-07-12] Factor-health rule + basis_carry demotion round
 
 HONEST FRAMING: this is a governance DECISION on observed OOS degradation,
