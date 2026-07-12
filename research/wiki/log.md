@@ -196,11 +196,24 @@ the resulting solver noise as +0.162 (scale-invariant mean/std on a ~0/~0
 series — fixed 223ce1d, NaN-guard + 3 regression tests), and a SECOND bug
 levered the headline onto that noise: `allocation.py`'s ERC fixed point
 treats a near-zero-variance sleeve as risk-free and allocated **99.994% of
-capital to the dead sleeve** (fix in progress). In the DEEP-basis run the
-sleeve genuinely traded (turnover 0.338) and genuinely lost −0.177 — the
-regime-flip losses are real. Every historical headline Sharpe from this
-engine predating these fixes is untrustworthy; re-measure after the ERC fix
-lands.
+capital to the dead sleeve** (fixed b27b834 warm path + b43f1f8 cold
+inverse-vol path — the cold fallback had the identical failure). In the
+DEEP-basis run the sleeve genuinely traded (turnover 0.338) and genuinely
+lost −0.177 — the regime-flip losses are real. Every historical headline
+Sharpe from this engine predating these fixes is untrustworthy.
+
+**HONEST HEADLINE (all three fixes live, 2019-01..2026-07): net Sharpe
+−0.005** (gross +0.005), ann vol 0.9%, PSR(>0) 0.494, deflated 0.000, CI
+[−0.60, +0.63] (`backtest_20260712T013448Z`). The gated book — basis_carry
+(crypto, regime-flipped) + rate-differential carry (fx, tiny) — is FLAT
+ZERO at trivial deployed risk. Strategic implications, in order: (1) the
+events favorite-tilt (+0.43 walk-forward, the one measured live edge) is
+not in this book — integration is the highest-value move, but NOTE the
+prior ERC-combined measurement (1.29 vs 1.21) predates the allocation
+fixes and must be re-measured; (2) equity breadth: nothing has passed the
+alpha gate — iteration-8b (risk-side exposures) is in flight and factor
+re-specs from the forensics backlog are the alpha path; (3) basis_carry
+factor-health round (pre-registered demotion/re-spec decision).
 
 ## [2026-07-10] autoresearch | Kalshi mechanism diagnostics (iteration 5) — both negatives, machine migration
 
