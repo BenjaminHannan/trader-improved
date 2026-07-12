@@ -42,6 +42,23 @@ measures what the trailing-IC-weighted engine ACTUALLY trades) is a
 candidate SECOND rule for a future round — if added, BOTH rules get
 reported at every round regardless of which fires (no rule-shopping).
 
+SIGN-CONVENTION AUDIT (same day, closes open question #1): per-year
+production-signal IC vs the raw-basis forensic, one table (scratchpad
+`sign_convention_audit.py`): signal IC by year = 2020 **+0.046**, 2021
+**+0.052**, 2022 +0.001, 2023 −0.013, 2024 +0.001, 2025 **−0.048**, 2026
+**−0.062**. The conventions reconcile (mirror images in every year with
+signal; disagreement years are |IC|<0.02 noise). The REAL finding: the
+factor's direction is ERA-FLIPPING — positive-IC era 2020-21, dead
+2022-24, negative-IC era 2025-26. The gate (shallow lake ≈ one era)
+accepted the negative direction; the trailing-24m health window sits
+entirely inside the era where that direction works, so "healthy" — but a
+trailing-IC-weighted engine trading an era-flipping factor whipsaws
+across regime boundaries, which IS the −0.177 sleeve result. Conclusion:
+the 24m-IC health rule is structurally blind to era-instability; the
+P&L-based second rule above is now MECHANISM-MOTIVATED, not just
+plausible. No ad-hoc action on basis_carry (this round's rule was applied
+and said keep; the next rule must be committed before it bites).
+
 ## [2026-07-11] Iteration 9 PRE-REGISTRATION — Kalshi post-move drift (written before any data contact)
 
 Motivation: the honest headline is zero; the alpha frontier per the burned-trial
