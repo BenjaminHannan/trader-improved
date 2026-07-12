@@ -33,6 +33,25 @@ persistence p̂=0.9846 on 3,843 days of the 5-id crypto core index (ann vol
 85.5%) ⇒ **w = 0.8465** (anchor weight 0.1535). This number IS the
 candidate; no adjustment permitted after seeing harness results.
 
+VERDICT (`risk_harness_20260712T130352Z.json` vs incumbent 211638Z):
+**NO-ADOPT — criterion 5 fails decisively.** Every cell improved |B−1| in
+the right direction but by ~1% of the distance (f1 1.207→1.200, f2
+1.701→1.695, f3 1.189→1.181, f4 1.411→1.409); nothing entered band.
+PROCEDURAL NOTE: the MVP horse race was NOT run — the criteria are
+conjunctive and criterion 5 is fully determined by the two committed
+ledgers, so the race (hours of compute) cannot change the verdict; noted
+here rather than silently skipped. LESSON, on the record: high fitted
+persistence (0.985) makes the GARCH-implied anchor weight tiny, and a 15%
+anchor moves decade-scale bias statistics by ~1% — the registered shape
+was directionally right and magnitudinally hopeless. Combined with the
+halflife-30 NO-ADOPT, the evidence now points AWAY from the entire
+EWMA-parameter/reweighting class: B∈[1.2,1.7] under-forecast on the
+crypto sleeve is likely STRUCTURAL — candidates worth researching next
+round: the specific-risk floor/shrinkage on 5-id panels, the factor/
+specific split degenerating at N=5, or the coverage-core panel itself
+(survivor tilt of the 98% filter). A third same-class tweak is NOT worth
+a registration.
+
 ## [2026-07-12] autoresearch | Kalshi maker-side execution (fee wall is 4x lower passive)
 - Rounds: 1 (fee schedule + LOB data availability + WS channel spec; kalshi.com
   and SSRN landing rate-limited/403 — secondaries cross-verified)
