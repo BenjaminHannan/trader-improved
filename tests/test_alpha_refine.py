@@ -463,6 +463,80 @@ def test_record_and_save_roundtrip(tmp_path):
          "rates_etf", "intl_etf", "sector_etf"}
 
 
+# ======================================================= registry demote
+def test_demote_flips_status_and_stores_evidence(tmp_path):
+    src = CONFIG_DIR / "factors.yaml"
+    dst = tmp_path / "factors.yaml"
+    shutil.copy(src, dst)
+
+    reg = FactorRegistry(dst)
+    # basis_carry is accepted in the live fixture; demote it with representative
+    # factor-health evidence.
+    evidence = {"mean_sign_adjusted_ic": -0.001, "month_clustered_t": -0.3,
+               "n_days": 500, "window_start": "2024-07-10", "window_end": "2026-07-10"}
+    pre_gate_stats = dict(reg.cfg["factors"]["basis_carry"]["gate_stats"])
+
+    reg.demote("basis_carry", evidence)
+
+    assert reg.cfg["factors"]["basis_carry"]["status"] == "demoted"
+    assert reg.cfg["factors"]["basis_carry"]["health"] == evidence
+    # gate_stats (the original promotion evidence) is untouched by demotion.
+    assert reg.cfg["factors"]["basis_carry"]["gate_stats"] == pre_gate_stats
+
+
+def test_demote_excludes_factor_from_accepted_view(tmp_path):
+    src = CONFIG_DIR / "factors.yaml"
+    dst = tmp_path / "factors.yaml"
+    shutil.copy(src, dst)
+
+    reg = FactorRegistry(dst)
+    assert "basis_carry" in reg.factors(status="accepted")
+
+    reg.demote("basis_carry", {"month_clustered_t": -1.0})
+
+    assert "basis_carry" not in reg.factors(status="accepted")
+    assert reg.factors(status="demoted") == {"basis_carry": reg.cfg["factors"]["basis_carry"]}
+
+
+def test_demote_does_not_touch_trial_ledger(tmp_path):
+    src = CONFIG_DIR / "factors.yaml"
+    dst = tmp_path / "factors.yaml"
+    shutil.copy(src, dst)
+
+    reg = FactorRegistry(dst)
+    n0 = reg.n_trials
+
+    reg.demote("basis_carry", {"month_clustered_t": -1.0})
+
+    assert reg.n_trials == n0                    # demotion burns no trial
+
+
+def test_demote_unknown_factor_raises(registry):
+    with pytest.raises(KeyError):
+        registry.demote("not_a_real_factor", {})
+
+
+def test_demote_save_roundtrip(tmp_path):
+    src = CONFIG_DIR / "factors.yaml"
+    dst = tmp_path / "factors.yaml"
+    shutil.copy(src, dst)
+
+    reg = FactorRegistry(dst)
+    n0 = reg.n_trials
+    evidence = {"month_clustered_t": -0.42, "n_days": 480}
+    reg.demote("basis_carry", evidence)
+    reg.save()
+
+    reloaded = yaml.safe_load(open(dst))
+    assert reloaded["factors"]["basis_carry"]["status"] == "demoted"
+    assert reloaded["factors"]["basis_carry"]["health"] == evidence
+    assert reloaded["n_trials"] == n0             # save roundtrip preserves the ledger too
+    # unrelated factors untouched
+    src_reg = yaml.safe_load(open(src))
+    for other in ("carry_rate_diff", "carry_funding"):
+        assert reloaded["factors"][other]["status"] == src_reg["factors"][other]["status"]
+
+
 def test_signal_class_dotted_path_matches_yaml(registry):
     # do NOT import the signal (written in parallel); just assert the registry exposes the
     # resolver and reads the dotted path from yaml without touching production.signals.

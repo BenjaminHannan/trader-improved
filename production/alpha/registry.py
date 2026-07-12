@@ -124,6 +124,31 @@ class FactorRegistry:
         spec["gate_stats"] = asdict(verdict.stats)
         self.cfg["n_trials"] = int(self.cfg.get("n_trials", 0)) + 1
 
+    # ----------------------------------------------------------------- demote
+    def demote(self, name: str, evidence: dict) -> None:
+        """Set status -> ``demoted``, store health evidence, bump nothing.
+
+        Committed rule (research/wiki/log.md, 2026-07-12 "Factor-health rule + basis_carry
+        demotion round"): trailing-24-month sign-adjusted rank-IC with month-clustered
+        t <= 0 demotes a live factor. ``_select_factors`` in
+        ``production/backtest/engine.py`` trades ``status == "accepted"`` only, so a
+        demoted factor is automatically excluded from the traded book the next time the
+        registry is loaded — no other code path needs to change.
+
+        Unlike :meth:`record`, this does NOT touch ``n_trials``: demotion is a governance
+        action on an already-spent trial, not a new one. Re-admission of a demoted factor
+        is a fresh pre-registration and goes back through :meth:`gate` / :meth:`record`,
+        which is where the ledger bump belongs. ``gate_stats`` (the original promotion
+        evidence) is left untouched — the demotion evidence is stored separately under
+        ``spec["health"]`` so both the original acceptance case and the reason it was
+        pulled remain on the record.
+        """
+        if name not in self.cfg["factors"]:
+            raise KeyError(f"unknown factor {name!r}")
+        spec = self.cfg["factors"][name]
+        spec["status"] = "demoted"
+        spec["health"] = dict(evidence)
+
     def save(self, path: str | Path | None = None) -> None:
         """Write the (possibly mutated) config back to yaml, preserving key order."""
         out = Path(path) if path is not None else self.path
