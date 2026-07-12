@@ -39,6 +39,7 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[concepts/ewma-shrinkage-combination]]
 
 ## Sources
+- [[sources/vol-forecast-anchoring-har-garch]]
 - [[sources/kalshi-maker-fees-and-lob-data]]
 - [[sources/ledoit-wolf-2003-honey]]
 - [[sources/bailey-cscv-pbo-2015]] — CSCV/PBO: hold-out is the weakest OOS scheme
