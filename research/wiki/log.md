@@ -71,6 +71,22 @@ simulate the post-move fade with a PASSIVE entry against the tick tape.
   Any fail → negative filed, zero trials. Adverse selection is inherently
   measured: the edge is computed ONLY on triggers whose resting order filled.
 
+VERDICT (`kalshi_maker_fill_sim.py` on 6.12M extracted ticks, trigger
+fidelity asserted vs the original diagnostic): **FAIL — adverse selection
+eats the entire edge.** Q1 fill rate 74.85% (PASS, capacity is not the
+problem); Q2 filled-subset net **−2.44c t=−11.4** (pre-fee −1.03c); Q3
+liquid half −2.00c t=−8.0. Mean days-to-fill 0.77. The mechanism, measured:
+a passive fade fills only when the move CONTINUES through the resting level
+— the +1.82c unconditional reversal edge is concentrated in exactly the
+triggers where a passive order never fills (~2.85c adverse-selection cost vs
+the unconditional gross). The post-move anomaly is real but unharvestable
+BOTH ways: aggressively (taker fees, iteration 9) and passively (adverse
+selection, this round). Zero trials burned across the entire arc. NOTE for
+any future revisit (a NEW registration): at-level fills (queue data) or
+resting INSIDE the pre-move price are different specs — unknowable without
+book-depth data, and the conservative bound now argues AGAINST spending on
+it. The owner LOB-data decision is accordingly DOWNGRADED.
+
 ## [2026-07-12] Factor-health rule + basis_carry demotion round
 
 HONEST FRAMING: this is a governance DECISION on observed OOS degradation,

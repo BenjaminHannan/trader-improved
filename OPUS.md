@@ -85,9 +85,9 @@ orchestration, fill-wait-time-with-work, token-efficiency practices).
 2. Daily nowcast archiver scheduled task (schtasks blocked for agents).
 3. VPN/egress if funding-rate history ever matters (bybit geo-block).
 4. Polymarket data source decision if cross-venue research is wanted.
-5. Kalshi LOB data decision — NOW QUANTIFIED: the post-move maker-side fade
-   upper-bounds at +1.21c/trigger (t=+8.5, ~3.3k triggers/yr) and needs fill
-   data to promote. Options: vendor history (lycheedata, cost unknown) for
-   immediate calibration, and/or an always-on WS capture daemon
-   (orderbook_delta + resnapshot-on-gap; needs a Kalshi API key + scheduled
-   task — both owner actions). See research-kalshi-maker-execution.
+5. Kalshi LOB data decision — DOWNGRADED (2026-07-12): the maker-fill
+   simulation on our own 6.12M-tick extraction measured the post-move fade's
+   filled subset at −2.44c net (adverse selection eats the +1.21c upper
+   bound). The quantified case for vendor depth data is gone; only revisit
+   if a future registration needs queue/at-level fill detail. See
+   research-kalshi-maker-execution + the log verdict.
