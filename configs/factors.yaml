@@ -1,67 +1,195 @@
-# Factor registry — every factor ever tested lives here forever.
-# status: candidate | accepted | rejected. Gate stats are recorded when the gate runs.
-# n_trials for the deflated Sharpe = count of factors ever moved past candidate
-# (i.e. everything in this file with a recorded gate attempt) — the multiple-testing
-# count is part of the config, not a guess.
-
 gate:
   train_ic_tstat_min: 2.0
   oos_ic_abs_min: 0.005
-  oos_fraction: 0.20          # last 20% of training span is the validation slice
-  min_decay_halflife_days: 5  # >= weekly rebalance interval
+  oos_fraction: 0.2
+  min_decay_halflife_days: 5
   require_net_positive_validation: true
-
 factors:
   mom_12_1:
     signal: production.signals.momentum.Momentum12m1m
-    sleeves: [equity, crypto, fx_etf, commodity_etf]
+    sleeves:
+    - equity
+    - crypto
+    - fx_etf
+    - commodity_etf
+    - rates_etf
+    - intl_etf
+    - sector_etf
     horizon_days: 21
     min_history_days: 273
-    status: candidate
-    gate_stats: {}
+    status: rejected
+    gate_stats:
+      train_ic: 0.010967173657804492
+      train_tstat: 2.3164217004177137
+      oos_ic: 0.04676581403504967
+      decay_halflife_days: .inf
+      net_validation_return: -0.663954208655304
+      n_dates: 3254
+      val_sharpe: -0.39958974623844773
   str_reversal_1m:
     signal: production.signals.momentum.ShortTermReversal1m
-    sleeves: [equity, crypto]
+    sleeves:
+    - equity
+    - crypto
+    - intl_etf
+    - sector_etf
     horizon_days: 5
     min_history_days: 21
-    status: candidate
-    gate_stats: {}
+    status: rejected
+    gate_stats:
+      train_ic: 0.00652003624883215
+      train_tstat: 1.45629386325601
+      oos_ic: 0.012635523026628554
+      decay_halflife_days: .inf
+      net_validation_return: -0.7021577097193851
+      n_dates: 3511
+      val_sharpe: -0.5700076722552252
   low_vol:
     signal: production.signals.vol.LowVolatility
-    sleeves: [equity, crypto]
+    sleeves:
+    - equity
+    - crypto
     horizon_days: 21
     min_history_days: 63
-    status: candidate
-    gate_stats: {}
+    status: rejected
+    gate_stats:
+      train_ic: 0.052409693131587845
+      train_tstat: 10.14170373746282
+      oos_ic: 0.08229915008567021
+      decay_halflife_days: .inf
+      net_validation_return: -12.91180732773075
+      n_dates: 3463
+      val_sharpe: -4.892648807556411
   carry_funding:
     signal: production.signals.carry.FundingCarry
-    sleeves: [crypto]
+    sleeves:
+    - crypto
     horizon_days: 5
     min_history_days: 7
-    status: candidate
-    gate_stats: {}
+    status: rejected
+    gate_stats:
+      train_ic: 0.03743929648695923
+      train_tstat: 5.1356235928534515
+      oos_ic: 0.06024980287253544
+      decay_halflife_days: .inf
+      net_validation_return: -0.10341899898591991
+      n_dates: 2018
+      val_sharpe: -0.26927945486051064
   carry_rate_diff:
     signal: production.signals.carry.RateDifferentialCarry
-    sleeves: [fx_etf]
+    sleeves:
+    - fx_etf
     horizon_days: 21
     min_history_days: 21
-    status: candidate
-    gate_stats: {}
+    status: accepted
+    gate_stats:
+      train_ic: 0.038926005700513445
+      train_tstat: 3.766117144836945
+      oos_ic: 0.06757455205187092
+      decay_halflife_days: .inf
+      net_validation_return: 0.002348324546952045
+      n_dates: 2614
+      val_sharpe: 0.019951901174925034
+  basis_carry:
+    signal: production.signals.carry.BasisCarry
+    sleeves:
+    - crypto
+    horizon_days: 5
+    min_history_days: 7
+    status: accepted
+    gate_stats:
+      train_ic: -0.01460959359962737
+      train_tstat: -2.0639375085223217
+      oos_ic: -0.03517447918223583
+      decay_halflife_days: .inf
+      net_validation_return: 0.12966291675446892
+      n_dates: 1738
+      val_sharpe: 0.25883703923736134
   tsmom:
     signal: production.signals.momentum.TimeSeriesMomentum
-    sleeves: [fx_etf, commodity_etf]
+    sleeves:
+    - fx_etf
+    - commodity_etf
+    - rates_etf
+    - intl_etf
     horizon_days: 21
     min_history_days: 252
-    status: candidate
-    gate_stats: {}
+    status: rejected
+    gate_stats:
+      train_ic: 0.004040913865163584
+      train_tstat: 0.6054110910647512
+      oos_ic: 0.046918164171736845
+      decay_halflife_days: .inf
+      net_validation_return: 0.3509545200652416
+      n_dates: 2459
+      val_sharpe: 0.6734646275843648
+  carry_curve:
+    signal: production.signals.carry.CurveCarry
+    sleeves:
+    - rates_etf
+    horizon_days: 21
+    min_history_days: 21
+    status: rejected
+    gate_stats:
+      train_ic: 0.016307607689233068
+      train_tstat: 1.7850537516553928
+      oos_ic: -0.03397917739920552
+      decay_halflife_days: .inf
+      net_validation_return: -0.002788583743343541
+      n_dates: 2619
+      val_sharpe: -0.10603536379633899
   cot_positioning:
     signal: production.signals.positioning.CotPositioning
-    sleeves: [fx_etf, commodity_etf]
+    sleeves:
+    - fx_etf
+    - commodity_etf
     horizon_days: 21
     min_history_days: 156
+    status: rejected
+    gate_stats:
+      train_ic: 0.04976493009712985
+      train_tstat: 6.418551746951989
+      oos_ic: -0.012823297970261684
+      decay_halflife_days: .inf
+      net_validation_return: -0.015881536037012728
+      n_dates: 2382
+      val_sharpe: -0.01907363639173972
+  mcap_tvl:
+    signal: production.signals.value.CryptoMcapTvl
+    sleeves:
+    - crypto
+    horizon_days: 21
+    min_history_days: 30
     status: candidate
     gate_stats: {}
-
-# Multiple-testing ledger: incremented every time a factor is put through the gate,
-# never decremented. Feeds n_trials of the deflated Sharpe ratio.
-n_trials: 7
+  earnings_yield:
+    signal: production.signals.value.EarningsYield
+    sleeves:
+    - equity
+    horizon_days: 21
+    min_history_days: 63
+    status: rejected
+    gate_stats:
+      train_ic: -0.007651483150657011
+      train_tstat: -2.629652827168163
+      oos_ic: 0.009676939665676376
+      decay_halflife_days: .inf
+      net_validation_return: -0.21355871767602747
+      n_dates: 2421
+      val_sharpe: -1.286212836040139
+  pead:
+    signal: production.signals.value.PostEarningsDrift
+    sleeves:
+    - equity
+    horizon_days: 21
+    min_history_days: 63
+    status: rejected
+    gate_stats:
+      train_ic: 0.004190236192824503
+      train_tstat: 1.3730297222592296
+      oos_ic: 0.03576733976033258
+      decay_halflife_days: .inf
+      net_validation_return: 0.09123719789962716
+      n_dates: 2354
+      val_sharpe: 0.5147030138184474
+n_trials: 24

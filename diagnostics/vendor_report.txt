@@ -1,0 +1,86 @@
+========================================================================
+trader-improved vendor diagnostics
+generated: 2026-07-06T23:02:50.431622+00:00
+paste this file when a Stage-1 ingest loader fails.
+========================================================================
+
+### yfinance
+status: OK
+type=DataFrame
+shape=(5, 5)
+columns=[('Close', 'AAPL'), ('High', 'AAPL'), ('Low', 'AAPL'), ('Open', 'AAPL'), ('Volume', 'AAPL')]
+column_levels=2 names=['Price', 'Ticker']
+index=[Timestamp('2026-06-29 00:00:00'), Timestamp('2026-06-30 00:00:00'), Timestamp('2026-07-01 00:00:00')]
+first_2_rows=Price            Close        High         Low        Open    Volume
+Ticker            AAPL        AAPL        AAPL        AAPL      AAPL
+Date                                                                
+2026-06-29  281.739990  288.369995  279.850006  286.730011  66427000
+2026-06-30  289.359985  289.940002  280.700012  281.170013  65100200
+
+### ccxt_funding[bybit]
+status: OK
+type=list
+len=3
+first_2=[{'info': {'symbol': 'BTCUSDT', 'fundingRate': '0.00005565', 'fundingRateTimestamp': '1783296000000'}, 'symbol': 'BTC/USDT:USDT', 'fundingRate': 5.565e-05, 'timestamp': 1783296000000, 'datetime': '2026-07-06T00:00:00.000Z'}, {'info': {'symbol': 'BTCUSDT', 'fundingRate': '-0.00000755', 'fundingRateTimestamp': '1783324800000'}, 'symbol': 'BTC/USDT:USDT', 'fundingRate': -7.55e-06, 'timestamp': 1783324800000, 'datetime': '2026-07-06T08:00:00.000Z'}]
+
+### ccxt_funding[okx]
+status: OK
+type=list
+len=3
+first_2=[{'info': {'formulaType': 'withRate', 'fundingRate': '0.0000617667680351', 'fundingTime': '1783296000000', 'instId': 'BTC-USDT-SWAP', 'instType': 'SWAP', 'method': 'current_period', 'realizedRate': '0.0000617667680351'}, 'symbol': 'BTC/USDT:USDT', 'fundingRate': 6.17667680351e-05, 'timestamp': 1783296000000, 'datetime': '2026-07-06T00:00:00.000Z'}, {'info': {'formulaType': 'withRate', 'fundingRate': '0.000098247928749', 'fundingTime': '1783324800000', 'instId': 'BTC-USDT-SWAP', 'instType': 'SWAP', 'method': 'current_period', 'realizedRate': '0.000098247928749'}, 'symbol': 'BTC/USDT:USDT', 'fundingRate': 9.8247928749e-05, 'timestamp': 1783324800000, 'datetime': '2026-07-06T08:00:00.000Z'}]
+
+### ccxt_funding[kraken]
+status: FAIL
+exception: NotSupported('kraken fetchFundingRateHistory() is not supported yet')
+
+### frankfurter
+status: OK
+type=dict
+keys=['amount', 'base', 'start_date', 'end_date', 'rates']
+first_2_items=[('amount', 1.0), ('base', 'USD')]
+
+### fred
+status: OK
+type=dict
+keys=['mode', 'head']
+first_2_items=[('mode', 'fredgraph(no FRED_API_KEY set — no vintages)'), ('head', 'observation_date,DGS3MO\n1981-09-01,17.01\n1981-09-02,16.65\n1981-09-03,16.96\n1981-09-04,16.64\n1981-09-07,\n1981-09-08,16.54\n1981-09-09,16.39\n1981-09-10,15.90\n1981-09-11,15.76\n1981-09-14,15.27\n1981-09-15,15.16\n1981-09-16,15.10\n1981-09-17,15.18\n1981-09-18,15.07\n1981-09-21,14.98\n1981-09-22,15.51\n1981-09-23,14.94\n1981-09-24,14.94\n1981-09-25,15.02\n1981-09-28,14.82\n1981-09-29,14.86\n1981-09-30,15.05\n1981-10')]
+
+### french
+status: OK
+type=dict
+keys=['zip_member', 'csv_head']
+first_2_items=[('zip_member', 'F-F_Research_Data_Factors_daily.csv'), ('csv_head', 'This file was created by using the 202605 CRSP database.\r\nThe Tbill return is the simple daily rate that, over the number of trading days\r\ncompounds to 1-month TBill rate. The 1-month TBill rate data until 202405 are from Ibbotson Associates. Starting from 202406, the 1-month TBill rate is from ICE BofA US 1-Month Treasury Bill Index.\r\n\r\n,Mkt-RF,SMB,HML,RF\r\n19260701,    0.09,   -0.25,   -0.27,    ')]
+
+### cftc
+status: OK
+type=list
+len=2
+first_2=[{'id': '220913001602F', 'market_and_exchange_names': 'WHEAT-SRW - CHICAGO BOARD OF TRADE', 'report_date_as_yyyy_mm_dd': '2022-09-13T00:00:00.000', 'yyyy_report_week_ww': '2022 Report Week 37', 'contract_market_name': 'WHEAT-SRW', 'cftc_contract_market_code': '001602', 'cftc_market_code': 'CBT ', 'cftc_region_code': 'CHI', 'cftc_commodity_code': '001 ', 'commodity_name': 'WHEAT', 'open_interest_all': '287046', 'noncomm_positions_long_all': '88091', 'noncomm_positions_short_all': '96219', 'noncomm_postions_spread_all': '51534', 'comm_positions_long_all': '119219', 'comm_positions_short_all': '106242', 'tot_rept_positions_long_all': '258844', 'tot_rept_positions_short': '253995', 'nonrept_positions_long_all': '28202', 'nonrept_positions_short_all': '33051', 'open_interest_old': '234947', 'noncomm_positions_long_old': '73797', 'noncomm_positions_short_old': '89902', 'noncomm_positions_spread': '32483', 'comm_positions_long_old': '104111', 'comm_positions_short_old': '86561', 'tot_rept_positions_long_old': '210391', 'tot_rept_positions_short_1': '208946', 'nonrept_positions_long_old': '24556', 'nonrept_positions_short_old': '26001', 'open_interest_other': '52099', 'noncomm_positions_long_other': '24608', 'noncomm_positions_short_other': '16631', 'noncomm_positions_spread_1': '8737', 'comm_positions_long_other': '15108', 'comm_positions_short_other': '19681', 'tot_rept_positions_long_other': '48453', 'tot_rept_positions_short_2': '45049', 'nonrept_positions_long_other': '3646', 'nonrept_positions_short_other': '7050', 'change_in_open_interest_all': '-2283', 'change_in_noncomm_long_all': '-520', 'change_in_noncomm_short_all': '-2151', 'change_in_noncomm_spead_all': '1250', 'change_in_comm_long_all': '-2046', 'change_in_comm_short_all': '-1346', 'change_in_tot_rept_long_all': '-1316', 'change_in_tot_rept_short': '-2247', 'change_in_nonrept_long_all': '-967', 'change_in_nonrept_short_all': '-36', 'pct_of_open_interest_all': '100.0', 'pct_of_oi_noncomm_long_all': '30.7', 'pct_of_oi_noncomm_short_all': '33.5', 'pct_of_oi_n... [+7877 chars]
+
+### kalshi
+status: FAIL
+exception: HTTPError('400 Client Error: Bad Request for url: https://api.elections.kalshi.com/trade-api/v2/markets?limit=2&status=active')
+
+### polymarket
+status: OK
+type=list
+len=2
+first_2=[{'id': '2687280', 'question': 'McDonald’s in Cuba announced in 2026?', 'conditionId': '0x148173ac99aff6ec9dd6ad887799c16b6b606cdc5289e3fe658712be276cf366', 'slug': 'mcdonalds-in-cuba-announced-in-2026-20260626010407076', 'resolutionSource': '', 'endDate': '2026-12-31T23:59:00Z', 'liquidity': '12706.4834', 'startDate': '2026-06-26T01:06:49.983574Z', 'image': 'https://polymarket-upload.s3.us-east-2.amazonaws.com/will-mcdonalds-announce-opening-a-restaurant-in-cuba-in-2026-20260625152012615-4DmwfO76DmMG.jpg', 'icon': 'https://polymarket-upload.s3.us-east-2.amazonaws.com/will-mcdonalds-announce-opening-a-restaurant-in-cuba-in-2026-20260625152012615-4DmwfO76DmMG.jpg', 'description': 'This market will resolve to "Yes" if McDonald’s Corporation, or a McDonald’s franchisee or representative authorized to open or operate a McDonald’s restaurant in Cuba, announces that it will open or has opened any McDonald’s restaurant in Cuba, or if such an opening is otherwise confirmed, by December 31, 2026, 11:59 PM ET. Otherwise, this market will resolve to "No".\n\nAn official announcement made within this market’s timeframe will qualify for a "Yes" resolution regardless of whether an actual McDonald’s restaurant opening subsequently takes place within the timeframe.\n\nAny opening of a McDonald’s restaurant in Cuba will qualify regardless of its exact location.\n\nAnnouncements that do not clearly commit to opening a McDonald’s restaurant, such as general business expansion statements, exploratory comments, or conditional announcements, will not count. Unlicensed restaurants, imitation restaurants, or other businesses using McDonald’s branding without authorization from McDonald’s Corporation will not qualify.\n\nThe resolution source will be official statements from McDonald’s Corporation or its authorized representatives; however, a consensus of credible reporting will also be used.', 'outcomes': '["Yes", "No"]', 'outcomePrices': '["0.07", "0.93"]', 'volume': '999.9066190000001', 'active': True, 'closed': False, 'marketMakerAdd... [+12571 chars]
+
+### coingecko
+status: OK
+type=list
+len=2
+first_2=[{'id': 'bitcoin', 'symbol': 'btc', 'name': 'Bitcoin', 'image': 'https://coin-images.coingecko.com/coins/images/1/large/bitcoin.png?1696501400', 'current_price': 64219, 'market_cap': 1287749766941, 'market_cap_rank': 1, 'fully_diluted_valuation': 1287749766941, 'total_volume': 36954988193, 'high_24h': 64387, 'low_24h': 61339, 'price_change_24h': 491.26, 'price_change_percentage_24h': 0.77088, 'market_cap_change_24h': 10086221652, 'market_cap_change_percentage_24h': 0.78943, 'circulating_supply': 20052971.0, 'total_supply': 20052971.0, 'max_supply': 21000000.0, 'ath': 126080, 'ath_change_percentage': -49.06502, 'ath_date': '2025-10-06T18:57:42.558Z', 'atl': 67.81, 'atl_change_percentage': 94605.37837, 'atl_date': '2013-07-06T00:00:00.000Z', 'roi': None, 'last_updated': '2026-07-06T23:03:21.933Z'}, {'id': 'ethereum', 'symbol': 'eth', 'name': 'Ethereum', 'image': 'https://coin-images.coingecko.com/coins/images/279/large/ethereum.png?1696501628', 'current_price': 1805.77, 'market_cap': 217926184510, 'market_cap_rank': 2, 'fully_diluted_valuation': 217926184510, 'total_volume': 16481633523, 'high_24h': 1819.88, 'low_24h': 1732.1, 'price_change_24h': 16.22, 'price_change_percentage_24h': 0.90653, 'market_cap_change_24h': 2028840019, 'market_cap_change_percentage_24h': 0.93972, 'circulating_supply': 120683199.9398139, 'total_supply': 120683199.9398139, 'max_supply': None, 'ath': 4946.05, 'ath_change_percentage': -63.49058, 'ath_date': '2025-08-24T19:21:03.333Z', 'atl': 0.432979, 'atl_change_percentage': 416958.16901, 'atl_date': '2015-10-20T00:00:00.000Z', 'roi': {'times': 36.59111540966587, 'currency': 'btc', 'percentage': 3659.1115409665867}, 'last_updated': '2026-07-06T23:03:22.256Z'}]
+
+### defillama
+status: OK
+type=list
+len=2
+first_2=[{'gecko_id': 'corn-3', 'tvl': 0, 'tokenSymbol': 'CORN', 'cmcId': '36164', 'name': 'Corn', 'chainId': 21000000}, {'gecko_id': 'harmony', 'tvl': 208461.86241716496, 'tokenSymbol': 'ONE', 'cmcId': '3945', 'name': 'Harmony', 'chainId': 1666600000}]
+
+### edgar
+status: OK
+type=dict
+keys=['count', 'sample']
+first_2_items=[('count', 10407), ('sample', {'0': {'cik_str': 1045810, 'ticker': 'NVDA', 'title': 'NVIDIA CORP'}, '1': {'cik_str': 320193, 'ticker': 'AAPL', 'title': 'Apple Inc.'}})]

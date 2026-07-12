@@ -74,3 +74,51 @@ def month_starts(grid: pd.DatetimeIndex) -> pd.DatetimeIndex:
     """First grid date of each calendar month — the monthly re-estimation points."""
     s = pd.Series(grid, index=grid)
     return pd.DatetimeIndex(s.groupby([grid.year, grid.month], sort=False).first().values)
+
+
+def twice_weekly_grid(start, end) -> pd.DatetimeIndex:
+    """Twice-weekly NYSE grid: the weekly grid PLUS the trading day closest to each Monday.
+
+    A middle rebalance step between weekly and daily (the crypto sleeve uses it — 30bp floors
+    make a full daily cadence marginal at v1 alpha strength). Monday is normally a trading day;
+    on a Monday holiday the nearest NYSE trading day is used (the following Tuesday, or the
+    prior Friday if it is closer). Dedup-unioned with the weekly grid, so a Monday that already
+    coincides with a weekly grid date collapses to one entry.
+    """
+    weekly = rebalance_grid(start, end, "weekly")
+    days = trading_days("nyse", start, end)
+    if len(days) == 0:
+        return weekly
+    mondays = pd.date_range(pd.Timestamp(start), pd.Timestamp(end), freq="W-MON")
+    extra = []
+    for m in mondays:
+        pos = int(days.searchsorted(m))
+        cand = []
+        if pos < len(days):
+            cand.append(days[pos])
+        if pos > 0:
+            cand.append(days[pos - 1])
+        if cand:
+            extra.append(min(cand, key=lambda d: abs((d - m).days)))
+    grid = weekly.union(pd.DatetimeIndex(extra))
+    return pd.DatetimeIndex(grid.sort_values())
+
+
+def offset_grid(grid: pd.DatetimeIndex, offset_days: int,
+                calendar: str = "nyse") -> pd.DatetimeIndex:
+    """Shift each grid date forward by ``offset_days`` TRADING days on ``calendar``.
+
+    Used to build the tranche decision grids (offsets 0..K-1). Dates whose shifted position
+    would fall beyond the calendar's available range are dropped (clipped at the end).
+    ``offset_days == 0`` returns the grid unchanged (a bit-identical passthrough).
+    """
+    grid = pd.DatetimeIndex(grid)
+    if len(grid) == 0 or offset_days == 0:
+        return grid
+    lo = pd.Timestamp(grid.min())
+    hi = pd.Timestamp(grid.max()) + pd.Timedelta(days=offset_days * 4 + 10)
+    cal = trading_days(calendar, lo, hi)
+    pos = cal.searchsorted(grid)
+    new_pos = pos + offset_days
+    valid = new_pos < len(cal)
+    return pd.DatetimeIndex(cal[new_pos[valid]])

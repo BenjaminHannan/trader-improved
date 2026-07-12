@@ -14,7 +14,8 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = REPO_ROOT / "configs"
 
-SLEEVES = ("equity", "crypto", "fx_etf", "commodity_etf")
+SLEEVES = ("equity", "crypto", "fx_etf", "commodity_etf",
+           "rates_etf", "intl_etf", "sector_etf", "events")
 
 
 class ConfigError(Exception):
@@ -62,7 +63,10 @@ def factors_config() -> dict[str, Any]:
     for name, spec in cfg["factors"].items():
         _require(spec, ["signal", "sleeves", "horizon_days", "min_history_days", "status"],
                  f"factors.yaml:factors.{name}")
-        if spec["status"] not in ("candidate", "accepted", "rejected"):
+        # "demoted" (production/alpha/registry.py::demote) is a live-factor governance
+        # exit, not a gate verdict — it does not go through record()'s accepted/rejected
+        # split, but it is a legitimate status a factor can carry in the yaml.
+        if spec["status"] not in ("candidate", "accepted", "rejected", "demoted"):
             raise ConfigError(f"factors.yaml: {name} has invalid status {spec['status']!r}")
     return cfg
 

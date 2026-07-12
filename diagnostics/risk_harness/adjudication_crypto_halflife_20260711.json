@@ -1,0 +1,169 @@
+{
+  "incumbent_ledger": "risk_harness_20260711T211638Z.json",
+  "candidate_ledger": "C:\\Users\\benja\\Downloads\\trader-improved\\diagnostics\\risk_harness\\risk_harness_20260711T213735Z.json",
+  "cells_incumbent": {
+    "crypto/f1": {
+      "B": 1.206737082181644,
+      "band": [
+        0.8908910548820038,
+        1.1091089451179963
+      ],
+      "in_band": false,
+      "T": 168,
+      "MRAD": 0.33545578598238773,
+      "n_dates": 168,
+      "n_portfolios": 1,
+      "skipped_dates": 3
+    },
+    "crypto/f2": {
+      "B": 1.701451824740602,
+      "band": [
+        0.8908910548820038,
+        1.1091089451179963
+      ],
+      "in_band": false,
+      "T": 168,
+      "MRAD": 0.689578640321545,
+      "n_dates": 168,
+      "n_portfolios": 1,
+      "skipped_dates": 3
+    },
+    "crypto/f3": {
+      "B": 1.1892298238231125,
+      "band": [
+        0.8908910548820038,
+        1.1091089451179963
+      ],
+      "in_band": false,
+      "T": 168,
+      "MRAD": 0.32989998988523195,
+      "n_dates": 168,
+      "n_portfolios": 1,
+      "skipped_dates": 3
+    },
+    "crypto/f4": {
+      "B": 1.4105907270538993,
+      "band": [
+        0.9228483250189541,
+        1.077151674981046
+      ],
+      "in_band": false,
+      "T": 336,
+      "MRAD": 0.41551309959504945,
+      "n_dates": 168,
+      "n_portfolios": 2,
+      "skipped_dates": 3
+    }
+  },
+  "cells_candidate": {
+    "crypto/f1": {
+      "B": 1.269534718879968,
+      "band": [
+        0.889903623487364,
+        1.1100963765126362
+      ],
+      "in_band": false,
+      "T": 165,
+      "MRAD": 0.2960250805571871,
+      "n_dates": 165,
+      "n_portfolios": 1,
+      "skipped_dates": 6
+    },
+    "crypto/f2": {
+      "B": 1.7926667146676507,
+      "band": [
+        0.889903623487364,
+        1.1100963765126362
+      ],
+      "in_band": false,
+      "T": 165,
+      "MRAD": 0.652926012370735,
+      "n_dates": 165,
+      "n_portfolios": 1,
+      "skipped_dates": 6
+    },
+    "crypto/f3": {
+      "B": 1.2061265833141885,
+      "band": [
+        0.889903623487364,
+        1.1100963765126362
+      ],
+      "in_band": false,
+      "T": 165,
+      "MRAD": 0.2603914542781182,
+      "n_dates": 165,
+      "n_portfolios": 1,
+      "skipped_dates": 6
+    },
+    "crypto/f4": {
+      "B": 1.5122107876488007,
+      "band": [
+        0.9221501055838477,
+        1.0778498944161523
+      ],
+      "in_band": false,
+      "T": 330,
+      "MRAD": 0.4137734336357495,
+      "n_dates": 165,
+      "n_portfolios": 2,
+      "skipped_dates": 6
+    }
+  },
+  "horse_race": {
+    "candidate_ann_vol": 1.271857813679584,
+    "incumbent_ann_vol": 1.1564512091534653,
+    "candidate_lower": false,
+    "p_value": 0.6063936063936064,
+    "observed_var_diff": 0.0011120749962908703,
+    "block_length": 1.0,
+    "n_obs": 3591,
+    "n_boot": 1000
+  },
+  "fc_real_by_year": {
+    "incumbent": {
+      "2016": 1.7516,
+      "2017": 1.0762,
+      "2018": 1.4456,
+      "2019": 1.2221,
+      "2020": 1.1203,
+      "2021": 1.3184,
+      "2022": 1.2719,
+      "2023": 1.3356,
+      "2024": 1.0131,
+      "2025": 1.2342,
+      "2026": 1.2908
+    },
+    "candidate": {
+      "2016": 1.5514,
+      "2017": 1.1159,
+      "2018": 1.2164,
+      "2019": 1.181,
+      "2020": 1.1793,
+      "2021": 1.1303,
+      "2022": 1.1802,
+      "2023": 1.1473,
+      "2024": 1.0979,
+      "2025": 1.1287,
+      "2026": 1.1385
+    },
+    "spread_incumbent": 0.738447357676866,
+    "spread_candidate": 0.4534436126475019,
+    "spread_narrows": true
+  },
+  "verdict": {
+    "passed": false,
+    "reasons": [
+      "criterion 2 failed: only 0% of cells improved |B-1| (need >= 60%)",
+      "criterion 3 failed: candidate_lower=False, p=0.6063936063936064 (need <0.05), and candidate is not claimed simpler"
+    ],
+    "criteria": {
+      "no_new_failures": true,
+      "frac_improved": 0.0,
+      "improved_ge_60pct": false,
+      "mvp_horse_race": false,
+      "pit_harness_green": true
+    },
+    "new_failures": []
+  },
+  "final_adopt": false
+}

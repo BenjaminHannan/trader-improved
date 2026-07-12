@@ -20,6 +20,15 @@ sleeves:
   commodity_etf:
     floor_bps: 10.0
     half_spread_bps: 4.0
+  rates_etf:
+    floor_bps: 5.0
+    half_spread_bps: 2.0
+  intl_etf:
+    floor_bps: 5.0
+    half_spread_bps: 2.5
+  sector_etf:
+    floor_bps: 5.0
+    half_spread_bps: 2.0
 
 # Per-instrument overrides (spread-based), e.g.:
 # instrument_overrides:

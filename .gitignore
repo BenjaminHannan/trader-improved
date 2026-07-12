@@ -1,6 +1,6 @@
-# data lake — never committed
-data/
-reports/
+# data lake — never committed (root-anchored; production/data is source code)
+/data/
+/reports/
 
 # python
 __pycache__/

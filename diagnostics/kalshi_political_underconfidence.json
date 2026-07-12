@@ -1,0 +1,189 @@
+{
+  "pre_registration": {
+    "Q1": "MZ psi > 0, |t| >= 1.96 (underconfidence sign)",
+    "Q2": "YES at [0.70,0.95] post-fee mean > 0, t >= +1.645",
+    "Q3": "Q2 point estimate > 0 in last 18 months",
+    "filters": {
+      "min_life_volume": 1000.0,
+      "entry_window_days": 10,
+      "macro_series_excluded": true
+    }
+  },
+  "n_markets": 6011,
+  "n_events": 1201,
+  "settle_range": [
+    "2021-09-29 00:00:00",
+    "2026-07-10 00:00:00"
+  ],
+  "Q1": {
+    "psi": 0.03711969112701921,
+    "t": 5.639193643658022,
+    "n": 6011,
+    "n_clusters": 1201,
+    "pass": true
+  },
+  "Q2": {
+    "mean": 0.048221513953062935,
+    "se": 0.01647395776615945,
+    "t": 2.9271359461731064,
+    "n": 575,
+    "n_clusters": 385,
+    "pass": true
+  },
+  "Q3": {
+    "mean": 0.045625079940987384,
+    "se": 0.020016810595422103,
+    "t": 2.2793381454796777,
+    "n": 425,
+    "n_clusters": 253,
+    "pass": true
+  },
+  "verdict": "PASS",
+  "calibration": [
+    {
+      "band": "0.0-0.1",
+      "n": 3573,
+      "mean_price": 0.023024349286314024,
+      "win_rate": 0.010355443604813882,
+      "wilson_lo": 0.007522263292778268,
+      "wilson_hi": 0.0142404001698699,
+      "mean_postfee_ret": -0.736528936830935
+    },
+    {
+      "band": "0.1-0.2",
+      "n": 323,
+      "mean_price": 0.14963157894736842,
+      "win_rate": 0.14860681114551083,
+      "wilson_lo": 0.11395334754966704,
+      "wilson_hi": 0.19152061904454856,
+      "mean_postfee_ret": -0.06825241044924474
+    },
+    {
+      "band": "0.2-0.3",
+      "n": 161,
+      "mean_price": 0.25472049689440995,
+      "win_rate": 0.2981366459627329,
+      "wilson_lo": 0.23285040519125388,
+      "wilson_hi": 0.37283165564775766,
+      "mean_postfee_ret": 0.09039863039233437
+    },
+    {
+      "band": "0.3-0.4",
+      "n": 120,
+      "mean_price": 0.35516666666666663,
+      "win_rate": 0.4166666666666667,
+      "wilson_lo": 0.3323820653533033,
+      "wilson_hi": 0.5061213131560184,
+      "mean_postfee_ret": 0.1290946550472967
+    },
+    {
+      "band": "0.4-0.5",
+      "n": 95,
+      "mean_price": 0.4576842105263158,
+      "win_rate": 0.5473684210526316,
+      "wilson_lo": 0.4473808701274312,
+      "wilson_hi": 0.6436739084273474,
+      "mean_postfee_ret": 0.16357056289792926
+    },
+    {
+      "band": "0.5-0.6",
+      "n": 80,
+      "mean_price": 0.554875,
+      "win_rate": 0.65,
+      "wilson_lo": 0.5407980232189245,
+      "wilson_hi": 0.7454560559017032,
+      "mean_postfee_ret": 0.14526384636266887
+    },
+    {
+      "band": "0.6-0.7",
+      "n": 125,
+      "mean_price": 0.658208,
+      "win_rate": 0.656,
+      "wilson_lo": 0.5691894206942855,
+      "wilson_hi": 0.7335078447851872,
+      "mean_postfee_ret": -0.027125116072658866
+    },
+    {
+      "band": "0.7-0.8",
+      "n": 132,
+      "mean_price": 0.7603712121212122,
+      "win_rate": 0.8257575757575758,
+      "wilson_lo": 0.7520947741728428,
+      "wilson_hi": 0.8809955310061304,
+      "mean_postfee_ret": 0.06858024767836182
+    },
+    {
+      "band": "0.8-0.9",
+      "n": 214,
+      "mean_price": 0.8654439252336448,
+      "win_rate": 0.9158878504672897,
+      "wilson_lo": 0.8709727726415151,
+      "wilson_hi": 0.9461347036164631,
+      "mean_postfee_ret": 0.04882593092424894
+    },
+    {
+      "band": "0.9-1.0",
+      "n": 1188,
+      "mean_price": 0.9756750841750841,
+      "win_rate": 0.9882154882154882,
+      "wilson_lo": 0.9803162576708971,
+      "wilson_hi": 0.9929674404312666,
+      "mean_postfee_ret": 0.011302755121523431
+    }
+  ],
+  "mz_by_year": [
+    {
+      "year": 2022,
+      "psi": -0.018957958745614505,
+      "t_psi": -0.5397152306420678,
+      "n": 610
+    },
+    {
+      "year": 2023,
+      "psi": 0.06658760100448742,
+      "t_psi": 1.7613250714621413,
+      "n": 398
+    },
+    {
+      "year": 2024,
+      "psi": 0.05657812500940037,
+      "t_psi": 1.5531319815621183,
+      "n": 494
+    },
+    {
+      "year": 2025,
+      "psi": 0.033211935790759275,
+      "t_psi": 3.8932471416217607,
+      "n": 2034
+    },
+    {
+      "year": 2026,
+      "psi": 0.03377764076287556,
+      "t_psi": 3.1847443227079206,
+      "n": 2437
+    }
+  ],
+  "by_series_top": {
+    "KXAPRPOTUS": 907,
+    "KX538APPROVE": 817,
+    "KXTRUTHSOCIAL": 184,
+    "KXTRUMPMEET": 174,
+    "KXTRUMPACT": 126,
+    "KXHORMUZWEEKLY": 108,
+    "KXCABOUT": 97,
+    "KXELONTWEETS": 74,
+    "KXTRUMPENDORSEMENTS": 69,
+    "KXVOTESHUTDOWNS": 68,
+    "KXLAGODAYS": 67,
+    "KX538APPROVEMIN": 57,
+    "KXEOWEEK": 55,
+    "KXWHVISIT": 53,
+    "KXTRUMPTIME": 52,
+    "KXBILLSCOUNT": 51,
+    "KXTRUMPPARDON": 49,
+    "KXATTENDSOTU": 46,
+    "KXGOVSHUTLENGTH": 42,
+    "KX538APPROVEMAX": 41
+  },
+  "n_favorite_bucket": 575
+}

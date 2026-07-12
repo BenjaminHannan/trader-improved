@@ -1,0 +1,705 @@
+"""Execution-layer tests — all offline (requests fully monkeypatched, no keys, no network).
+
+Covers: order construction (per-sleeve rounding, min-notional drop, side signs), instrument
+-> Alpaca symbol mapping from the master JSON, the dry-run safety property (submission issues
+zero HTTP requests), retry-on-429-then-success, 4xx -> ExecutionError, implementation-shortfall
+arithmetic, and a --dry-run smoke run of scripts/daily_run.py on the synthetic bundle.
+
+Runtime discipline (daily_run section, bottom of file): each ``scripts.daily_run.main``
+call is a full synthetic walk-forward (~20-60s). ``test_daily_run_dry_run_smoke`` is the
+ONE genuinely end-to-end run and covers everything a plain dry-run, a --order-type limit
+dry-run, and a no-lake-touch dry-run would separately assert (those CLI flag-sets produce
+bit-identical output — see its docstring). The two cost-overrides wiring tests only inspect
+the CostModel-construction argument, not order output, so they use a short trading window
+(--end 2019-01-31 instead of 2019-09-30) to stay cheap without touching engine internals.
+"""
+from __future__ import annotations
+
+import pandas as pd
+import pytest
+
+import pandas.testing as pdt
+
+from production.execution import alpaca_paper as ap
+from production.execution.alpaca_paper import AlpacaPaperClient, ExecutionError
+from production.core.lake import Lake, LakeError
+from production.execution.orders import ORDER_COLUMNS, target_weights_to_orders
+from production.execution.shortfall import implementation_shortfall
+from production.execution.tca import (SHORTFALL_LOG_COLUMNS, append_shortfall_log,
+                                      calibrate_overrides, read_overrides, write_overrides)
+from production.backtest.cost_model import CostModel
+from production.core.config import costs_config
+from production.reference.instruments import build_instrument_master
+
+
+# --------------------------------------------------------------------- helpers
+class _FakeResponse:
+    def __init__(self, status_code, payload=None, text=""):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text
+        self.content = b"x" if payload is not None else b""
+
+    def json(self):
+        return self._payload
+
+
+def _no_http(*a, **k):  # pragma: no cover - only fires if a dry-run leaks a request
+    raise AssertionError("HTTP request issued during a dry-run / offline test")
+
+
+# ----------------------------------------------------------------- order sizing
+def test_orders_equity_rounds_to_whole_shares():
+    # equity name @ $100, target 10% of $100k = $10,000 -> 100 shares exactly.
+    orders = target_weights_to_orders(
+        pd.Series({"EQ:AAA:2000-01-03": 0.10}),
+        pd.Series(dtype=float),
+        equity_usd=100_000.0,
+        prices=pd.Series({"EQ:AAA:2000-01-03": 100.0}),
+    )
+    assert len(orders) == 1
+    row = orders.iloc[0]
+    assert row["side"] == "buy"
+    assert row["qty"] == 100.0            # whole shares
+    assert row["order_type"] == "market"
+    assert row["notional_usd"] == pytest.approx(10_000.0)
+
+
+def test_orders_equity_fractional_share_is_rounded_off():
+    # $10,050 / $100 = 100.5 shares -> rounds to whole shares (100 or 101, never fractional).
+    orders = target_weights_to_orders(
+        pd.Series({"EQ:AAA:2000-01-03": 0.1005}),
+        pd.Series(dtype=float),
+        equity_usd=100_000.0,
+        prices=pd.Series({"EQ:AAA:2000-01-03": 100.0}),
+    )
+    qty = orders.iloc[0]["qty"]
+    assert qty == float(int(qty))         # integral
+
+
+def test_orders_crypto_rounds_to_six_dp():
+    # crypto keeps fractional precision to 6 dp.
+    orders = target_weights_to_orders(
+        pd.Series({"CR:BTC:2017-01-01": 0.05}),
+        pd.Series(dtype=float),
+        equity_usd=100_000.0,
+        prices=pd.Series({"CR:BTC:2017-01-01": 30_000.0}),
+    )
+    qty = orders.iloc[0]["qty"]
+    # 5000 / 30000 = 0.16666... -> 0.166667
+    assert qty == pytest.approx(0.166667, abs=1e-9)
+
+
+def test_orders_min_notional_drop():
+    # $10 delta is below the $25 floor -> dropped entirely.
+    orders = target_weights_to_orders(
+        pd.Series({"CR:BTC:2017-01-01": 0.10}),
+        pd.Series({"CR:BTC:2017-01-01": 0.10 - 10.0 / 100_000.0}),
+        equity_usd=100_000.0,
+        prices=pd.Series({"CR:BTC:2017-01-01": 100.0}),
+        min_order_usd=25.0,
+    )
+    assert orders.empty
+
+
+def test_orders_side_signs_buy_and_sell():
+    # target below current -> sell; above -> buy.
+    orders = target_weights_to_orders(
+        pd.Series({"EQ:AAA:2000-01-03": 0.02, "EQ:BBB:2000-01-03": 0.10}),
+        pd.Series({"EQ:AAA:2000-01-03": 0.10, "EQ:BBB:2000-01-03": 0.02}),
+        equity_usd=100_000.0,
+        prices=pd.Series({"EQ:AAA:2000-01-03": 100.0, "EQ:BBB:2000-01-03": 100.0}),
+    )
+    by_id = orders.set_index("instrument_id")["side"].to_dict()
+    assert by_id["EQ:AAA:2000-01-03"] == "sell"
+    assert by_id["EQ:BBB:2000-01-03"] == "buy"
+
+
+# --------------------------------------------------------------- limit orders
+def test_orders_limit_price_buy_below_sell_above_known_answer():
+    # equity @ $100, 5bp offset: buy limit = 100*(1-0.0005) = 99.95; sell = 100.05.
+    orders = target_weights_to_orders(
+        pd.Series({"EQ:AAA:2000-01-03": 0.10, "EQ:BBB:2000-01-03": 0.02}),
+        pd.Series({"EQ:AAA:2000-01-03": 0.02, "EQ:BBB:2000-01-03": 0.10}),
+        equity_usd=100_000.0,
+        prices=pd.Series({"EQ:AAA:2000-01-03": 100.0, "EQ:BBB:2000-01-03": 100.0}),
+        order_type="limit",
+        limit_offset_bps=5.0,
+    )
+    by_id = orders.set_index("instrument_id")
+    assert by_id.loc["EQ:AAA:2000-01-03", "side"] == "buy"
+    assert by_id.loc["EQ:AAA:2000-01-03", "limit_price"] == pytest.approx(99.95)
+    assert by_id.loc["EQ:BBB:2000-01-03", "side"] == "sell"
+    assert by_id.loc["EQ:BBB:2000-01-03", "limit_price"] == pytest.approx(100.05)
+    assert set(orders["order_type"]) == {"limit"}
+
+
+def test_orders_limit_price_equity_rounds_to_two_dp():
+    # 123.456 * (1 - 0.0005) = 123.394272 -> 2dp -> 123.39.
+    orders = target_weights_to_orders(
+        pd.Series({"EQ:AAA:2000-01-03": 0.10}),
+        pd.Series(dtype=float),
+        equity_usd=100_000.0,
+        prices=pd.Series({"EQ:AAA:2000-01-03": 123.456}),
+        order_type="limit",
+        limit_offset_bps=5.0,
+    )
+    lp = orders.iloc[0]["limit_price"]
+    assert lp == pytest.approx(123.39)
+    assert round(lp, 2) == lp        # no sub-cent precision
+
+
+def test_orders_limit_price_crypto_rounds_to_six_sigfigs():
+    # 43210.99 * (1 - 0.0005) = 43189.384505 -> 6 significant figures -> 43189.4.
+    orders = target_weights_to_orders(
+        pd.Series({"CR:BTC:2017-01-01": 0.10}),
+        pd.Series(dtype=float),
+        equity_usd=100_000.0,
+        prices=pd.Series({"CR:BTC:2017-01-01": 43210.99}),
+        order_type="limit",
+        limit_offset_bps=5.0,
+    )
+    assert orders.iloc[0]["limit_price"] == pytest.approx(43189.4)
+
+
+def test_orders_market_path_bit_identical_when_order_type_omitted():
+    # Default (omitted) must equal an explicit market call, with NO limit_price column.
+    args = (
+        pd.Series({"EQ:AAA:2000-01-03": 0.10, "CR:BTC:2017-01-01": 0.05}),
+        pd.Series(dtype=float),
+    )
+    kwargs = dict(equity_usd=100_000.0,
+                  prices=pd.Series({"EQ:AAA:2000-01-03": 100.0,
+                                    "CR:BTC:2017-01-01": 30_000.0}))
+    default = target_weights_to_orders(*args, **kwargs)
+    explicit = target_weights_to_orders(*args, order_type="market", **kwargs)
+    assert list(default.columns) == ORDER_COLUMNS
+    assert "limit_price" not in default.columns
+    pdt.assert_frame_equal(default, explicit)
+
+
+# --------------------------------------------------------- symbol mapping / submit
+def test_symbol_mapping_from_master_json():
+    master = build_instrument_master()
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    # A crypto + an ETF from the static master.
+    btc = next(i for i in master["instrument_id"] if i.startswith("CR:BTC:"))
+    gld = next(i for i in master["instrument_id"] if i.startswith("CO:GLD:"))
+    orders = pd.DataFrame({
+        "instrument_id": [btc, gld],
+        "side": ["buy", "buy"], "qty": [0.1, 3.0],
+        "notional_usd": [100.0, 300.0], "order_type": ["market", "market"],
+    })
+    plan = client.submit_orders(orders, master, dry_run=True)
+    m = plan.set_index("instrument_id")["alpaca_symbol"].to_dict()
+    assert m[btc] == "BTCUSD"     # crypto BTCUSD-style
+    assert m[gld] == "GLD"
+    assert set(plan["status"]) == {"dry_run"}
+
+
+def test_dry_run_submits_nothing(monkeypatch):
+    monkeypatch.setattr(ap.requests, "request", _no_http)
+    master = build_instrument_master()
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    gld = next(i for i in master["instrument_id"] if i.startswith("CO:GLD:"))
+    orders = pd.DataFrame({
+        "instrument_id": [gld], "side": ["buy"], "qty": [3.0],
+        "notional_usd": [300.0], "order_type": ["market"],
+    })
+    plan = client.submit_orders(orders, master, dry_run=True)   # must not raise
+    assert list(plan["status"]) == ["dry_run"]
+    assert plan.iloc[0]["broker_order_id"] is None
+
+
+def test_submit_order_limit_payload_has_limit_price_and_tif_day(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, **kw):
+        captured["json"] = kw.get("json")
+        return _FakeResponse(200, payload={"id": "lim1", "status": "accepted"})
+
+    monkeypatch.setattr(ap.requests, "request", fake_request)
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    resp = client.submit_order("GLD", 3, "buy", type_="limit", limit_price=99.95)
+    assert resp["id"] == "lim1"
+    body = captured["json"]
+    assert body["type"] == "limit"
+    assert body["time_in_force"] == "day"
+    assert body["limit_price"] == "99.95"
+
+
+def test_submit_order_limit_missing_price_raises(monkeypatch):
+    monkeypatch.setattr(ap.requests, "request", _no_http)   # must fail before any HTTP
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    with pytest.raises(ExecutionError):
+        client.submit_order("GLD", 3, "buy", type_="limit")
+
+
+def test_submit_orders_threads_limit_price_from_frame(monkeypatch):
+    captured = {}
+
+    def fake_request(method, url, **kw):
+        captured["json"] = kw.get("json")
+        return _FakeResponse(200, payload={"id": "z", "status": "accepted"})
+
+    monkeypatch.setattr(ap.requests, "request", fake_request)
+    master = build_instrument_master()
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    gld = next(i for i in master["instrument_id"] if i.startswith("CO:GLD:"))
+    orders = pd.DataFrame({
+        "instrument_id": [gld], "side": ["buy"], "qty": [3.0],
+        "notional_usd": [300.0], "order_type": ["limit"], "limit_price": [123.39],
+    })
+    plan = client.submit_orders(orders, master, dry_run=False)
+    assert captured["json"]["type"] == "limit"
+    assert captured["json"]["limit_price"] == "123.39"
+    assert plan.iloc[0]["limit_price"] == pytest.approx(123.39)
+
+
+def test_retry_on_429_then_success(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_request(method, url, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _FakeResponse(429, text="rate limited")
+        return _FakeResponse(200, payload={"id": "abc", "status": "accepted"})
+
+    monkeypatch.setattr(ap.requests, "request", fake_request)
+    monkeypatch.setattr(ap.time, "sleep", lambda *_: None)   # no real backoff wait
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    resp = client.submit_order("GLD", 3, "buy")
+    assert calls["n"] == 2
+    assert resp["id"] == "abc"
+
+
+def test_4xx_raises_execution_error(monkeypatch):
+    monkeypatch.setattr(ap.requests, "request",
+                        lambda *a, **k: _FakeResponse(422, text="bad qty"))
+    monkeypatch.setattr(ap.time, "sleep", lambda *_: None)
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    with pytest.raises(ExecutionError):
+        client.submit_order("GLD", -1, "buy")
+
+
+def test_missing_credentials_raises_before_any_request(monkeypatch):
+    monkeypatch.delenv("APCA_API_KEY_ID", raising=False)
+    monkeypatch.delenv("APCA_API_SECRET_KEY", raising=False)
+    monkeypatch.setattr(ap.requests, "request", _no_http)
+    client = AlpacaPaperClient(backoff=0.0)
+    with pytest.raises(ExecutionError):
+        client.account()
+
+
+def test_5xx_retries_exhausted_raises(monkeypatch):
+    monkeypatch.setattr(ap.requests, "request",
+                        lambda *a, **k: _FakeResponse(503, text="down"))
+    monkeypatch.setattr(ap.time, "sleep", lambda *_: None)
+    client = AlpacaPaperClient(key_id="k", secret="s", max_retries=3, backoff=0.0)
+    with pytest.raises(ExecutionError):
+        client.account()
+
+
+def test_positions_empty_returns_empty_frame(monkeypatch):
+    monkeypatch.setattr(ap.requests, "request",
+                        lambda *a, **k: _FakeResponse(200, payload=[]))
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+    pos = client.positions()
+    assert pos.empty and list(pos.columns) == ["symbol", "qty", "market_value", "side"]
+
+
+# ------------------------------------------------------------------- shortfall
+def test_shortfall_buy_above_decision_is_positive_cost():
+    orders = pd.DataFrame({
+        "instrument_id": ["EQ:AAA:2000-01-03"], "side": ["buy"],
+        "notional_usd": [10_000.0],
+    })
+    df, agg = implementation_shortfall(
+        orders,
+        decision_prices=pd.Series({"EQ:AAA:2000-01-03": 100.0}),
+        fill_prices=pd.Series({"EQ:AAA:2000-01-03": 101.0}),
+    )
+    # +1 * (101-100)/100 * 1e4 = +100 bps
+    assert df.iloc[0]["shortfall_bps"] == pytest.approx(100.0)
+    assert agg == pytest.approx(100.0)
+
+
+def test_shortfall_sell_below_decision_is_positive_cost():
+    orders = pd.DataFrame({
+        "instrument_id": ["EQ:AAA:2000-01-03"], "side": ["sell"],
+        "notional_usd": [5_000.0],
+    })
+    df, _ = implementation_shortfall(
+        orders,
+        decision_prices=pd.Series({"EQ:AAA:2000-01-03": 100.0}),
+        fill_prices=pd.Series({"EQ:AAA:2000-01-03": 99.0}),
+    )
+    # -1 * (99-100)/100 * 1e4 = +100 bps
+    assert df.iloc[0]["shortfall_bps"] == pytest.approx(100.0)
+
+
+def test_shortfall_aggregate_is_notional_weighted():
+    orders = pd.DataFrame({
+        "instrument_id": ["EQ:AAA:2000-01-03", "EQ:BBB:2000-01-03"],
+        "side": ["buy", "buy"],
+        "notional_usd": [1_000.0, 3_000.0],
+    })
+    df, agg = implementation_shortfall(
+        orders,
+        decision_prices=pd.Series({"EQ:AAA:2000-01-03": 100.0,
+                                   "EQ:BBB:2000-01-03": 100.0}),
+        fill_prices=pd.Series({"EQ:AAA:2000-01-03": 101.0,      # +100 bps
+                               "EQ:BBB:2000-01-03": 100.5}),     # +50 bps
+    )
+    # weighted: (100*1000 + 50*3000) / 4000 = 62.5 bps
+    assert agg == pytest.approx(62.5)
+
+
+# ------------------------------------------------------------ TCA calibration
+def _shortfall_rows(instrument_id: str, abs_bps: float, n: int) -> pd.DataFrame:
+    """n fills for one instrument with a fixed |shortfall|, alternating sign (median = abs_bps)."""
+    signs = [1.0 if i % 2 == 0 else -1.0 for i in range(n)]
+    return pd.DataFrame({
+        "instrument_id": [instrument_id] * n,
+        "side": ["buy" if s > 0 else "sell" for s in signs],
+        "shortfall_bps": [s * abs_bps for s in signs],
+        "notional_usd": [10_000.0] * n,
+    })
+
+
+def test_calibrate_overrides_known_answer():
+    """20 fills at |shortfall| = 8 bps -> median 8 x safety 1.25 = 10 bps half-spread override."""
+    df = _shortfall_rows("EQ:AAA:2000-01-03", abs_bps=8.0, n=20)
+    ov = calibrate_overrides(df, min_fills=20, safety=1.25)
+    assert set(ov) == {"EQ:AAA:2000-01-03"}
+    entry = ov["EQ:AAA:2000-01-03"]
+    assert entry["half_spread_bps"] == pytest.approx(10.0)
+    assert entry["n_fills"] == 20
+    assert entry["median_abs_shortfall_bps"] == pytest.approx(8.0)
+
+
+def test_calibrate_overrides_never_lowers_cost():
+    """Tiny realized shortfall (candidate below the sleeve default half-spread) -> no override.
+    Floors are floors — calibration only ever raises cost, never lowers it (CLAUDE.md)."""
+    # equity default half_spread = 2.5; 1.0 x 1.25 = 1.25 < 2.5 -> omitted.
+    df = _shortfall_rows("EQ:BBB:2000-01-03", abs_bps=1.0, n=40)
+    ov = calibrate_overrides(df, min_fills=20, safety=1.25)
+    assert "EQ:BBB:2000-01-03" not in ov
+    assert ov == {}
+
+
+def test_calibrate_overrides_min_fills_gate():
+    """An instrument below min_fills is not calibrated even with large realized shortfall."""
+    df = _shortfall_rows("EQ:CCC:2000-01-03", abs_bps=25.0, n=5)
+    assert calibrate_overrides(df, min_fills=20, safety=1.25) == {}
+    # ... but clears once it has enough fills.
+    df_ok = _shortfall_rows("EQ:CCC:2000-01-03", abs_bps=25.0, n=20)
+    ov = calibrate_overrides(df_ok, min_fills=20, safety=1.25)
+    assert ov["EQ:CCC:2000-01-03"]["half_spread_bps"] == pytest.approx(31.25)
+
+
+def test_calibrate_overrides_caps_at_cap_bps():
+    """A monster realized shortfall candidate is capped at the cost model cap (100 bps)."""
+    df = _shortfall_rows("CR:BTC:2017-01-01", abs_bps=500.0, n=30)
+    ov = calibrate_overrides(df, min_fills=20, safety=1.25)
+    assert ov["CR:BTC:2017-01-01"]["half_spread_bps"] == pytest.approx(100.0)
+
+
+def test_overrides_lake_roundtrip(tmp_path):
+    """calibrate -> write -> read reproduces the override dict; calibrated_at is stamped."""
+    lake = Lake(tmp_path)
+    assert read_overrides(lake) == {}                         # absent table -> {}
+    df = _shortfall_rows("EQ:AAA:2000-01-03", abs_bps=8.0, n=20)
+    ov = calibrate_overrides(df, min_fills=20, safety=1.25)
+    write_overrides(ov, lake)
+
+    got = read_overrides(lake)
+    assert got == ov
+
+    # calibrated_at column present, non-null, a real timestamp.
+    table = lake.read_reference("cost_overrides")
+    assert "calibrated_at" in table.columns
+    assert table["calibrated_at"].notna().all()
+    assert pd.api.types.is_datetime64_any_dtype(pd.to_datetime(table["calibrated_at"]))
+
+
+def test_cost_model_consumes_lake_cost_overrides_end_to_end(tmp_path):
+    """Narrowest cross-module seam for backlog #14: calibrate -> write -> read -> CostModel
+    actually changes the charged cost for the calibrated instrument. This is the exact
+    ``read_overrides`` -> ``CostModel(overrides_table=...)`` wiring the engine now performs
+    when a lake is threaded through ``run_backtest`` (production/backtest/engine.py)."""
+    lake = Lake(tmp_path)
+    iid = "EQ:AAA:2000-01-03"
+    df = _shortfall_rows(iid, abs_bps=8.0, n=20)
+    ov = calibrate_overrides(df, min_fills=20, safety=1.25)
+    write_overrides(ov, lake)
+
+    table = read_overrides(lake)
+    model = CostModel(costs_config(), overrides_table=table)
+    base = CostModel(costs_config())                      # no table -> yaml-only baseline
+
+    # adv huge relative to the trade -> sqrt-impact is negligible, isolating the half_spread.
+    kw = dict(trade_usd=1.0, adv_usd=1e15, sigma_daily=0.01, sleeve="equity",
+             instrument_ids=[iid])
+    calibrated_cost = model.cost_bps(**kw).iloc[0]
+    baseline_cost = base.cost_bps(**kw).iloc[0]
+    # calibrated half_spread (10.0, from test_calibrate_overrides_known_answer) beats both
+    # the equity floor (5.0) and the yaml-only baseline cost.
+    assert calibrated_cost == pytest.approx(10.0, abs=1e-3)
+    assert calibrated_cost > baseline_cost
+
+
+def test_cost_model_absent_overrides_table_is_baseline(tmp_path):
+    """A lake that was never calibrated (no cost_overrides table) reads back {} and leaves
+    CostModel bit-identical to not passing overrides_table at all."""
+    lake = Lake(tmp_path)
+    table = read_overrides(lake)
+    assert table == {}
+    idx = ["EQ:AAA:2000-01-03", "EQ:BBB:2000-01-03"]
+    kw = dict(trade_usd=pd.Series([1.0, 5e6], index=idx), adv_usd=1e8,
+             sigma_daily=0.05, sleeve="equity", instrument_ids=idx)
+    a = CostModel(costs_config(), overrides_table=table).cost_bps(**kw)
+    b = CostModel(costs_config(), overrides_table=None).cost_bps(**kw)
+    assert a.to_numpy().tolist() == b.to_numpy().tolist()
+
+
+# ------------------------------------------------------------------ daily_run
+def test_daily_run_dry_run_smoke(monkeypatch, capsys, pregate_engine_registry, tmp_path):
+    """Consolidated (was 3 separate ~62s full end-to-end runs): a single synthetic
+    walk-forward + main() invocation carries every assertion that
+    test_daily_run_dry_run_smoke, test_daily_run_dry_run_limit_prints_limit_column, and
+    test_daily_run_dry_run_writes_no_shortfall_log used to make on THREE separate runs.
+    Safe to merge because none of those runs' CLI flags disagree on the same output:
+    --order-type limit / --limit-offset-bps 5 is already the argparse default (see
+    build_arg_parser), so a plain dry-run and an explicit --order-type limit dry-run are
+    bit-identical, and a dry-run never touches the lake regardless of --order-type. Kept
+    genuinely end-to-end (no mocking of run_backtest) — this is the one full walk-forward
+    the daily_run tests below now share; see module docstring.
+    pregate_engine_registry: the synthetic warmup bundle cannot feed the live
+    registry's accepted-only factor set (fx carry + crypto basis) — pin all-candidate.
+    """
+    monkeypatch.setattr(ap.requests, "request", _no_http)
+    from scripts.daily_run import main
+
+    lake_root = tmp_path / "lake"
+    rc = main(["--synthetic", "--dry-run", "--order-type", "limit", "--limit-offset-bps", "5",
+               "--lake-root", str(lake_root), "--start", "2019-01-01", "--end", "2019-09-30"])
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "DRY-RUN" in out           # dry-run safety / smoke (ex test_daily_run_dry_run_smoke)
+    assert "limit_price" in out       # --order-type limit column (ex ..._limit_prints_limit_column)
+    assert not lake_root.exists()     # dry-run touches the lake for nothing (ex ..._writes_no_shortfall_log)
+
+
+# ---------------------------------------------------- shortfall_log accumulation (#15)
+def test_append_shortfall_log_preserves_prior_rows_and_noop_on_empty(tmp_path):
+    """lake.write_reference REPLACES the parquet wholesale (no native append) —
+    append_shortfall_log must read the prior table back and concatenate ahead of it so
+    earlier fills are never lost. An empty frame is a no-op: no table gets created."""
+    lake = Lake(tmp_path)
+    assert append_shortfall_log(pd.DataFrame(columns=SHORTFALL_LOG_COLUMNS), lake) is None
+    with pytest.raises(LakeError):
+        lake.read_reference("shortfall_log")
+
+    first = pd.DataFrame([{
+        "instrument_id": "EQ:AAA:2000-01-03", "side": "buy", "qty": 1.0,
+        "decision_price": 10.0, "fill_price": 10.1, "shortfall_bps": 100.0,
+        "filled_at": pd.Timestamp("2026-07-01T00:00:00Z"),
+        "run_id": pd.Timestamp("2026-07-01T00:00:00Z"),
+    }], columns=SHORTFALL_LOG_COLUMNS)
+    append_shortfall_log(first, lake)
+    second = pd.DataFrame([{
+        "instrument_id": "EQ:BBB:2000-01-03", "side": "sell", "qty": 2.0,
+        "decision_price": 20.0, "fill_price": 19.8, "shortfall_bps": 100.0,
+        "filled_at": pd.Timestamp("2026-07-02T00:00:00Z"),
+        "run_id": pd.Timestamp("2026-07-02T00:00:00Z"),
+    }], columns=SHORTFALL_LOG_COLUMNS)
+    append_shortfall_log(second, lake)
+
+    table = lake.read_reference("shortfall_log")
+    assert len(table) == 2
+    assert set(table["instrument_id"]) == {"EQ:AAA:2000-01-03", "EQ:BBB:2000-01-03"}
+
+
+def test_accumulate_shortfall_appends_correctly_and_preserves_prior_rows(monkeypatch, tmp_path):
+    """A fake --live run's fill fetch produces correctly-computed shortfall rows (known-
+    answer arithmetic, cross-checked against implementation_shortfall's own known-answer
+    tests) and appends onto whatever the shortfall_log table already held."""
+    from scripts.daily_run import _accumulate_shortfall
+
+    lake = Lake(tmp_path)
+    prior = pd.DataFrame([{
+        "instrument_id": "EQ:ZZZ:2000-01-03", "side": "buy", "qty": 1.0,
+        "decision_price": 10.0, "fill_price": 10.1, "shortfall_bps": 100.0,
+        "filled_at": pd.Timestamp("2026-07-01T00:00:00Z"),
+        "run_id": pd.Timestamp("2026-07-01T00:00:00Z"),
+    }], columns=SHORTFALL_LOG_COLUMNS)
+    lake.write_reference(prior, "shortfall_log")
+
+    canned = {"order-aaa": "101.00", "order-bbb": "49.50"}
+
+    def fake_request(method, url, **kw):
+        assert method == "GET"
+        order_id = url.rsplit("/", 1)[-1]
+        return _FakeResponse(200, payload={"id": order_id, "status": "filled",
+                                           "filled_avg_price": canned[order_id]})
+
+    monkeypatch.setattr(ap.requests, "request", fake_request)
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+
+    submit_result = pd.DataFrame({
+        "instrument_id": ["EQ:AAA:2000-01-03", "EQ:BBB:2000-01-03"],
+        "alpaca_symbol": ["AAA", "BBB"], "side": ["buy", "sell"],
+        "qty": [10.0, 5.0], "order_type": ["market", "market"],
+        "limit_price": [None, None], "status": ["accepted", "accepted"],
+        "broker_order_id": ["order-aaa", "order-bbb"],
+    })
+    decision_prices = pd.Series({"EQ:AAA:2000-01-03": 100.0, "EQ:BBB:2000-01-03": 50.0})
+    run_id = pd.Timestamp("2026-07-11T12:00:00Z")
+
+    _accumulate_shortfall(client, lake, submit_result, decision_prices, run_id)
+
+    table = lake.read_reference("shortfall_log")
+    assert len(table) == 3
+    assert "EQ:ZZZ:2000-01-03" in set(table["instrument_id"])   # prior row preserved
+
+    new_rows = table[table["instrument_id"] != "EQ:ZZZ:2000-01-03"].set_index("instrument_id")
+    # buy @ decision 100, fill 101 -> +100 bps (known-answer, matches shortfall.py tests).
+    assert new_rows.loc["EQ:AAA:2000-01-03", "shortfall_bps"] == pytest.approx(100.0)
+    assert new_rows.loc["EQ:AAA:2000-01-03", "side"] == "buy"
+    assert new_rows.loc["EQ:AAA:2000-01-03", "qty"] == pytest.approx(10.0)
+    assert new_rows.loc["EQ:AAA:2000-01-03", "decision_price"] == pytest.approx(100.0)
+    assert new_rows.loc["EQ:AAA:2000-01-03", "fill_price"] == pytest.approx(101.0)
+    # sell @ decision 50, fill 49.5 -> +100 bps.
+    assert new_rows.loc["EQ:BBB:2000-01-03", "shortfall_bps"] == pytest.approx(100.0)
+    assert (table["run_id"] == run_id).sum() == 2
+    assert table["filled_at"].notna().all()
+
+
+def test_accumulate_shortfall_skips_unfilled_orders(monkeypatch, tmp_path):
+    """An order the broker hasn't filled yet (no filled_avg_price) is not logged as a
+    garbage/zero shortfall row — it's simply absent until a later run observes the fill."""
+    from scripts.daily_run import _accumulate_shortfall
+
+    lake = Lake(tmp_path)
+
+    def fake_request(method, url, **kw):
+        return _FakeResponse(200, payload={"id": "order-aaa", "status": "new",
+                                           "filled_avg_price": None})
+
+    monkeypatch.setattr(ap.requests, "request", fake_request)
+    client = AlpacaPaperClient(key_id="k", secret="s", backoff=0.0)
+
+    submit_result = pd.DataFrame({
+        "instrument_id": ["EQ:AAA:2000-01-03"], "alpaca_symbol": ["AAA"],
+        "side": ["buy"], "qty": [10.0], "order_type": ["market"],
+        "limit_price": [None], "status": ["accepted"],
+        "broker_order_id": ["order-aaa"],
+    })
+    decision_prices = pd.Series({"EQ:AAA:2000-01-03": 100.0})
+    _accumulate_shortfall(client, lake, submit_result, decision_prices,
+                          pd.Timestamp("2026-07-11T12:00:00Z"))
+
+    with pytest.raises(LakeError):
+        lake.read_reference("shortfall_log")   # nothing filled -> nothing written
+
+
+def test_accumulate_shortfall_fetch_failure_warns_and_completes(monkeypatch, capsys, tmp_path):
+    """A fill-fetch failure (broker read error, retries exhausted) must degrade to a
+    printed warning and return — never raise, never block the run that already
+    submitted real orders to the broker."""
+    from scripts.daily_run import _accumulate_shortfall
+
+    lake = Lake(tmp_path)
+    monkeypatch.setattr(ap.requests, "request",
+                        lambda *a, **k: _FakeResponse(503, text="down"))
+    monkeypatch.setattr(ap.time, "sleep", lambda *_: None)
+    client = AlpacaPaperClient(key_id="k", secret="s", max_retries=2, backoff=0.0)
+
+    submit_result = pd.DataFrame({
+        "instrument_id": ["EQ:AAA:2000-01-03"], "alpaca_symbol": ["AAA"],
+        "side": ["buy"], "qty": [10.0], "order_type": ["market"],
+        "limit_price": [None], "status": ["accepted"],
+        "broker_order_id": ["order-aaa"],
+    })
+    decision_prices = pd.Series({"EQ:AAA:2000-01-03": 100.0})
+
+    _accumulate_shortfall(client, lake, submit_result, decision_prices,
+                          pd.Timestamp("2026-07-11T12:00:00Z"))   # must not raise
+
+    assert "WARNING" in capsys.readouterr().err
+    with pytest.raises(LakeError):
+        lake.read_reference("shortfall_log")
+
+
+# ------------------------------------------------ live path consumes cost overrides (#14)
+# The two tests below only inspect the CostModel-construction argument (a spy on
+# production.backtest.engine.CostModel) and rc — never order output — so unlike the smoke
+# test above they don't need the full 9-month window: --end 2019-01-31 still clears warmup
+# and produces at least one rebalance (target non-empty -> rc == 0), cutting each run from
+# ~62s to ~20-25s. _load_cost_overrides / CostModel construction happens once, up front in
+# run_backtest, before the walk-forward loop, so the shrunk window changes nothing about
+# what's under test here.
+def test_daily_run_live_path_threads_cost_overrides_into_engine(monkeypatch,
+                                                                 pregate_engine_registry,
+                                                                 tmp_path):
+    """Backlog #14 follow-up: daily_run must thread the lake's TCA-calibrated
+    cost_overrides table into the SAME CostModel construction run_backtest performs for
+    the backtest path — previously the live runner never passed `lake=` through at all.
+    Narrowest seam: a CostModel spy pins the EXACT overrides_table argument the engine
+    is constructed with (mirrors test_backtest_engine.
+    test_run_backtest_reads_lake_cost_overrides), and the identical loud UserWarning
+    ("cost overrides ACTIVE") must fire — a live run never silently changes cost regime."""
+    monkeypatch.setattr(ap.requests, "request", _no_http)   # dry-run: still zero HTTP
+    import production.backtest.engine as _eng
+    from scripts.daily_run import main
+
+    lake_root = tmp_path / "lake"
+    lake = Lake(lake_root)
+    override = {"EQ:SYN00:2000-01-03": {"half_spread_bps": 50.0, "n_fills": 30,
+                                        "median_abs_shortfall_bps": 40.0}}
+    write_overrides(override, lake)
+
+    captured = {}
+    real_cls = _eng.CostModel
+
+    class _SpyCostModel(real_cls):
+        def __init__(self, cfg=None, overrides_table=None):
+            captured["overrides_table"] = overrides_table
+            super().__init__(cfg, overrides_table=overrides_table)
+
+    monkeypatch.setattr(_eng, "CostModel", _SpyCostModel)
+
+    with pytest.warns(UserWarning, match="cost overrides ACTIVE"):
+        rc = main(["--synthetic", "--dry-run", "--lake-root", str(lake_root),
+                   "--start", "2019-01-01", "--end", "2019-01-31"])
+    assert rc == 0
+    assert captured["overrides_table"] == override
+
+
+def test_daily_run_lake_without_cost_overrides_table_unchanged(monkeypatch,
+                                                                pregate_engine_registry,
+                                                                tmp_path):
+    """A lake-root that was never TCA-calibrated (no cost_overrides table) must leave the
+    engine's CostModel construction — and therefore the run — unchanged (overrides_table
+    None, no warning)."""
+    monkeypatch.setattr(ap.requests, "request", _no_http)
+    import production.backtest.engine as _eng
+    from scripts.daily_run import main
+
+    lake_root = tmp_path / "lake"   # never written to -> absent cost_overrides table
+    captured = []
+    real_cls = _eng.CostModel
+
+    class _SpyCostModel(real_cls):
+        def __init__(self, cfg=None, overrides_table=None):
+            captured.append(overrides_table)
+            super().__init__(cfg, overrides_table=overrides_table)
+
+    monkeypatch.setattr(_eng, "CostModel", _SpyCostModel)
+
+    rc = main(["--synthetic", "--dry-run", "--lake-root", str(lake_root),
+               "--start", "2019-01-01", "--end", "2019-01-31"])
+    assert rc == 0
+    assert captured == [None]

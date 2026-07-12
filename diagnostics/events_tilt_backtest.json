@@ -1,0 +1,360 @@
+{
+  "generated_at": "2026-07-11T20:51:17.309669+00:00",
+  "signal": "production.events.signals.political_favorite_tilt (edge=0.03, yes_price in [0.70, 0.95], category=='politics', venue=='kalshi')",
+  "method_note": "event_sleeve_returns's real per-rebalance loop was reused unmodified; its hard-wired (longshot_bias, resolution_convergence) signal inputs were in-process monkeypatched to (political_favorite_tilt, empty) for the duration of this run only \u2014 production/events/backtest.py on disk is untouched. See module docstring.",
+  "panel": {
+    "n_bar_rows": 225573,
+    "n_settlement_rows": 14505,
+    "n_series": 511,
+    "n_political_series": 499,
+    "n_macro_series": 12,
+    "obs_date_range": [
+      "2021-07-01",
+      "2026-07-10"
+    ]
+  },
+  "rebalance": {
+    "cadence": "weekly (production default_freq grid)",
+    "n_rebalance_dates": 263,
+    "per_group_cap": 0.02,
+    "capital_frac": 0.1
+  },
+  "fees": {
+    "round_trip_fee_bps": 200.0,
+    "note": "event_sleeve_returns charges FEE_BPS (200bp = 2% round-trip) on entered notional as a return drag on the first hold day of each rebalance. Separately, size_event_book subtracts the SAME FEE_BPS/1e4 (2%) from the raw signal edge as a trade-worthiness floor before Kelly-sizing (a position is only opened if its edge clears 2%) \u2014 since political_favorite_tilt's own edge is only ~0.03 (haircut=0.03 by signal design, already the deliberately conservative slice of the ~3.4%% measured edge), this sizing-time floor consumes roughly two-thirds of the signal's own edge before any position is sized, and shrinks further wherever the 0.99 cap binds. Both charges key off the same FEE_BPS constant but play different roles: one is the ex-ante sizing filter, the other the realized cost."
+  },
+  "follow_up_pre_registration": "Follow-up, pre-registered by the orchestrator before running (record this block verbatim in the artifact):\n\nYour -0.67 Sharpe measured the tilt AS WIRED \u2014 entries any time a price sits in [0.70,0.95] (weeks before close, where the diagnostic never claimed edge) and the sleeve's flat 200bp fee haircut (~2x the actual hold-to-settlement taker fee for a favorite). The VALIDATED trade was T-1-entry at real Kalshi fees. Run an evidence-matched variant, same script, new artifact section \"variant_evidence_matched\":\n\n1. NEARNESS: restrict tradeable markets to <= 10 days to close (liquid_universe has max_days_to_close \u2014 pass it; if your monkeypatch path bypasses that filter, apply it on the panel: close_time minus obs_date <= 10 days).\n2. FEES: replace the flat 200bp haircut with the actual per-contract taker fee \u2014 research/diagnostics/_common.py::taker_fee (Whelan 100-lot imputation), charged ONCE at entry (hold-to-settlement pays no exit fee; settlement is free on Kalshi). If the fee lives inside sizing where you can't cleanly swap it, compute the return stream with the sleeve's gross returns and apply the fee at your script level, documenting exactly where the haircut was neutralized.\n3. Report the same headline block (full span, last-18mo, no-2024-11, lumpiness, correlations, ERC combined-Sharpe scenario) for the variant alongside the as-wired numbers.\n4. DECISION RULE (pre-registered): variant full-span Sharpe > 0 AND last-18mo Sharpe > 0 -> the mismatch is confirmed as the cause and a production re-spec of the events sleeve's entry-nearness + fee model becomes the proposal (execution layer, no n_trials). Either Sharpe <= 0 -> the tilt fails at portfolio level even evidence-matched; record it as a dead end at sizing scale despite the per-stake edge.\n",
+  "full_span": {
+    "n_days": 1834,
+    "start": "2021-07-01",
+    "end": "2026-07-10",
+    "ann_return": -0.023979039424000148,
+    "ann_vol": 0.035514578212771195,
+    "sharpe": -0.6657751137497433,
+    "max_drawdown": 0.18042810361336292,
+    "hit_rate": 0.15430752453653218,
+    "total_additive_pnl": -0.1720810348760571,
+    "n_positions": {
+      "n_rebalances": 263,
+      "n_rebalances_with_positions": 132,
+      "mean_when_active": 5.363636363636363,
+      "median_when_active": 3.0,
+      "max": 22
+    }
+  },
+  "last_18_months": {
+    "n_days": 547,
+    "start": "2025-01-10",
+    "end": "2026-07-10",
+    "ann_return": -0.03268516484127404,
+    "ann_vol": 0.057001917297825104,
+    "sharpe": -0.5548369464628151,
+    "max_drawdown": 0.10667923832240533,
+    "hit_rate": 0.376599634369287,
+    "total_additive_pnl": -0.0686501708159524,
+    "n_positions": {
+      "n_rebalances": 79,
+      "n_rebalances_with_positions": 79,
+      "mean_when_active": 8.050632911392405,
+      "median_when_active": 6.0,
+      "max": 22
+    },
+    "window_start": "2025-01-10"
+  },
+  "no_2024_11_variant": {
+    "n_days": 1804,
+    "start": "2021-07-01",
+    "end": "2026-07-10",
+    "ann_return": -0.024771073705826763,
+    "ann_vol": 0.03579048051522824,
+    "sharpe": -0.6830509990341398,
+    "max_drawdown": 0.18281955091914337,
+    "hit_rate": 0.15631929046563192,
+    "total_additive_pnl": -0.17500749659998718,
+    "note": "2024-11 daily returns dropped entirely (not resampled) before recomputing metrics on the remaining span \u2014 a robustness/lumpiness cut, not a smooth counterfactual.",
+    "edge_concentrated_in_election_month": false
+  },
+  "settlement_lumpiness": {
+    "total_additive_pnl": -0.1720810348760571,
+    "top5_dates": [
+      "2026-02-03",
+      "2025-03-27",
+      "2025-03-11",
+      "2021-10-13",
+      "2026-04-03"
+    ],
+    "top5_daily_returns": [
+      0.05241217303179767,
+      -0.02,
+      0.018156684248943043,
+      -0.01813385918376844,
+      -0.01767449497603933
+    ],
+    "top5_signed_sum": 0.014760503120932932,
+    "top5_share_of_total_pnl": -0.08577646648606173,
+    "top5_days_with_same_day_political_settlement": 4,
+    "note": "top-5 by |daily return|; share-of-total-P&L is additive (sum of simple daily returns), not compounded."
+  },
+  "portfolio_impact": {
+    "report_used": "backtest_20260711T195019Z.json",
+    "report_schema_note": "headline/per_sleeve carry AGGREGATE stats only \u2014 no daily total_returns series is persisted in this report -> falling back to lake-price sleeve proxies + the aggregate headline stats, per task instructions.",
+    "current_book_headline": {
+      "ann_return_net": 2.9305913251675975e-10,
+      "ann_vol_net": 1.6015123638391334e-09,
+      "net_sharpe": 0.1829894499937909,
+      "caveat": "this report's total-book aggregates are numerically ~0 (ann_vol_net ~1.6e-9) \u2014 both re-specs in the prior commit failed the promotion gate, leaving the current book with essentially no live factor exposure. Any mean-variance combination against this 'book' is therefore degenerate (near-zero-vol asset) and is reported below only as a transparency check, not as the headline estimate.",
+      "per_sleeve_present": [
+        "crypto",
+        "fx_etf"
+      ]
+    },
+    "correlation_vs_lake_proxies": {
+      "crypto": {
+        "corr": -0.033041889211393276,
+        "n_overlap_days": 1834,
+        "symbols": [
+          "BTC",
+          "ETH",
+          "SOL",
+          "ADA",
+          "DOGE",
+          "LTC",
+          "BCH",
+          "LINK",
+          "UNI",
+          "AAVE",
+          "AVAX",
+          "DOT",
+          "MATIC",
+          "SHIB",
+          "XRP",
+          "ATOM",
+          "ALGO",
+          "XLM",
+          "ETC",
+          "FIL",
+          "NEAR",
+          "GRT",
+          "CRV",
+          "MKR",
+          "SUSHI"
+        ]
+      },
+      "fx_etf": {
+        "corr": 0.012806632907639068,
+        "n_overlap_days": 1261,
+        "symbols": [
+          "FXE",
+          "FXY",
+          "FXB",
+          "FXA",
+          "FXC",
+          "FXF",
+          "UUP",
+          "UDN"
+        ]
+      },
+      "note": "equal-weighted daily simple-return proxies built directly from curated data/curated/dataset=prices (NOT the optimizer's book weights, since the current book carries ~no live crypto/fx signal right now per the caveat above)."
+    },
+    "mean_variance_combined": {
+      "risk_cap_events": 0.1,
+      "scenario_degenerate_current_book": {
+        "inputs": {
+          "mu_book": 2.9305913251675975e-10,
+          "sigma_book": 1.6015123638391334e-09,
+          "mu_events": -0.023979039424000148,
+          "sigma_events": 0.035514578212771195,
+          "rho": 0.0
+        },
+        "erc_weights_uncapped": {
+          "book": 0.9999997184255284,
+          "events": 2.8157447153719827e-07
+        },
+        "weights_capped_at_events_risk_cap": {
+          "book": 0.9999999849684982,
+          "events": 1.5031501833538354e-08
+        },
+        "combined_ann_return": -6.738184695670585e-11,
+        "combined_ann_vol": 1.6881422318040078e-09,
+        "combined_sharpe": -0.0399147925377705,
+        "book_alone_sharpe": 0.18298899161430174
+      },
+      "scenario_fx_crypto_lake_proxy_blend_raw": {
+        "inputs": {
+          "mu_book": 0.9413248692914244,
+          "sigma_book": 0.7799414610832425,
+          "mu_events": -0.023979039424000148,
+          "sigma_events": 0.035514578212771195,
+          "rho": -0.043573663426412175
+        },
+        "erc_weights_uncapped": {
+          "book": 0.04355179989577948,
+          "events": 0.9564482001042205
+        },
+        "weights_capped_at_events_risk_cap": {
+          "book": 0.11418088229785268,
+          "events": 0.8858191177021474
+        },
+        "combined_ann_return": 0.08624021255869288,
+        "combined_ann_vol": 0.0931463045741652,
+        "combined_sharpe": 0.9258575845059582,
+        "book_alone_sharpe": 1.2069173345189783,
+        "caveat": "RAW unmanaged buy-and-hold proxy: sigma_book=77.99% annualized -- dominated by crypto's historical run, nothing like the real risk-managed book (no vol targeting, no hedging, no cost model). Useful mainly for the correlation estimate, not for combined-Sharpe magnitude -- see the vol_targeted scenario for a scale-honest comparison."
+      },
+      "scenario_fx_crypto_lake_proxy_blend_vol_targeted": {
+        "inputs": {
+          "mu_book": 0.12069173345189785,
+          "sigma_book": 0.10000000000000002,
+          "mu_events": -0.023979039424000148,
+          "sigma_events": 0.035514578212771195,
+          "rho": -0.043573663426412175
+        },
+        "erc_weights_uncapped": {
+          "book": 0.2620720122339243,
+          "events": 0.7379279877660758
+        },
+        "weights_capped_at_events_risk_cap": {
+          "book": 0.501329943132554,
+          "events": 0.498670056867446
+        },
+        "combined_ann_return": 0.048548750914816426,
+        "combined_ann_vol": 0.0524365212612286,
+        "combined_sharpe": 0.925857584505958,
+        "book_alone_sharpe": 1.2069173345189783,
+        "caveat": "the raw blend rescaled by a single linear factor so its ann_vol matches total_vol_target=10% (configs/backtest.yaml) -- a scale-honest approximation of the risk-managed book's actual operating vol, NOT a re-simulation of the causal EWMA vol-target overlay (which clips/deadbands and reacts with a lag). Sharpe and correlation are invariant to this rescale by construction; only the absolute ann_return/ann_vol/weights shift. This is the headline mean-variance scenario."
+      },
+      "note": "erc_weights + apply_risk_caps reused unmodified from production.portfolio.allocation on a synthetic 2-asset (book, events) covariance; the events risk-contribution share is capped at allocation.risk_caps.events (0.10) exactly as the real N-sleeve ERC does."
+    }
+  },
+  "variant_evidence_matched": {
+    "spec": {
+      "nearness": "liquid_universe max_days_to_close=10 passed through event_sleeve_returns's sizing_kw \u2014 the monkeypatch path does NOT bypass the filter, so no panel-level workaround was needed. min_days_to_close stays at its default 1 (the T-1 convention's [close-10d, close-1d] entry window).",
+      "fees": "flat FEE_BPS neutralized IN-PROCESS at both module globals that read it: production.events.sizing.FEE_BPS (size_event_book's sizing-time edge haircut) and production.events.backtest.FEE_BPS (its imported copy, behind the entry-notional charge); both restored after the run, files on disk untouched. The engine therefore emitted GROSS returns; the actual Whelan-imputed per-contract taker fee (research/diagnostics/_common.py::taker_fee, 100-lot imputation) was applied at script level as taker_fee(entry)/entry per unit weight, charged ONCE on new weight increments per instrument at each rebalance's first hold day (same fee-day placement as the engine's flat charge). No exit fee: hold-to-settlement, settlement free on Kalshi.",
+      "documented_approximations": [
+        "a position dropped from the book before settlement pays no exit fee either (with <=10d-to-close markets on a weekly grid, nearly all positions run to settlement, so the understatement is small)",
+        "with a zero sizing haircut the full 0.03 edge reaches Kelly, so variant positions typically pin the per-group cap \u2014 books are systematically larger than as-wired",
+        "engine wiring quirk shared by both runs: size_event_book takes the LATEST signal per instrument, so a market whose price was in-bucket on an earlier bar but has since left [0.70,0.95] can still be entered at its current (out-of-bucket) price"
+      ]
+    },
+    "full_span": {
+      "n_days": 1834,
+      "start": "2021-07-01",
+      "end": "2026-07-10",
+      "ann_return": 0.03211040172146351,
+      "ann_vol": 0.07965174382180974,
+      "sharpe": 0.4344494258724406,
+      "max_drawdown": 0.137225471811804,
+      "hit_rate": 0.09869138495092694,
+      "total_additive_pnl": 0.25184498460440213,
+      "n_positions": {
+        "n_rebalances": 263,
+        "n_rebalances_with_positions": 112,
+        "mean_when_active": 2.607142857142857,
+        "median_when_active": 2.0,
+        "max": 10
+      }
+    },
+    "last_18_months": {
+      "n_days": 547,
+      "start": "2025-01-10",
+      "end": "2026-07-10",
+      "ann_return": 0.17711500950091064,
+      "ann_vol": 0.131686696137909,
+      "sharpe": 1.3000264729095314,
+      "max_drawdown": 0.04487229827660877,
+      "hit_rate": 0.28153564899451555,
+      "total_additive_pnl": 0.37160443070148197,
+      "n_positions": {
+        "n_rebalances": 79,
+        "n_rebalances_with_positions": 76,
+        "mean_when_active": 3.3421052631578947,
+        "median_when_active": 3.0,
+        "max": 10
+      },
+      "window_start": "2025-01-10"
+    },
+    "no_2024_11_variant": {
+      "n_days": 1804,
+      "start": "2021-07-01",
+      "end": "2026-07-10",
+      "ann_return": 0.03193090242564556,
+      "ann_vol": 0.08029044397497759,
+      "sharpe": 0.4294264802143303,
+      "max_drawdown": 0.137225471811804,
+      "hit_rate": 0.09977827050997783,
+      "total_additive_pnl": 0.24682473143984518,
+      "note": "2024-11 daily returns dropped entirely (not resampled) before recomputing metrics on the remaining span \u2014 a robustness/lumpiness cut, not a smooth counterfactual.",
+      "edge_concentrated_in_election_month": false
+    },
+    "settlement_lumpiness": {
+      "total_additive_pnl": 0.25184498460440213,
+      "top5_dates": [
+        "2026-02-03",
+        "2025-03-11",
+        "2024-07-27",
+        "2026-04-18",
+        "2024-07-28"
+      ],
+      "top5_daily_returns": [
+        0.15739726027397274,
+        0.05303030303030308,
+        0.052500000000000054,
+        0.04825006775125546,
+        -0.0454545454545455
+      ],
+      "top5_signed_sum": 0.2657230856009858,
+      "top5_share_of_total_pnl": 1.0551057271137774,
+      "top5_days_with_same_day_political_settlement": 3,
+      "note": "top-5 by |daily return|; share-of-total-P&L is additive (sum of simple daily returns), not compounded."
+    },
+    "fees_applied": {
+      "model": "_common.taker_fee (Whelan 100-lot imputation), entry-only",
+      "total_fee_drag_additive": 0.049854514200879295,
+      "n_fee_charge_days": 97,
+      "gross_total_additive_pnl": 0.3016994988052814
+    },
+    "correlation_vs_lake_proxies": {
+      "crypto": {
+        "corr": -0.030091458454316225,
+        "n_overlap_days": 1834
+      },
+      "fx_etf": {
+        "corr": 0.02011108833166377,
+        "n_overlap_days": 1261
+      }
+    },
+    "mean_variance_combined": {
+      "risk_cap_events": 0.1,
+      "scenario_fx_crypto_lake_proxy_blend_vol_targeted": {
+        "inputs": {
+          "mu_book": 0.12069173345189785,
+          "sigma_book": 0.10000000000000002,
+          "mu_events": 0.03211040172146351,
+          "sigma_events": 0.07965174382180974,
+          "rho": -0.04273215625635705
+        },
+        "erc_weights_uncapped": {
+          "book": 0.44336749651268004,
+          "events": 0.55663250348732
+        },
+        "weights_capped_at_events_risk_cap": {
+          "book": 0.6929953947394097,
+          "events": 0.30700460526059026
+        },
+        "combined_ann_return": 0.09349685667053845,
+        "combined_ann_vol": 0.07249530027217693,
+        "combined_sharpe": 1.2896954191445942,
+        "book_alone_sharpe": 1.2069173345189783,
+        "caveat": "same vol-targeted proxy-book scenario as the as-wired section (see its caveat); only the events leg differs."
+      }
+    },
+    "decision_rule": {
+      "rule": "PRE-REGISTERED: variant full-span Sharpe > 0 AND last-18mo Sharpe > 0 -> mismatch confirmed as the cause; proposal = production re-spec of the events sleeve's entry-nearness + fee model (execution layer, no n_trials). Either Sharpe <= 0 -> the tilt fails at portfolio level even evidence-matched; record as a dead end at sizing scale despite the per-stake edge.",
+      "full_span_sharpe": 0.4344494258724406,
+      "last_18mo_sharpe": 1.3000264729095314,
+      "pass": true,
+      "conclusion": "MISMATCH CONFIRMED: the as-wired negative Sharpe was caused by the entry-nearness + fee-model mismatch; propose a production re-spec of the events sleeve's entry-nearness + fee model (execution layer, no n_trials change)."
+    }
+  },
+  "verdict": "TILT-ONLY EVENTS SLEEVE 2021-07-01..2026-07-10 (n=1834d): ann_return=-2.3979% ann_vol=3.5515% sharpe=-0.666 maxDD=18.0428% | last 18mo (n=547d): ann_return=-3.2685% sharpe=-0.555 | positions: active in 132/263 rebalances, median 3.0 when active | no-2024-11 variant sharpe=-0.683 ann_return=-2.4771% (edge survives) | corr vs crypto proxy=-0.033, vs fx_etf proxy=0.013 | mean-variance @ 10% events risk cap (vol-targeted fx/crypto-proxy book): combined_sharpe=0.926 vs book-alone=1.207 | EVIDENCE-MATCHED VARIANT (<= 10d to close, actual taker fees, entry-only): ann_return=3.2110% ann_vol=7.9652% sharpe=0.434 maxDD=13.7225% | variant last 18mo: ann_return=17.7115% sharpe=1.300 | variant no-2024-11: sharpe=0.429 (edge survives) | variant mean-variance @ 10% cap: combined_sharpe=1.290 vs book-alone=1.207 | DECISION RULE: PASS -> mismatch confirmed, propose entry-nearness + fee-model re-spec (execution layer, no n_trials)"
+}

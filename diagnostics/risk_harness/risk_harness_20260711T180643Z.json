@@ -1,0 +1,407 @@
+{
+  "run_id": "20260711T180643Z",
+  "generated_at": "2026-07-11T18:06:43.959071+00:00",
+  "incumbent_cells": {
+    "equity/family1": {
+      "B": 1.0828348910013035,
+      "band": [
+        0.8657687889571951,
+        1.1342312110428048
+      ],
+      "in_band": true,
+      "T": 111,
+      "MRAD": 0.27299275380657445,
+      "n_dates": 111,
+      "n_portfolios": 1,
+      "skipped_dates": 2
+    },
+    "equity/family2": {
+      "B": 1.6912910819701195,
+      "band": [
+        0.8657687889571951,
+        1.1342312110428048
+      ],
+      "in_band": false,
+      "T": 111,
+      "MRAD": 0.1932799576380828,
+      "n_dates": 111,
+      "n_portfolios": 1,
+      "skipped_dates": 2
+    },
+    "equity/family3": {
+      "B": 1.078519808078919,
+      "band": [
+        0.8657687889571951,
+        1.1342312110428048
+      ],
+      "in_band": true,
+      "T": 111,
+      "MRAD": 0.2707999957204934,
+      "n_dates": 111,
+      "n_portfolios": 1,
+      "skipped_dates": 2
+    },
+    "equity/family4": {
+      "B": 2.3428228645365357,
+      "band": [
+        0.9050842004247501,
+        1.0949157995752499
+      ],
+      "in_band": false,
+      "T": 222,
+      "MRAD": 0.9702147280264144,
+      "n_dates": 111,
+      "n_portfolios": 2,
+      "skipped_dates": 2
+    },
+    "crypto/family1": {
+      "B": 0.8463940911409421,
+      "band": [
+        0.8825559560970593,
+        1.1174440439029407
+      ],
+      "in_band": false,
+      "T": 145,
+      "MRAD": 0.21906314795664175,
+      "n_dates": 145,
+      "n_portfolios": 1,
+      "skipped_dates": 26
+    },
+    "crypto/family2": {
+      "B": 0.7912243900421618,
+      "band": [
+        0.8825559560970593,
+        1.1174440439029407
+      ],
+      "in_band": false,
+      "T": 145,
+      "MRAD": 0.2599773365846261,
+      "n_dates": 145,
+      "n_portfolios": 1,
+      "skipped_dates": 26
+    },
+    "crypto/family3": {
+      "B": 0.8618710038637459,
+      "band": [
+        0.8825559560970593,
+        1.1174440439029407
+      ],
+      "in_band": false,
+      "T": 145,
+      "MRAD": 0.2015760015644051,
+      "n_dates": 145,
+      "n_portfolios": 1,
+      "skipped_dates": 26
+    },
+    "crypto/family4": {
+      "B": 0.9080928156350004,
+      "band": [
+        0.91695452014626,
+        1.08304547985374
+      ],
+      "in_band": false,
+      "T": 290,
+      "MRAD": 0.31450703814589753,
+      "n_dates": 145,
+      "n_portfolios": 2,
+      "skipped_dates": 26
+    },
+    "fx_etf/family1": {
+      "B": 1.0470151941893813,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": true,
+      "T": 113,
+      "MRAD": 0.2701171182094936,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "fx_etf/family2": {
+      "B": 0.9973972120053296,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": true,
+      "T": 113,
+      "MRAD": 0.22044259063439348,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "fx_etf/family3": {
+      "B": 1.0271759090391817,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": true,
+      "T": 113,
+      "MRAD": 0.2641831732394312,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "fx_etf/family4": {
+      "B": 0.590959569670901,
+      "band": [
+        0.9059279131616402,
+        1.0940720868383598
+      ],
+      "in_band": false,
+      "T": 226,
+      "MRAD": 0.7252507484064524,
+      "n_dates": 113,
+      "n_portfolios": 2,
+      "skipped_dates": 0
+    },
+    "commodity_etf/family1": {
+      "B": 1.0369810136919213,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": true,
+      "T": 113,
+      "MRAD": 0.20535731261092438,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "commodity_etf/family2": {
+      "B": 1.1539480511412417,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": false,
+      "T": 113,
+      "MRAD": 0.23820480214240833,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "commodity_etf/family3": {
+      "B": 1.048885989143494,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": true,
+      "T": 113,
+      "MRAD": 0.22024568675285186,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "commodity_etf/family4": {
+      "B": 1.1372528725512487,
+      "band": [
+        0.9059279131616402,
+        1.0940720868383598
+      ],
+      "in_band": false,
+      "T": 226,
+      "MRAD": 0.2679953451774734,
+      "n_dates": 113,
+      "n_portfolios": 2,
+      "skipped_dates": 0
+    },
+    "rates_etf/family1": {
+      "B": 1.0592531755296424,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": true,
+      "T": 113,
+      "MRAD": 0.21019285748750535,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "rates_etf/family2": {
+      "B": 0.8376126780594313,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": false,
+      "T": 113,
+      "MRAD": 0.335054252888412,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "rates_etf/family3": {
+      "B": 1.0659424943857725,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": true,
+      "T": 113,
+      "MRAD": 0.20899182556324788,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "rates_etf/family4": {
+      "B": 1.1808876355153013,
+      "band": [
+        0.9059279131616402,
+        1.0940720868383598
+      ],
+      "in_band": false,
+      "T": 226,
+      "MRAD": 0.38734455988102856,
+      "n_dates": 113,
+      "n_portfolios": 2,
+      "skipped_dates": 0
+    },
+    "intl_etf/family1": {
+      "B": 0.9286348086924119,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": true,
+      "T": 113,
+      "MRAD": 0.2784629746147146,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "intl_etf/family2": {
+      "B": 0.918950102012212,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": true,
+      "T": 113,
+      "MRAD": 0.20443102806747598,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "intl_etf/family3": {
+      "B": 0.9538938133495396,
+      "band": [
+        0.8669619789524521,
+        1.133038021047548
+      ],
+      "in_band": true,
+      "T": 113,
+      "MRAD": 0.2897456478266098,
+      "n_dates": 113,
+      "n_portfolios": 1,
+      "skipped_dates": 0
+    },
+    "intl_etf/family4": {
+      "B": 1.038088765074029,
+      "band": [
+        0.9059279131616402,
+        1.0940720868383598
+      ],
+      "in_band": true,
+      "T": 226,
+      "MRAD": 0.3706011989819484,
+      "n_dates": 113,
+      "n_portfolios": 2,
+      "skipped_dates": 0
+    },
+    "sector_etf/family1": {
+      "B": 0.9132448959746997,
+      "band": [
+        0.8549047499779977,
+        1.1450952500220024
+      ],
+      "in_band": true,
+      "T": 95,
+      "MRAD": 0.32199081826265463,
+      "n_dates": 95,
+      "n_portfolios": 1,
+      "skipped_dates": 18
+    },
+    "sector_etf/family2": {
+      "B": 0.9114464086599401,
+      "band": [
+        0.8549047499779977,
+        1.1450952500220024
+      ],
+      "in_band": true,
+      "T": 95,
+      "MRAD": 0.21423351104939364,
+      "n_dates": 95,
+      "n_portfolios": 1,
+      "skipped_dates": 18
+    },
+    "sector_etf/family3": {
+      "B": 0.9076960361961671,
+      "band": [
+        0.8549047499779977,
+        1.1450952500220024
+      ],
+      "in_band": true,
+      "T": 95,
+      "MRAD": 0.2807459576786622,
+      "n_dates": 95,
+      "n_portfolios": 1,
+      "skipped_dates": 18
+    },
+    "sector_etf/family4": {
+      "B": 0.9167194680394574,
+      "band": [
+        0.8974021647914846,
+        1.1025978352085155
+      ],
+      "in_band": true,
+      "T": 190,
+      "MRAD": 0.31720382820860515,
+      "n_dates": 95,
+      "n_portfolios": 2,
+      "skipped_dates": 18
+    }
+  },
+  "candidate_cells": null,
+  "horse_race": null,
+  "verdict": null,
+  "baseline_health": {
+    "passed": false,
+    "fraction_in_band": 0.6428571428571429,
+    "n_cells": 14,
+    "failing_cells": [
+      [
+        "commodity_etf",
+        2
+      ],
+      [
+        "crypto",
+        1
+      ],
+      [
+        "crypto",
+        2
+      ],
+      [
+        "equity",
+        2
+      ],
+      [
+        "rates_etf",
+        2
+      ]
+    ]
+  },
+  "notes": [
+    "n=100",
+    "seed=0",
+    "min_obs=252",
+    "sleeves=['equity', 'crypto', 'fx_etf', 'commodity_etf', 'rates_etf', 'intl_etf', 'sector_etf']",
+    "families 5/6 not scored: no pre-built external books (see module docstring)"
+  ]
+}

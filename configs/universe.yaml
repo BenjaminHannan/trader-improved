@@ -60,3 +60,30 @@ sleeves:
       CORN: CORN
       WEAT: WHEAT
       SOYB: SOYBEANS
+
+  rates_etf:
+    asset_class: rates
+    calendar: nyse
+    membership: static         # static list with inception dates (see instruments)
+    liquidity:
+      min_adv_usd: 0.5e6
+    symbols:
+      [TLT, IEF, SHY, LQD, HYG, EMB, TIP, BNDX]
+
+  intl_etf:
+    asset_class: intl_equity
+    calendar: nyse
+    membership: static
+    liquidity:
+      min_adv_usd: 0.5e6
+    symbols:
+      [EWJ, EWG, EWU, EWQ, EWA, EWC, EWZ, INDA, FXI, EWY, EWT, EWW]
+
+  sector_etf:
+    asset_class: sector_equity
+    calendar: nyse
+    membership: static
+    liquidity:
+      min_adv_usd: 0.5e6
+    symbols:
+      [XLK, XLF, XLE, XLV, XLI, XLP, XLY, XLU, XLB, XLRE, XLC]

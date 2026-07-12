@@ -1,0 +1,162 @@
+{
+  "generated_at": "2026-07-11T22:49:03.738466+00:00",
+  "sleeve": "equity",
+  "smoke": false,
+  "n_ids": 574,
+  "n_eval_dates_scored": 112,
+  "n_eval_dates_full": 112,
+  "first_full_eval_date": "2017-01-04",
+  "n_f1_draws": 100,
+  "ep_tilt": {
+    "as_of": "2017-01-04",
+    "n_ids_with_finite_ep": 525,
+    "z_clip": [
+      -3,
+      3
+    ]
+  },
+  "cfg_incumbent_factors": [
+    "market",
+    "size",
+    "momentum",
+    "vol"
+  ],
+  "cfg_candidate_factors": [
+    "market",
+    "size",
+    "momentum",
+    "vol",
+    "liquidity",
+    "earnings_yield"
+  ],
+  "fundamentals_available": true,
+  "walk": {
+    "start": "2016-01-04",
+    "end": "2026-05-20",
+    "fr_shape_incumbent": [
+      2484,
+      15
+    ],
+    "fr_shape_candidate": [
+      2484,
+      17
+    ]
+  },
+  "mirror_crosscheck": {
+    "passed": true,
+    "max_abs_diff": 0.0,
+    "n_dates": 35,
+    "window": [
+      "2026-04-01",
+      "2026-05-20"
+    ]
+  },
+  "cells": {
+    "f1_ep_tilted": {
+      "incumbent": {
+        "B": 0.9199397014543131,
+        "band": [
+          0.8663693790437879,
+          1.1336306209562121
+        ],
+        "in_band": true,
+        "T": 112,
+        "MRAD": 0.2643897198421751,
+        "n_dates": 112,
+        "n_portfolios": 1,
+        "skipped_dates": 0
+      },
+      "candidate": {
+        "B": 0.9201572782578671,
+        "band": [
+          0.8663693790437879,
+          1.1336306209562121
+        ],
+        "in_band": true,
+        "T": 112,
+        "MRAD": 0.2641049433389748,
+        "n_dates": 112,
+        "n_portfolios": 1,
+        "skipped_dates": 0
+      }
+    },
+    "f5_liquidity": {
+      "incumbent": {
+        "B": 1.4935694992952608,
+        "band": [
+          0.8663693790437879,
+          1.1336306209562121
+        ],
+        "in_band": false,
+        "T": 112,
+        "MRAD": 0.3835569600177861,
+        "n_dates": 112,
+        "n_portfolios": 1,
+        "skipped_dates": 0
+      },
+      "candidate": {
+        "B": 1.0533036186504312,
+        "band": [
+          0.8663693790437879,
+          1.1336306209562121
+        ],
+        "in_band": true,
+        "T": 112,
+        "MRAD": 0.2675609499463688,
+        "n_dates": 112,
+        "n_portfolios": 1,
+        "skipped_dates": 0
+      }
+    },
+    "f5_earnings_yield": {
+      "incumbent": {
+        "B": 1.6964884490353254,
+        "band": [
+          0.8663693790437879,
+          1.1336306209562121
+        ],
+        "in_band": false,
+        "T": 112,
+        "MRAD": 0.5806333410280483,
+        "n_dates": 112,
+        "n_portfolios": 1,
+        "skipped_dates": 0
+      },
+      "candidate": {
+        "B": 1.001036746061519,
+        "band": [
+          0.8663693790437879,
+          1.1336306209562121
+        ],
+        "in_band": true,
+        "T": 112,
+        "MRAD": 0.23709351452638497,
+        "n_dates": 112,
+        "n_portfolios": 1,
+        "skipped_dates": 0
+      }
+    }
+  },
+  "criterion_a_bias_toward_1": {
+    "f1_ep_tilted": true,
+    "f5_liquidity": true,
+    "f5_earnings_yield": true,
+    "all_moved_toward_1": true
+  },
+  "criterion_b_r2": {
+    "mean_r2_incumbent": 0.2145257681695301,
+    "mean_r2_candidate": 0.22314694928481466,
+    "delta_pp": 0.8621181115284565,
+    "meets_threshold_ge_1pp": false,
+    "n_days_incumbent": 2484,
+    "n_days_candidate": 2484
+  },
+  "final_adopt": false,
+  "wall_clock_seconds": 1302.3526329994202,
+  "notes": [
+    "RiskModel.build/estimate_factor_returns have no fundamentals parameter; candidate (and, for speed, incumbent) Sigma assembled script-locally from ONE precomputed factor-return walk per cfg, sliced <= as_of per date -- row-for-row equal to production (runtime cross-check enforced, see mirror_crosscheck). Production estimators used throughout.",
+    "R^2 = weighted (WLS-objective) cross-sectional R^2, computed in the script; estimate_factor_returns does not expose it.",
+    "family-5 books use pinv(B'B) (sector dummies ~ collinear with market).",
+    "smoke mode truncates the walk start (~0.5% EWMA-tail approximation) and scores only the last 30 eval dates."
+  ]
+}

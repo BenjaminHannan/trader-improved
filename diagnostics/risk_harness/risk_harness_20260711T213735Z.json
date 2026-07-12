@@ -1,0 +1,83 @@
+{
+  "run_id": "20260711T213735Z",
+  "generated_at": "2026-07-11T21:37:35.531416+00:00",
+  "incumbent_cells": {
+    "crypto/family1": {
+      "B": 1.269534718879968,
+      "band": [
+        0.889903623487364,
+        1.1100963765126362
+      ],
+      "in_band": false,
+      "T": 165,
+      "MRAD": 0.2960250805571871,
+      "n_dates": 165,
+      "n_portfolios": 1,
+      "skipped_dates": 6
+    },
+    "crypto/family2": {
+      "B": 1.7926667146676507,
+      "band": [
+        0.889903623487364,
+        1.1100963765126362
+      ],
+      "in_band": false,
+      "T": 165,
+      "MRAD": 0.652926012370735,
+      "n_dates": 165,
+      "n_portfolios": 1,
+      "skipped_dates": 6
+    },
+    "crypto/family3": {
+      "B": 1.2061265833141885,
+      "band": [
+        0.889903623487364,
+        1.1100963765126362
+      ],
+      "in_band": false,
+      "T": 165,
+      "MRAD": 0.2603914542781182,
+      "n_dates": 165,
+      "n_portfolios": 1,
+      "skipped_dates": 6
+    },
+    "crypto/family4": {
+      "B": 1.5122107876488007,
+      "band": [
+        0.9221501055838477,
+        1.0778498944161523
+      ],
+      "in_band": false,
+      "T": 330,
+      "MRAD": 0.4137734336357495,
+      "n_dates": 165,
+      "n_portfolios": 2,
+      "skipped_dates": 6
+    }
+  },
+  "candidate_cells": null,
+  "horse_race": null,
+  "verdict": null,
+  "baseline_health": {
+    "passed": false,
+    "fraction_in_band": 0.0,
+    "n_cells": 2,
+    "failing_cells": [
+      [
+        "crypto",
+        1
+      ],
+      [
+        "crypto",
+        2
+      ]
+    ]
+  },
+  "notes": [
+    "n=100",
+    "seed=0",
+    "min_obs=252",
+    "sleeves=['crypto']",
+    "families 5/6 not scored: no pre-built external books (see module docstring)"
+  ]
+}

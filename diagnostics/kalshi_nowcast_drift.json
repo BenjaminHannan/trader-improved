@@ -1,0 +1,47 @@
+{
+  "pre_registration": {
+    "regression": "dm_t = a + b*(nowcast_{t-1} - m_{t-1}), cluster by event",
+    "Q1": "b > 0, |t| >= 1.96 -> drift toward nowcast (promote)",
+    "Q2": "b < 0, |t| >= 1.96 -> market leads nowcast (anti-edge)",
+    "filters": {
+      "ffill_days": 5,
+      "min_strikes": 5,
+      "tails": [
+        0.85,
+        0.15
+      ],
+      "window_days": 10
+    }
+  },
+  "n_event_days": 441,
+  "n_events": 68,
+  "n_regression_obs": 368,
+  "regression": {
+    "alpha": -0.00018026842954333658,
+    "beta": 0.009097627888420638,
+    "t_alpha": -0.26720001336152394,
+    "t_beta": 1.5951874914190336,
+    "n": 368,
+    "n_clusters": 59
+  },
+  "verdict": "INCONCLUSIVE -> dead",
+  "per_series": [
+    {
+      "series": "KXCPI",
+      "beta": 0.010808202039428476,
+      "t": 1.4184517971183135,
+      "n": 250
+    },
+    {
+      "series": "KXCPICORE",
+      "beta": 0.009488248968539937,
+      "t": 1.2569618233125217,
+      "n": 115
+    }
+  ],
+  "terminal_mae": {
+    "market": 0.0660436507936508,
+    "nowcast": 0.09146128394926571,
+    "n_events": 63
+  }
+}

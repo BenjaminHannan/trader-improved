@@ -1,0 +1,372 @@
+#!/usr/bin/env python
+"""Factor IC report and promotion gate over the curated lake.
+
+Usage
+-----
+    python scripts/build_factors.py --ic-report [--start S --end E --lake-root DIR]
+    python scripts/build_factors.py --ic-report --apply   # record verdicts to yaml
+
+For every candidate/accepted factor in ``configs/factors.yaml`` this:
+  1. loads the signal's required curated datasets from the lake,
+  2. computes signal -> cross-sectional z-score -> per-date rank IC,
+  3. splits the IC series into train (first 80%) and OOS (last 20% of dates),
+  4. estimates the IC decay half-life and a net-of-cost single-factor validation return,
+  5. runs the registry gate and prints a per-factor verdict table.
+With ``--apply`` the verdicts are recorded back into ``configs/factors.yaml`` (status +
+gate stats + bumped ``n_trials``).
+
+Dependency discipline: signal classes are written by a sibling package and the cost
+model in parallel — both are imported lazily *inside* the functions that need them, with
+clear fallbacks, so this module always imports and ``--help`` always works.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+
+import numpy as np
+import pandas as pd
+
+from production.alpha.ic import (decay_halflife, forward_returns, ic_decay,
+                                 ic_tstat, rank_ic)
+from production.alpha.registry import FactorRegistry, GateStats
+from production.alpha.zscore import zscore_scores
+from production.core.config import costs_config
+from production.core.lake import Lake, read_signal_bundle
+from production.signals.base import sleeve_from_id
+
+
+def _sleeve_map(prices: pd.DataFrame) -> pd.Series:
+    """instrument_id -> sleeve via the shared id-prefix rule.
+
+    ``sleeve_from_id`` raises on an unknown prefix; we guard so a stray malformed id maps
+    to ``None`` (dropped downstream) rather than killing the whole report.
+    """
+    def _safe(iid) -> str | None:
+        try:
+            return sleeve_from_id(str(iid))
+        except ValueError:
+            return None
+
+    ids = prices["instrument_id"].unique()
+    return pd.Series({i: _safe(i) for i in ids})
+
+
+def load_bundle(lake: Lake, start, end) -> dict[str, pd.DataFrame]:
+    """Load available curated datasets into the signal input bundle.
+
+    Missing datasets are skipped silently — a lake that only has prices still yields a
+    usable (if smaller) report. See ``production.core.lake.read_signal_bundle`` for the
+    bundle-key -> curated-dataset-name mapping (mcap<-crypto_meta, tvl<-defi_tvl).
+    """
+    return read_signal_bundle(lake, start=start, end=end)
+
+
+def _load_signal_registry() -> dict[str, type]:
+    """Import the sibling signals package lazily and return its class registry."""
+    try:
+        from production.signals.base import all_signals
+    except Exception as exc:  # noqa: BLE001 - surface a clear, actionable message
+        raise SystemExit(
+            "cannot import production.signals.base.all_signals — the signals package "
+            f"is not available yet ({exc}). Run once signals are implemented.")
+    return all_signals()
+
+
+def _annualized_sharpe(net_by_date: pd.Series, horizon: int) -> float:
+    """Annualized Sharpe of a per-rebalance net return stream.
+
+    Each observation is a ``horizon``-day-held net return, so ~``252/horizon`` independent
+    periods fit in a year; that is the annualization factor. Returns NaN when the stream is
+    too short or has no dispersion (nothing to deflate against downstream).
+    """
+    r = pd.Series(net_by_date).astype(float).dropna()
+    if len(r) < 2:
+        return float("nan")
+    sd = float(r.std(ddof=1))
+    if not np.isfinite(sd) or sd == 0.0:
+        return float("nan")
+    periods_per_year = 252.0 / max(int(horizon), 1)
+    return float(r.mean() / sd * np.sqrt(periods_per_year))
+
+
+def _net_validation_return(z_oos: pd.DataFrame, prices: pd.DataFrame,
+                           sleeve_map: pd.Series, horizon: int,
+                           costs: dict) -> tuple[float, pd.Series]:
+    """Approximate net-of-cost return of a top-minus-bottom-quintile long/short book.
+
+    Weekly-rebalanced on the OOS z-scores, equal-weight top vs bottom quintile per
+    sleeve, held ``horizon`` days forward. Turnover is charged at the per-sleeve floor
+    cost (or the full cost model when available). Returns ``(summed_net, net_by_date)`` —
+    the summed net return over the OOS slice (only its sign matters to the gate) plus the
+    per-rebalance net return series (feeds the validation-slice Sharpe).
+    """
+    if z_oos.empty:
+        return float("nan"), pd.Series(dtype=float)
+    fwd = forward_returns(prices, horizon)
+    panel = z_oos.merge(fwd, on=["obs_date", "instrument_id"], how="inner")
+    panel["sleeve"] = panel["instrument_id"].map(sleeve_map)
+    panel = panel.dropna(subset=["sleeve", "fwd_ret"])
+    if panel.empty:
+        return float("nan"), pd.Series(dtype=float)
+
+    cost_model = None
+    try:  # optional dependency, written in parallel
+        from production.backtest.cost_model import CostModel
+        cost_model = CostModel(costs)
+    except Exception:  # noqa: BLE001 - fall back to floor-only arithmetic
+        cost_model = None
+
+    floors = {s: spec.get("floor_bps", 0.0)
+              for s, spec in costs.get("sleeves", {}).items()}
+
+    # Rebalance on a `horizon`-day cadence over the OOS grid, so each rebalance books
+    # ONE non-overlapping forward window. The first live-data gate run (2026-07-07)
+    # exposed the prior behavior — iterating every date — as summing ~horizon-times
+    # overlapping fwd returns while charging turnover on daily quintile churn, which
+    # produced net "returns" like -166 on a 2y slice for a 500-name book. Only the
+    # sign feeds the gate, but the sign was being set by churn costs the documented
+    # weekly-cadence book would never pay.
+    all_dates = sorted(panel["obs_date"].unique())
+    grid = set(all_dates[::max(int(horizon), 1)])
+
+    prev_w: dict = {}
+    net = 0.0
+    net_dates: list = []
+    net_vals: list = []
+    for _date, day in panel.groupby("obs_date", sort=True):
+        if _date not in grid:
+            continue
+        gross = 0.0
+        w_today: dict = {}
+        for sleeve, g in day.groupby("sleeve"):
+            if len(g) < 5:
+                continue
+            q = g["value"].quantile([0.2, 0.8])
+            lo, hi = q.iloc[0], q.iloc[1]
+            longs = g[g["value"] >= hi]
+            shorts = g[g["value"] <= lo]
+            if longs.empty or shorts.empty:
+                continue
+            wl = 1.0 / len(longs)
+            ws = 1.0 / len(shorts)
+            gross += wl * longs["fwd_ret"].sum() - ws * shorts["fwd_ret"].sum()
+            for iid in longs["instrument_id"]:
+                w_today[iid] = w_today.get(iid, 0.0) + wl
+            for iid in shorts["instrument_id"]:
+                w_today[iid] = w_today.get(iid, 0.0) - ws
+
+        # turnover cost at the per-sleeve floor (bps) on |w - w_prev|
+        keys = set(w_today) | set(prev_w)
+        cost = 0.0
+        for iid in keys:
+            dw = abs(w_today.get(iid, 0.0) - prev_w.get(iid, 0.0))
+            floor = floors.get(sleeve_map.get(iid), 0.0)
+            cost += dw * floor / 1e4
+        net_t = gross - cost
+        net += net_t
+        net_dates.append(_date)
+        net_vals.append(net_t)
+        prev_w = w_today
+
+    _ = cost_model  # reserved for a richer impact estimate; floor path is authoritative
+    net_by_date = pd.Series(net_vals, index=pd.DatetimeIndex(net_dates))
+    return float(net), net_by_date
+
+
+def _cpcv_sign_stability(train_ic: pd.Series, horizon: int, n_blocks: int = 8,
+                         k: int = 4) -> float:
+    """Fraction of C(n_blocks, k) within-train block recombinations whose mean IC
+    shares the full-train sign (research-oos-gate-design, 2026-07-07).
+
+    Operates on the already-computed per-date IC series, so the whole diagnostic is
+    block-mean arithmetic: split the train span into `n_blocks` contiguous blocks,
+    purge `horizon`-day strips at every internal block boundary (overlapping labels),
+    and score each k-block subset. Advisory/reject-only at the call site; NaN when
+    the series is too short to split.
+    """
+    from itertools import combinations
+
+    s = train_ic.dropna().sort_index()
+    if len(s) < n_blocks * 10:
+        return float("nan")
+    base_sign = np.sign(s.mean())
+    if base_sign == 0:
+        return float("nan")
+    blocks = np.array_split(np.arange(len(s)), n_blocks)
+    purged = []
+    for b in blocks:
+        keep = b[(b >= b[0] + 0) & (b <= b[-1] - min(horizon, max(len(b) // 3, 1)))]
+        purged.append(keep)
+    vals = s.to_numpy()
+    same = 0
+    combos = list(combinations(range(n_blocks), k))
+    for combo in combos:
+        idx = np.concatenate([purged[i] for i in combo])
+        if len(idx) == 0:
+            continue
+        same += int(np.sign(vals[idx].mean()) == base_sign)
+    return same / len(combos)
+
+
+def run_ic_report(start, end, lake_root, apply: bool) -> int:
+    lake = Lake(lake_root)
+    bundle = load_bundle(lake, start, end)
+    if "prices" not in bundle:
+        print(f"no price data found in lake at {lake.root} — nothing to report")
+        return 0
+
+    prices = bundle["prices"]
+    sleeve_map = _sleeve_map(prices)
+    costs = costs_config()
+    registry = FactorRegistry()
+    signal_registry = _load_signal_registry()
+
+    rows: list[dict] = []
+    for name, spec in registry.factors().items():
+        if spec.get("status") not in ("candidate", "accepted"):
+            continue
+        cls = signal_registry.get(name)
+        if cls is None:
+            print(f"  {name}: no signal class registered — skipped")
+            continue
+        try:
+            panel = cls().compute(bundle)
+        except Exception as exc:  # noqa: BLE001 - one bad signal must not kill the report
+            print(f"  {name}: signal.compute failed ({exc}) — skipped")
+            continue
+        if panel is None or panel.empty:
+            print(f"  {name}: signal produced no values — skipped")
+            continue
+
+        z = zscore_scores(panel, sleeve_map)
+        dates = np.sort(pd.unique(z["obs_date"]))
+        if len(dates) < 10:
+            print(f"  {name}: too few dates ({len(dates)}) to gate — skipped")
+            continue
+        cut = dates[int(len(dates) * 0.8)]  # start of the OOS slice
+
+        horizon = int(spec["horizon_days"])
+        fwd = forward_returns(prices, horizon)
+        ic = rank_ic(z, fwd, sleeve_map)
+        if ic.empty:
+            print(f"  {name}: no IC observations — skipped")
+            continue
+        # Precision-weighted per-date aggregation: a per-date rank IC across N names
+        # has variance ~1/(N-1), so an unweighted mean across sleeves lets an 8-name
+        # sleeve contribute ~60x the noise of the 500-name sleeve. First live gate
+        # run (2026-07-07): mom_12_1 pooled unweighted t=0.85 while equity alone was
+        # t=3.3 and commodity t=2.3 — an aggregation artifact, confirmed by the
+        # pre-registered forensics check. Weight each sleeve-date IC by (N-1).
+        icw = ic.assign(_w=(ic["n_names"].clip(lower=2) - 1).astype(float))
+        ic_by_date = (icw.assign(_wx=icw["rank_ic"] * icw["_w"])
+                         .groupby("obs_date")[["_wx", "_w"]].sum()
+                         .pipe(lambda g: g["_wx"] / g["_w"]).sort_index())
+
+        # Purge + embargo at the split boundary (research-oos-gate-design, 2026-07-07):
+        # the last `horizon` train days share forward windows with the first OOS days,
+        # and serial correlation leaks past them. Both trims can only REDUCE the
+        # information available to pass — strictly non-loosening.
+        embargo_days = max(int(round(len(ic_by_date) * 0.01)), horizon)
+        purge_cut = cut - pd.Timedelta(days=int(horizon * 1.6))   # ~horizon in bdays
+        oos_start = cut + pd.Timedelta(days=int(embargo_days * 1.6))
+        train = ic_by_date[ic_by_date.index < purge_cut]
+        oos = ic_by_date[ic_by_date.index >= oos_start]
+        train_ic = float(train.mean()) if len(train) else float("nan")
+        tstat = ic_tstat(train)
+        oos_ic = float(oos.mean()) if len(oos) else float("nan")
+        # SE of the mean OOS IC with T_eff = T/horizon (overlapping-label discount):
+        # lets a rejection log distinguish "sign flip > 2 SE" from "uninformative cell".
+        t_eff = max(len(oos) / max(horizon, 1), 1.0)
+        oos_se = float(oos.std(ddof=1) / np.sqrt(t_eff)) if len(oos) > 2 else float("nan")
+
+        # Within-train CPCV sign-stability diagnostic (reject-only; zero trial cost):
+        # C(8,4)=70 purged block recombinations of the TRAIN span; the fraction whose
+        # mean IC shares the train sign. Low stability = the train t-stat lives in
+        # one regime pocket.
+        sign_frac = _cpcv_sign_stability(train, horizon)
+
+        decay = ic_decay(z, prices, sleeve_map)
+        # Anchor the half-life at the factor's own horizon: the criterion is
+        # persistence of the signal we trade, not of 1-day microstructure noise.
+        halflife = decay_halflife(decay, anchor_horizon=horizon)
+
+        z_oos = z[z["obs_date"] >= cut]
+        net, net_by_date = _net_validation_return(z_oos, prices, sleeve_map, horizon, costs)
+        val_sharpe = _annualized_sharpe(net_by_date, horizon)
+
+        stats = GateStats(train_ic=train_ic, train_tstat=tstat, oos_ic=oos_ic,
+                          decay_halflife_days=float(halflife),
+                          net_validation_return=net, n_dates=int(len(ic_by_date)),
+                          val_sharpe=val_sharpe)
+        verdict = registry.gate(name, stats)
+        # Reject-only stability flag: a factor whose train signal holds its sign in
+        # fewer than 60% of within-train CPCV paths is regime-pocket-dependent. This
+        # can only ADD a rejection, never rescue one.
+        if verdict.passed and sign_frac == sign_frac and sign_frac < 0.6:
+            verdict.passed = False
+            verdict.reasons.append(
+                f"within-train CPCV sign stability {sign_frac:.2f} < 0.60")
+        stats._oos_se = oos_se
+        stats._cpcv_sign_frac = sign_frac
+        rows.append({"name": name, "sleeves": ",".join(spec.get("sleeves", [])),
+                     "stats": stats, "verdict": verdict})
+        if apply:
+            registry.record(name, verdict)
+
+    _print_table(rows)
+
+    if apply:
+        registry.save()
+        print(f"\nrecorded {len(rows)} verdict(s) to {registry.path}; "
+              f"n_trials now {registry.n_trials}")
+    return 0
+
+
+def _print_table(rows: list[dict]) -> None:
+    header = (f"{'factor':<18}{'sleeves':<26}{'train_IC':>10}{'tstat':>8}"
+              f"{'OOS_IC':>10}{'halflife':>10}{'OOS_SE':>9}{'CPCV':>6}  verdict")
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        s = r["stats"]
+        v = r["verdict"]
+        tag = "PASS" if v.passed else "FAIL"
+        hl = "inf" if not np.isfinite(s.decay_halflife_days) else f"{s.decay_halflife_days:.1f}"
+        se = getattr(s, "_oos_se", float("nan"))
+        sf = getattr(s, "_cpcv_sign_frac", float("nan"))
+        se_s = f"{se:.4f}" if se == se else "n/a"
+        sf_s = f"{sf:.2f}" if sf == sf else "n/a"
+        print(f"{r['name']:<18}{r['sleeves']:<26}{s.train_ic:>10.4f}"
+              f"{s.train_tstat:>8.2f}{s.oos_ic:>10.4f}{hl:>10}"
+              f"{se_s:>9}{sf_s:>6}  {tag}")
+        if not v.passed:
+            for reason in v.reasons:
+                print(f"{'':<18}    - {reason}")
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="build_factors.py",
+        description="Factor IC report and promotion gate over the curated lake.")
+    p.add_argument("--ic-report", action="store_true",
+                   help="compute per-factor IC, decay and gate verdicts")
+    p.add_argument("--apply", action="store_true",
+                   help="record gate verdicts back into configs/factors.yaml")
+    p.add_argument("--start", default=None, help="report start date (obs_date >=)")
+    p.add_argument("--end", default=None, help="report end date (obs_date <=)")
+    p.add_argument("--lake-root", default=None,
+                   help="lake root dir (default: repo data/)")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+    if not args.ic_report:
+        build_arg_parser().print_help()
+        return 0
+    return run_ic_report(args.start, args.end, args.lake_root, args.apply)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
