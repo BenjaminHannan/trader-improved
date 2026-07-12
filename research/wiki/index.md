@@ -31,11 +31,15 @@ findings here, and (when the evidence survives) lands a verified implementation 
 - [[questions/research-political-underconfidence]] — 2026-07-11 (iteration 7): FIRST
   PASS of the loop — favorite-backing +4.8% post-fee t=2.9, robust to date clustering
   and liquidity floor; favorite-tilt signal landed in the events sleeve
+- [[questions/research-kalshi-maker-execution]] — 2026-07-12: maker fee = 25% of
+  taker; re-prices two filed negatives + live tilt entry cost; blocker is now
+  fill-probability calibration (own WS capture / vendor / SSRN reconstruction)
 
 ## Concepts
 - [[concepts/ewma-shrinkage-combination]]
 
 ## Sources
+- [[sources/kalshi-maker-fees-and-lob-data]]
 - [[sources/ledoit-wolf-2003-honey]]
 - [[sources/bailey-cscv-pbo-2015]] — CSCV/PBO: hold-out is the weakest OOS scheme
 - [[sources/arian-norouzi-seco-2024-oos-methods]] — controlled comparison: CPCV > walk-forward

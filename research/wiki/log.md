@@ -1,5 +1,21 @@
 # autoresearch log
 
+## [2026-07-12] autoresearch | Kalshi maker-side execution (fee wall is 4x lower passive)
+- Rounds: 1 (fee schedule + LOB data availability + WS channel spec; kalshi.com
+  and SSRN landing rate-limited/403 — secondaries cross-verified)
+- Key finding: **maker fee = 25% of taker** (max 0.44c vs 1.75c) — three
+  findings that died at the taker wall re-price: post-move fade goes −0.6c →
+  ~+1.2c/trigger maker×2 (gross of adverse selection), longshot fade sign
+  undetermined, live tilt entry cost −75% if resting orders fill. Historical
+  LOB is OBTAINABLE: own WS capture (orderbook_delta + resnapshot-on-gap,
+  free, forward-only), vendor (lycheedata 36GB+), or Marriott SSRN 6583921
+  reconstruction. Blocker is now fill-probability/adverse-selection
+  calibration, not data existence.
+- Pages: [[sources/kalshi-maker-fees-and-lob-data]],
+  [[questions/research-kalshi-maker-execution]] (revives demoted backlog #19
+  with a concrete data path). Nothing tradeable today; owner decisions filed
+  (vendor cost vs free forward capture).
+
 ## [2026-07-12] Factor-health rule + basis_carry demotion round
 
 HONEST FRAMING: this is a governance DECISION on observed OOS degradation,
