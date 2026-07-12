@@ -41,6 +41,36 @@ post-fill adverse drift (how much of the 1.21c evaporates conditional on
 being filled), and capacity (books are thin — per-trigger size unknown).
 Nothing promotable without that data; no trial burned.
 
+DISCOVERY (same night): **the fill data already exists in our lake.** The
+backfill's raw zone (`data/raw/vendor=kalshi/dataset=event_markets_hist`)
+retains the full tick-level trade tapes it paginated to build daily bars:
+per-trade `created_time` (µs), `yes_price_dollars`, `count_fp`, and
+**`taker_side`/`taker_book_side`** — the aggressor flag. ~18.6k trades in one
+sampled series payload × 499 politics series + the econ tranche. A maker-fill
+simulation is computable TODAY; the vendor/WS-capture decision is only needed
+for book-DEPTH questions (queue position, displayed size), not first-cut fill
+calibration.
+
+PRE-REGISTERED (maker-fill simulation, written before any measurement):
+simulate the post-move fade with a PASSIVE entry against the tick tape.
+- Triggers: iteration 9's exact spec (|1d Δclose| ≥ 5c, prior close in
+  [0.10,0.90], ≥5d to close, settled kalshi markets).
+- Entry: rest on the fade side at the post-move close p_t from trigger close.
+  CONSERVATIVE queue-free fill rule: the order fills at the first later trade
+  whose price is STRICTLY through our level with the taker on the opposite
+  side (price priority guarantees a strictly-through print consumed our
+  level; at-level prints are ignored — no queue-position assumption).
+  Resting window: min(3 obs days, market close).
+- Exit: TAKER at the close 3 obs days after fill (full taker fee — exit
+  passivity is upside not assumed). Net = signed move from fill level to exit
+  − 0.25·taker(entry) − taker(exit).
+- Q1 capacity: fill rate ≥ 15% of triggers. Q2 economics: filled-subset net
+  edge > 0 with event-clustered t ≥ 2.0. Q3 robustness: filled-subset edge
+  t ≥ 1.5 in the above-median-volume half alone.
+- All pass → fund ONE trial (n_trials 24 → 25) at exactly these parameters.
+  Any fail → negative filed, zero trials. Adverse selection is inherently
+  measured: the edge is computed ONLY on triggers whose resting order filled.
+
 ## [2026-07-12] Factor-health rule + basis_carry demotion round
 
 HONEST FRAMING: this is a governance DECISION on observed OOS degradation,
