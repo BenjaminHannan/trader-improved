@@ -1,5 +1,34 @@
 # autoresearch log
 
+## [2026-07-11] Iteration 9 PRE-REGISTRATION — Kalshi post-move drift (written before any data contact)
+
+Motivation: the honest headline is zero; the alpha frontier per the burned-trial
+record (mom/tsmom re-specs failed gate v2; earnings_yield/COT re-spec mechanisms
+refuted at step-0) points at the one domain with a measured live edge — Kalshi.
+Practitioner-scan candidate #3 (Angelini-De Angelis, arXiv 2606.07811: β=0.63
+post-move continuation, sports only): does binary-market under-reaction drift
+exist in OUR panel (politics/econ, 2021-2026)?
+
+Diagnostic (zero trial cost; a trial is funded ONLY if all three pass):
+- Sample: `event_markets_hist` (kalshi) market-days with **≥5 days to close**
+  (excludes mechanical settlement convergence), pre-move `yes_price` in
+  [0.10, 0.90] (avoids boundary compression), settled markets only.
+- Trigger: |1-day Δ yes_price| ≥ 0.05. Direction = sign of the move.
+- Response: signed continuation over the next 3 obs days (Δp in move direction).
+- Q1 (existence): mean signed 3d continuation ≥ +1.0c, cluster-robust t ≥ 2.0
+  (clusters = event_key), n ≥ 1,000 triggers.
+- Q2 (economics): net edge > 0 after the Whelan taker curve charged TWICE
+  (entry at post-move price, exit 3d later — a drift trade round-trips, unlike
+  the hold-to-settlement tilt).
+- Q3 (capacity/liquidity, the documented Angelini caveat): effect present with
+  t ≥ 1.5 in the above-median-volume half on its own.
+- Any fail → file the negative, no trial burned. All pass → fund ONE trial
+  (n_trials 24 → 25) for a drift signal whose spec (trigger size, holding
+  days, price band) is fixed to THESE pre-registered values — no post-hoc bin
+  shopping; different parameters = a different (new) trial.
+- Guard: the diagnostic runs only AFTER the in-flight category remediation of
+  `event_markets_hist` lands (do not read a half-written vintage).
+
 ## [2026-07-11] Iteration 8 — Q5 exposures adjudication: NO-ADOPT (0.86pp vs 1.00pp)
 
 Full pre-registered run (equity, 574 ids, 112 eval dates, walk 2021-2026,
