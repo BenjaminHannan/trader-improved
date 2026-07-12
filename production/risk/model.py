@@ -40,15 +40,33 @@ def _shrunk_cov(returns: pd.DataFrame, cfg: dict, min_obs: int) -> pd.DataFrame:
     method = str(cfg.get("method", "fixed")).lower()
     halflife = float(cfg.get("ewma_halflife_days", 90))
     if method == "fixed":
-        return ewma_cov(returns, halflife=halflife,
-                        shrink=float(cfg.get("shrinkage_to_diagonal", 0.3)),
-                        min_obs=min_obs)
-    if method in ("lw", "lw_cc"):
+        Sigma = ewma_cov(returns, halflife=halflife,
+                         shrink=float(cfg.get("shrinkage_to_diagonal", 0.3)),
+                         min_obs=min_obs)
+    elif method in ("lw", "lw_cc"):
         target = "diagonal" if method == "lw" else "constant_correlation"
         Sigma, _delta = ledoit_wolf_shrinkage(
             returns, target=target, ewma_halflife=halflife, min_obs=min_obs)
-        return Sigma
-    raise RiskError(f"_shrunk_cov: unknown covariance method {method!r}")
+    else:
+        raise RiskError(f"_shrunk_cov: unknown covariance method {method!r}")
+
+    blend = cfg.get("anchor_blend")
+    if blend:
+        # An EWMA projects its current level flat across the horizon — no
+        # long-run anchor, which understates 21d risk after calm stretches and
+        # overstates it after spikes. Blend toward the trailing equal-weight
+        # covariance: a convex combination of PSD estimates stays PSD. The
+        # anchor leg reuses ewma_cov with an effectively-infinite halflife so
+        # its NaN-masking/symmetrize/jitter hygiene is identical to the fast
+        # leg's. Shorter histories than the window use whatever is available
+        # past min_obs.
+        w = float(blend["weight"])
+        long_n = int(blend.get("long_window_days", 756))
+        anchor = ewma_cov(returns.iloc[-long_n:], halflife=1e12, shrink=0.0,
+                          min_obs=min_obs)
+        Sigma = w * Sigma + (1.0 - w) * anchor.reindex(index=Sigma.index,
+                                                       columns=Sigma.columns)
+    return Sigma
 
 
 def _instrument_returns(prices: pd.DataFrame, as_of, ids) -> pd.DataFrame:

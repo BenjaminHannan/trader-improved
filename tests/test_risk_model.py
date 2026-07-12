@@ -434,3 +434,36 @@ def test_lw_respects_min_obs():
                      index=dates, columns=["a", "b", "c"])
     with pytest.raises(Exception):
         ledoit_wolf_shrinkage(r, target="diagonal", min_obs=60)
+
+
+# ------------------------------------------------- anchor blend (iteration 10)
+def test_anchor_blend_weight_endpoints_and_midpoint():
+    """w=1 -> the method cov unchanged; w=0 -> the trailing equal-weight anchor
+    (ewma_cov at an effectively-infinite halflife, shrink=0); w=0.5 -> the
+    elementwise average; result stays PSD (convex PSD combination)."""
+    rng = np.random.default_rng(11)
+    rets = pd.DataFrame(rng.normal(0, 0.02, size=(300, 4)),
+                        index=pd.bdate_range("2023-01-02", periods=300),
+                        columns=list("ABCD"))
+    base = {"method": "fixed", "ewma_halflife_days": 90,
+            "shrinkage_to_diagonal": 0.3}
+    fast = ewma_cov(rets, halflife=90, shrink=0.3, min_obs=252)
+    anchor = ewma_cov(rets.iloc[-756:], halflife=1e12, shrink=0.0, min_obs=252)
+
+    w1 = _shrunk_cov(rets, {**base, "anchor_blend": {"weight": 1.0,
+                                                     "long_window_days": 756}},
+                     min_obs=252)
+    pd.testing.assert_frame_equal(w1, 1.0 * fast + 0.0 * anchor)
+
+    w0 = _shrunk_cov(rets, {**base, "anchor_blend": {"weight": 0.0,
+                                                     "long_window_days": 756}},
+                     min_obs=252)
+    pd.testing.assert_frame_equal(
+        w0, 0.0 * fast + 1.0 * anchor.reindex(index=fast.index,
+                                              columns=fast.columns))
+
+    half = _shrunk_cov(rets, {**base, "anchor_blend": {"weight": 0.5,
+                                                       "long_window_days": 756}},
+                       min_obs=252)
+    pd.testing.assert_frame_equal(half, 0.5 * fast + 0.5 * anchor)
+    assert np.linalg.eigvalsh(half.to_numpy()).min() > 0

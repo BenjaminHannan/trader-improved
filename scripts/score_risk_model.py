@@ -279,6 +279,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "cov + its small-sleeve fallback; specific_risk untouched). "
                         "Combine with --sleeves to scope the run to the sleeve the "
                         "candidate targets — the config file is never modified.")
+    p.add_argument("--cov-blend", default=None,
+                   help="CANDIDATE anchor-blend override 'W:DAYS' (e.g. 0.42:756): "
+                        "Sigma = W*method-cov + (1-W)*trailing-DAYS equal-weight "
+                        "cov, patched into factor_covariance AND "
+                        "instrument_covariance (config file never modified). "
+                        "Composes after --ewma-halflife.")
     p.add_argument("--sleeves", default=None,
                    help="comma-separated sleeve subset (default: all present); a "
                         "candidate that only changes instrument_covariance only "
@@ -309,6 +315,16 @@ def main(argv: list[str] | None = None) -> int:
                "instrument_covariance": {**(cfg.get("instrument_covariance") or {}),
                                          "ewma_halflife_days": hl}}
         print(f"CANDIDATE ewma_halflife_days override: {hl} "
+              "(factor + instrument covariance; config file untouched)")
+    if args.cov_blend:
+        w_s, days_s = str(args.cov_blend).split(":", 1)
+        blend = {"weight": float(w_s), "long_window_days": int(days_s)}
+        cfg = {**cfg,
+               "factor_covariance": {**(cfg.get("factor_covariance") or {}),
+                                     "anchor_blend": dict(blend)},
+               "instrument_covariance": {**(cfg.get("instrument_covariance") or {}),
+                                         "anchor_blend": dict(blend)}}
+        print(f"CANDIDATE anchor_blend override: {blend} "
               "(factor + instrument covariance; config file untouched)")
 
     if args.synthetic:

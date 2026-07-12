@@ -27,6 +27,12 @@ Candidate committed BEFORE any measurement:
   fix the baseline-health failure, so it must actually fix part of it.
   NO-ADOPT if any criterion fails. Zero n_trials impact (risk model).
 
+FIT RESULT (recipe executed as registered,
+`garch_persistence_crypto_20260712T124748Z.json`): α=0.0846, β=0.9000,
+persistence p̂=0.9846 on 3,843 days of the 5-id crypto core index (ann vol
+85.5%) ⇒ **w = 0.8465** (anchor weight 0.1535). This number IS the
+candidate; no adjustment permitted after seeing harness results.
+
 ## [2026-07-12] autoresearch | Kalshi maker-side execution (fee wall is 4x lower passive)
 - Rounds: 1 (fee schedule + LOB data availability + WS channel spec; kalshi.com
   and SSRN landing rate-limited/403 — secondaries cross-verified)
